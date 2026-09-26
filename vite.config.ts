@@ -1,6 +1,8 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { forgePlugin } from './server/forgePlugin.ts';
 
 // Archidekt's API only sends CORS headers for its own site, so the browser
 // can't call it directly. This middleware forwards /api/archidekt?id=123 to
@@ -39,6 +41,6 @@ const archidekt: Plugin = {
 };
 
 export default defineConfig({
-  plugins: [react(), archidekt],
+  plugins: [react(), archidekt, forgePlugin(fileURLToPath(new URL('.', import.meta.url)))],
   worker: { format: 'es' },
 });

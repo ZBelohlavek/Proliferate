@@ -12,7 +12,8 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["src", "tests", "api", "vite.config.ts"]
+  "include": ["src", "tests", "api", "server", "vite.config.ts"]
 }

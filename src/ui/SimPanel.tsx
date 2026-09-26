@@ -1,5 +1,6 @@
 import type { SimDeck } from '../engine/types';
 import type { SimController } from '../sim/controller';
+import type { ForgeController } from '../sim/forgeController';
 import { computeRatings, wilson, type DeckStats } from '../sim/stats';
 import type { Settings } from '../storage';
 import { RatingChart } from './RatingChart';
@@ -8,7 +9,8 @@ import { commanderNames, deckColor, pct } from './format';
 interface Props {
   decks: SimDeck[];
   activeDecks: SimDeck[];
-  controller: SimController;
+  quick: SimController;
+  forge: ForgeController;
   settings: Settings;
   onSettings: (s: Settings) => void;
   onStart: () => void;
@@ -16,10 +18,17 @@ interface Props {
   onReset: () => void;
 }
 
-export function SimPanel({ decks, activeDecks, controller, settings, onSettings, onStart, onStop, onReset }: Props) {
-  const stats = controller.stats;
-  const maxWorkers = Math.max(1, navigator.hardwareConcurrency || 4);
-  const canRun = activeDecks.length >= 2;
+export function SimPanel({ decks, activeDecks, quick, forge, settings, onSettings, onStart, onStop, onReset }: Props) {
+  const isForge = settings.engine === 'forge';
+  const stats = isForge ? forge.stats : quick.stats;
+  const running = isForge ? forge.running : quick.running;
+  const lastError = isForge ? forge.lastError : quick.lastError;
+  const forgeStatus = forge.status;
+  const forgeReady = !!forgeStatus?.available;
+  const cores = Math.max(1, navigator.hardwareConcurrency || 4);
+  const enoughDecks = activeDecks.length >= 2;
+  const canRun = enoughDecks && (!isForge || forgeReady);
+  const set = (patch: Partial<Settings>) => onSettings({ ...settings, ...patch });
 
   const ratings = computeRatings(stats);
   const rows = decks
@@ -27,45 +36,101 @@ export function SimPanel({ decks, activeDecks, controller, settings, onSettings,
     .map((d) => ({ deck: d, s: stats.decks[d.id], rating: ratings[d.id] ?? 1500 }))
     .sort((a, b) => b.rating - a.rating);
 
+  const rate = isForge
+    ? forgeStatus?.running ? (forgeStatus.gamesPerMinute || 0).toFixed(1) : '—'
+    : quick.running ? Math.round(quick.gamesPerSecond).toLocaleString() : '—';
+  const deckName = (id: string) => decks.find((d) => d.id === id)?.name ?? id;
+
   return (
     <>
       <section className="panel controls">
+        <div className="engine-switch">
+          <button className={!isForge ? 'active' : ''} onClick={() => set({ engine: 'quick' })} disabled={running}>
+            <strong>Quick</strong>
+            <span>Built-in simplified engine · thousands of games per second</span>
+          </button>
+          <button className={isForge ? 'active' : ''} onClick={() => set({ engine: 'forge' })} disabled={running}>
+            <strong>Accurate (Forge)</strong>
+            <span>Full Magic rules · about a game per minute per process</span>
+          </button>
+        </div>
+
         <div className="control-row">
           <label>
             Pod size
-            <select value={settings.podSize} onChange={(e) => onSettings({ ...settings, podSize: +e.target.value })} disabled={controller.running}>
+            <select value={settings.podSize} onChange={(e) => set({ podSize: +e.target.value })} disabled={running}>
               {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} players</option>)}
             </select>
           </label>
-          <label>
-            CPU threads
-            <select value={settings.workers} onChange={(e) => onSettings({ ...settings, workers: +e.target.value })} disabled={controller.running}>
-              {Array.from({ length: maxWorkers }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <label>
-            Turn limit
-            <select value={settings.maxRounds} onChange={(e) => onSettings({ ...settings, maxRounds: +e.target.value })} disabled={controller.running}>
-              {[15, 20, 25, 30, 40].map((n) => <option key={n} value={n}>{n} rounds</option>)}
-            </select>
-          </label>
+          {isForge ? (
+            <>
+              <label title="Each Forge process plays one game at a time and uses 1–2 GB of RAM.">
+                Forge processes
+                <select value={settings.forgeWorkers} onChange={(e) => set({ forgeWorkers: +e.target.value })} disabled={running}>
+                  {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label title="Games still running after this long are called a draw.">
+                Time limit
+                <select value={settings.forgeClockSeconds} onChange={(e) => set({ forgeClockSeconds: +e.target.value })} disabled={running}>
+                  {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min per game</option>)}
+                </select>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                CPU threads
+                <select value={settings.workers} onChange={(e) => set({ workers: +e.target.value })} disabled={running}>
+                  {Array.from({ length: cores }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label>
+                Turn limit
+                <select value={settings.maxRounds} onChange={(e) => set({ maxRounds: +e.target.value })} disabled={running}>
+                  {[15, 20, 25, 30, 40].map((n) => <option key={n} value={n}>{n} rounds</option>)}
+                </select>
+              </label>
+            </>
+          )}
           <div className="spacer" />
-          {controller.running ? (
-            <button className="primary stop" onClick={onStop}>Pause</button>
+          {running ? (
+            <button className="primary stop" onClick={onStop}>{isForge ? 'Stop' : 'Pause'}</button>
           ) : (
             <button className="primary" disabled={!canRun} onClick={onStart}>{stats.games ? 'Resume' : 'Start simulating'}</button>
           )}
-          <button onClick={() => confirm('Clear all simulation results?') && onReset()} disabled={!stats.games}>Reset results</button>
+          <button onClick={() => confirm(`Clear all ${isForge ? 'Forge' : 'quick'} results?`) && onReset()} disabled={!stats.games}>Reset results</button>
         </div>
+
         <div className="kpis">
           <div className="kpi"><span>{stats.games.toLocaleString()}</span>games played</div>
-          <div className="kpi"><span>{controller.running ? Math.round(controller.gamesPerSecond).toLocaleString() : '—'}</span>games / second</div>
-          <div className="kpi"><span>{activeDecks.length}</span>decks in rotation</div>
+          <div className="kpi"><span>{rate}</span>games per {isForge ? 'minute' : 'second'}</div>
+          <div className="kpi">
+            <span>{isForge ? (forgeStatus?.activeGames ?? 0) : activeDecks.length}</span>
+            {isForge ? 'games in progress' : 'decks in rotation'}
+          </div>
           <div className="kpi"><span>{rows.length ? (rows.reduce((s, r) => s + r.s.winRoundSum, 0) / Math.max(1, rows.reduce((s, r) => s + r.s.wins, 0))).toFixed(1) : '—'}</span>avg winning round</div>
         </div>
-        {!canRun && <p className="warn">Select at least two decks on the Decks tab.</p>}
-        {controller.lastError && <p className="err">{controller.lastError}</p>}
-        {settings.podSize > activeDecks.length && canRun && (
+
+        {isForge && !forgeStatus && (
+          <p className="warn">The Forge backend isn&apos;t reachable. Accurate mode needs the local server (<code>npm run dev</code>); it can&apos;t run on static hosting.</p>
+        )}
+        {isForge && forgeStatus && !forgeStatus.available && <p className="warn">{forgeStatus.problem}</p>}
+        {isForge && forgeReady && (
+          <p className="muted small">
+            Forge {forgeStatus!.version} at <code>{forgeStatus!.forgeDir}</code>. Every card is played by Forge&apos;s own card scripts and AI under the full rules.
+            Games keep running while this page is closed, as long as the dev server is up.
+          </p>
+        )}
+        {isForge && forge.warnings.map((w) => (
+          <p key={w.deckId} className="warn small">
+            {deckName(w.deckId)}: Forge doesn&apos;t know {w.missing.join(', ')}, so {w.missing.length === 1 ? 'it was' : 'they were'} left out of the deck.
+          </p>
+        ))}
+        {isForge && forgeStatus?.errors.map((e, i) => <p key={i} className="err small">{e}</p>)}
+        {!enoughDecks && <p className="warn">Select at least two decks on the Decks tab.</p>}
+        {lastError && <p className="err">{lastError}</p>}
+        {settings.podSize > activeDecks.length && enoughDecks && (
           <p className="muted small">Only {activeDecks.length} decks selected, so pods will have {activeDecks.length} players.</p>
         )}
       </section>

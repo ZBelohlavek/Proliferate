@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { SimDeck } from './engine/types';
 import { SimController } from './sim/controller';
+import { ForgeController } from './sim/forgeController';
 import { emptyStats } from './sim/stats';
 import {
   loadDecks, loadSelected, loadSettings, loadStats,
@@ -19,29 +20,40 @@ export default function App() {
   const [selected, setSelected] = useState<string[]>(() => loadSelected() ?? loadDecks().map((d) => d.id));
   const [settings, setSettings] = useState<Settings>(loadSettings);
 
-  // The controller lives for the whole session; React re-renders on its updates.
-  const controllerRef = useRef<SimController | null>(null);
-  if (!controllerRef.current) controllerRef.current = new SimController(loadStats());
-  const controller = controllerRef.current;
-  useSyncExternalStore(
-    (fn) => throttledSubscribe(controller, fn),
-    () => controller.stats.games + (controller.running ? 0.5 : 0) + (controller.lastError ? 0.25 : 0),
-  );
+  // Both controllers live for the whole session: the built-in engine (Web
+  // Workers) and Forge (local backend). React re-renders when either updates.
+  const quickRef = useRef<SimController | null>(null);
+  const forgeRef = useRef<ForgeController | null>(null);
+  if (!quickRef.current) quickRef.current = new SimController(loadStats('quick'));
+  if (!forgeRef.current) forgeRef.current = new ForgeController(loadStats('forge'), (stats) => saveStats('forge', stats));
+  const quick = quickRef.current;
+  const forge = forgeRef.current;
+  const [, rerender] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => {
+    const unsubscribers = [throttledSubscribe(quick, rerender), throttledSubscribe(forge, rerender)];
+    return () => unsubscribers.forEach((u) => u());
+  }, [quick, forge]);
+  useEffect(() => {
+    forge.startPolling();
+    return () => forge.stopPolling();
+  }, [forge]);
 
   useEffect(() => saveDecks(decks), [decks]);
   useEffect(() => saveSelected(selected), [selected]);
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => {
-    const id = setInterval(() => saveStats(controller.stats), 5000);
-    const flush = () => saveStats(controller.stats);
+    const id = setInterval(() => saveStats('quick', quick.stats), 5000);
+    const flush = () => saveStats('quick', quick.stats);
     window.addEventListener('beforeunload', flush);
     return () => {
       clearInterval(id);
       window.removeEventListener('beforeunload', flush);
     };
-  }, [controller]);
+  }, [quick]);
 
   const activeDecks = useMemo(() => decks.filter((d) => selected.includes(d.id)), [decks, selected]);
+  const engine = settings.engine;
+  const podSize = Math.min(settings.podSize, activeDecks.length);
 
   const addDeck = (deck: SimDeck) => {
     setDecks((ds) => [...ds.filter((d) => d.id !== deck.id), deck]);
@@ -53,17 +65,41 @@ export default function App() {
   };
   const toggleDeck = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
-  const startSim = () => controller.start(activeDecks, { ...settings, podSize: Math.min(settings.podSize, activeDecks.length) });
+  const startSim = () => {
+    if (engine === 'forge') {
+      void forge.start(activeDecks, { podSize, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds });
+    } else {
+      quick.start(activeDecks, { podSize, workers: settings.workers, maxRounds: settings.maxRounds });
+    }
+  };
+  const stopSim = () => (engine === 'forge' ? void forge.stop() : quick.stop());
   const resetStats = () => {
-    controller.stop();
-    controller.stats = emptyStats();
-    saveStats(controller.stats);
+    if (engine === 'forge') {
+      void forge.stop();
+      forge.stats = emptyStats();
+      forge.resetCursor();
+      saveStats('forge', forge.stats);
+    } else {
+      quick.stop();
+      quick.stats = emptyStats();
+      saveStats('quick', quick.stats);
+    }
+    rerender();
   };
 
-  // Stop simulating if the deck selection changes underneath a running sim.
+  // Stop simulating if the deck selection changes underneath a running sim
+  // (but not on first load, when a Forge run may already be in progress).
+  const firstSelection = useRef(true);
   useEffect(() => {
-    if (controller.running) controller.stop();
-  }, [selected, controller]);
+    if (firstSelection.current) {
+      firstSelection.current = false;
+      return;
+    }
+    if (quick.running) quick.stop();
+    if (forge.running) void forge.stop();
+  }, [selected, quick, forge]);
+
+  const anyRunning = quick.running || forge.running;
 
   return (
     <div className="app">
@@ -80,7 +116,7 @@ export default function App() {
             Decks <span className="badge">{decks.length}</span>
           </button>
           <button className={tab === 'simulate' ? 'active' : ''} onClick={() => setTab('simulate')}>
-            Simulate {controller.running && <span className="live-dot" />}
+            Simulate {anyRunning && <span className="live-dot" />}
           </button>
           <button className={tab === 'watch' ? 'active' : ''} onClick={() => setTab('watch')}>
             Watch a game
@@ -106,15 +142,16 @@ export default function App() {
           <SimPanel
             decks={decks}
             activeDecks={activeDecks}
-            controller={controller}
+            quick={quick}
+            forge={forge}
             settings={settings}
             onSettings={setSettings}
             onStart={startSim}
-            onStop={() => controller.stop()}
+            onStop={stopSim}
             onReset={resetStats}
           />
         )}
-        {tab === 'watch' && <SampleGame decks={activeDecks} allDecks={decks} controller={controller} settings={settings} />}
+        {tab === 'watch' && <SampleGame decks={activeDecks} allDecks={decks} quick={quick} forge={forge} settings={settings} />}
       </main>
 
       <footer>
@@ -126,7 +163,7 @@ export default function App() {
 }
 
 /** Re-render at most ~4 times a second while the simulation streams results. */
-function throttledSubscribe(controller: SimController, fn: () => void): () => void {
+function throttledSubscribe(controller: { subscribe: (fn: () => void) => () => void }, fn: () => void): () => void {
   let pending = false;
   const unsubscribe = controller.subscribe(() => {
     if (pending) return;
