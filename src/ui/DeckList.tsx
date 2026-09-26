@@ -8,9 +8,10 @@ interface Props {
   selected: string[];
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
+  onReport: (id: string) => void;
 }
 
-export function DeckList({ decks, selected, onToggle, onRemove }: Props) {
+export function DeckList({ decks, selected, onToggle, onRemove, onReport }: Props) {
   const [open, setOpen] = useState<string | null>(null);
 
   if (!decks.length) {
@@ -51,6 +52,7 @@ export function DeckList({ decks, selected, onToggle, onRemove }: Props) {
                 </div>
               </div>
               <div className="deck-actions">
+                <button onClick={() => onReport(deck.id)}>Report</button>
                 <button onClick={() => setOpen(open === deck.id ? null : deck.id)}>{open === deck.id ? 'Hide' : 'Cards'}</button>
                 <button className="danger" onClick={() => confirm(`Remove “${deck.name}”?`) && onRemove(deck.id)}>Remove</button>
               </div>

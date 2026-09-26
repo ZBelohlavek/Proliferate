@@ -82,6 +82,7 @@ export function parseForgeLog(lines: string[], seats: string[], commanderNames: 
   const lastAttacker: (number | null)[] = seats.map(() => null);
   const outcome: ({ kind: 'won' | 'lost' | 'drew'; because: string } | null)[] = seats.map(() => null);
   let draw = false;
+  const castNames = seats.map(() => new Set<string>());
   const summary: string[] = [];
   const pretty = (line: string) => line.replace(/Ai\((\d+)\)-[^\s.,)\]]+/g, (_, k) => `${deckNames[+k - 1] ?? `Player ${k}`} (P${k})`);
 
@@ -101,10 +102,13 @@ export function parseForgeLog(lines: string[], seats: string[], commanderNames: 
     } else if ((m = line.match(/^Add To Stack: Ai\((\d+)\)-\S* cast (.+?)(?: targeting .*)?$/))) {
       const seat = +m[1] - 1;
       if (commanderRound[seat] === null && commanderNames[seat]?.some((c) => c.split(' // ')[0] === m![2])) commanderRound[seat] = Math.max(round, 1);
+      castNames[seat]?.add(m[2]);
       summary.push(pretty(line.replace(/^Add To Stack: /, '')));
     } else if ((m = line.match(/^Add To Stack: Ai\((\d+)\)-\S* activated /))) {
       summary.push(pretty(line.replace(/^Add To Stack: /, '')));
     } else if (line.startsWith('Land: ')) {
+      const land = line.match(/^Land: Ai\((\d+)\)-\S* played (.+?) \(\d+\)$/);
+      if (land) castNames[+land[1] - 1]?.add(land[2]);
       summary.push(pretty(line.replace(/^Land: /, '').replace(/ \(\d+\)$/, '')));
     } else if ((m = line.match(/^Combat: Ai\((\d+)\)-.*? assigned .* to attack Ai\((\d+)\)-/))) {
       lastAttacker[+m[2] - 1] = +m[1] - 1;
@@ -172,7 +176,8 @@ export function parseForgeLog(lines: string[], seats: string[], commanderNames: 
   }
 
   return {
-    result: { seats, winner, placements, rounds: round, eliminations, commanderRound, mulligans },
+    // Forge doesn't log draws (hidden information), only what was cast or played.
+    result: { seats, winner, placements, rounds: round, eliminations, commanderRound, mulligans, cards: castNames.map((s) => ({ early: [], drawn: [], cast: [...s] })) },
     summary,
   };
 }

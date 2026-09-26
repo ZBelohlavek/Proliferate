@@ -217,6 +217,13 @@ export class ForgeRunner {
         pod.map((d) => d.input.name),
       );
       if (parsed) {
+        // Forge names cards by their front face; map back to the deck's own names.
+        parsed.result.cards?.forEach((seatCards, seat) => {
+          const byFront = new Map<string, string>();
+          const deck = pod[seat].input;
+          for (const name of [...deck.commanders, ...deck.cards.map((c) => c.name)]) byFront.set(name.split(' // ')[0], name);
+          seatCards.cast = seatCards.cast.map((n) => byFront.get(n) ?? byFront.get(n.split(' // ')[0]) ?? n);
+        });
         this.games.push({ result: parsed.result, summary: parsed.summary.slice(0, 4000), decks: pod.map((d) => d.input.id), durationMs: Date.now() - started });
         this.finishedAt.push(Date.now());
         // Only keep full play-by-play for recent games.

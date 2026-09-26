@@ -17,6 +17,28 @@ export interface DeckStats {
   mulligans: number;
   /** Sum over games of 1/podSize — the win rate you'd expect by pure chance. */
   expectedWins: number;
+  /**
+   * Finish score per game: 1 for winning, 0 for dying first, in between by
+   * place ((podSize - place) / (podSize - 1)). Sum and sum of squares.
+   * Optional because stats saved by older versions lack them.
+   */
+  scoreSum?: number;
+  scoreSqSum?: number;
+  /** Number of wins in each round (index = round). */
+  winRounds?: number[];
+}
+
+/** How a deck did in games where a given card was early in the library / drawn / cast. */
+export interface CardStat {
+  /** Optional: stats from before this field existed lack it. */
+  early?: number;
+  earlyScore?: number;
+  drawn: number;
+  drawnScore: number;
+  cast: number;
+  castScore: number;
+  /** Games where the card was both drawn and cast. */
+  drawnAndCast: number;
 }
 
 export interface HeadToHead {
@@ -31,6 +53,8 @@ export interface Stats {
   h2h: Record<string, Record<string, HeadToHead>>;
   /** Rating snapshots for the chart. */
   history: { games: number; ratings: Record<string, number> }[];
+  /** Per deck, per card name. Optional for stats saved by older versions. */
+  cards?: Record<string, Record<string, CardStat>>;
 }
 
 
@@ -39,7 +63,7 @@ function emptyReasons(): Record<LossReason, number> {
 }
 
 export function emptyStats(): Stats {
-  return { games: 0, decks: {}, h2h: {}, history: [] };
+  return { games: 0, decks: {}, h2h: {}, history: [], cards: {} };
 }
 
 function deckStats(stats: Stats, id: string): DeckStats {
@@ -74,6 +98,35 @@ export function addResult(stats: Stats, r: GameResult) {
     if (r.winner === seat) {
       d.wins++;
       d.winRoundSum += r.rounds;
+      d.winRounds ??= [];
+      d.winRounds[r.rounds] = (d.winRounds[r.rounds] ?? 0) + 1;
+    }
+    const score = finishScore(r.placements[seat], n);
+    d.scoreSum = (d.scoreSum ?? 0) + score;
+    d.scoreSqSum = (d.scoreSqSum ?? 0) + score * score;
+
+    const seen = r.cards?.[seat];
+    if (seen) {
+      stats.cards ??= {};
+      const byName = (stats.cards[id] ??= {});
+      const stat = (name: string) => (byName[name] ??= { drawn: 0, drawnScore: 0, cast: 0, castScore: 0, drawnAndCast: 0 });
+      for (const name of new Set(seen.early ?? [])) {
+        const c = stat(name);
+        c.early = (c.early ?? 0) + 1;
+        c.earlyScore = (c.earlyScore ?? 0) + score;
+      }
+      const drawn = new Set(seen.drawn);
+      for (const name of drawn) {
+        const c = stat(name);
+        c.drawn++;
+        c.drawnScore += score;
+      }
+      for (const name of seen.cast) {
+        const c = stat(name);
+        c.cast++;
+        c.castScore += score;
+        if (drawn.has(name)) c.drawnAndCast++;
+      }
     }
     if (r.winner === null && r.eliminations.some((e) => e.seat === seat && e.reason === 'timeout')) d.draws++;
     const cr = r.commanderRound[seat];
@@ -145,6 +198,11 @@ export function computeRatings(stats: Stats): Record<string, number> {
   const out: Record<string, number> = {};
   for (const id of ids) out[id] = 1500 + 400 * (Math.log10(strength[id]) - logMean);
   return out;
+}
+
+/** 1 = won, 0 = eliminated first. Ties (shared places) land in between. */
+export function finishScore(placement: number, podSize: number): number {
+  return podSize > 1 ? (podSize - placement) / (podSize - 1) : 1;
 }
 
 /** 95% Wilson score interval for a proportion. */

@@ -11,14 +11,21 @@ import { ImportPanel } from './ui/ImportPanel';
 import { DeckList } from './ui/DeckList';
 import { SimPanel } from './ui/SimPanel';
 import { SampleGame } from './ui/SampleGame';
+import { ComparePanel } from './ui/ComparePanel';
+import { DeckReport } from './ui/DeckReport';
 
-type Tab = 'decks' | 'simulate' | 'watch';
+type Tab = 'decks' | 'simulate' | 'compare' | 'report' | 'watch';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('decks');
   const [decks, setDecks] = useState<SimDeck[]>(loadDecks);
   const [selected, setSelected] = useState<string[]>(() => loadSelected() ?? loadDecks().map((d) => d.id));
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [reportDeck, setReportDeck] = useState<string | null>(null);
+  const openReport = (id: string) => {
+    setReportDeck(id);
+    setTab('report');
+  };
 
   // Both controllers live for the whole session: the built-in engine (Web
   // Workers) and Forge (local backend). React re-renders when either updates.
@@ -118,6 +125,12 @@ export default function App() {
           <button className={tab === 'simulate' ? 'active' : ''} onClick={() => setTab('simulate')}>
             Simulate {anyRunning && <span className="live-dot" />}
           </button>
+          <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}>
+            Compare
+          </button>
+          <button className={tab === 'report' ? 'active' : ''} onClick={() => setTab('report')}>
+            Deck report
+          </button>
           <button className={tab === 'watch' ? 'active' : ''} onClick={() => setTab('watch')}>
             Watch a game
           </button>
@@ -128,7 +141,7 @@ export default function App() {
         {tab === 'decks' && (
           <>
             <ImportPanel onImported={addDeck} />
-            <DeckList decks={decks} selected={selected} onToggle={toggleDeck} onRemove={removeDeck} />
+            <DeckList decks={decks} selected={selected} onToggle={toggleDeck} onRemove={removeDeck} onReport={openReport} />
             {decks.length >= 2 && (
               <div className="cta">
                 <button className="primary" onClick={() => setTab('simulate')}>
@@ -150,6 +163,12 @@ export default function App() {
             onStop={stopSim}
             onReset={resetStats}
           />
+        )}
+        {tab === 'compare' && (
+          <ComparePanel decks={decks} selected={selected} quickStats={quick.stats} forgeStats={forge.stats} onOpenReport={openReport} />
+        )}
+        {tab === 'report' && (
+          <DeckReport decks={decks} deckId={reportDeck} onDeck={setReportDeck} quickStats={quick.stats} forgeStats={forge.stats} />
         )}
         {tab === 'watch' && <SampleGame decks={activeDecks} allDecks={decks} quick={quick} forge={forge} settings={settings} />}
       </main>

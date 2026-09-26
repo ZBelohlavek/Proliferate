@@ -7,6 +7,8 @@ Upload your Commander decks from [Archidekt](https://archidekt.com), then let th
   - **Quick** — a built-in simplified engine that runs in the browser at a few thousand games per second.
   - **Accurate** — full Magic rules via [Forge](https://github.com/Card-Forge/forge), the open-source rules engine with ~33,000 scripted cards and its own AI. A few games per minute, run locally.
 - **Compare** with a leaderboard (strength rating, win rate with confidence intervals, average finishing place, how each deck kills), a head-to-head grid, and a rating-over-time chart.
+- **Compare** up to six decks side by side: bracket, results from both engines, mana curve, ramp/draw/removal counts, strongest and weakest cards.
+- **Deck report**: an estimated **Commander Bracket** with the reasons behind it, and **card performance** — which cards help or hurt the deck when they show up.
 - **Watch a game** turn by turn to see how the AI pilots your cards.
 - **Audit** how each card is interpreted, and which ones the simulator doesn't understand.
 
@@ -48,6 +50,22 @@ Other commands:
 
 Quick mode deploys as a static site. Accurate mode needs Forge and Java on the machine running the server, so it only works locally (or on a server you run yourself). The static site has one tiny endpoint: Archidekt's API doesn't allow requests from other websites, so deck imports go through `/api/archidekt?id=…`. In development, Vite serves that endpoint (see `vite.config.ts`). For hosting, `api/archidekt.js` is a ready-made [Vercel](https://vercel.com) function — importing the repo into Vercel deploys both the site and the endpoint with no configuration. On a host without serverless functions, text-decklist import still works (Scryfall allows browser requests).
 
+## Brackets
+
+The estimate follows the official [Commander Brackets](https://magic.wizards.com/en/formats/commander#brackets) (beta, February 2026 update):
+
+- **Game Changers** — the one hard rule: none in Brackets 1–2, up to three in Bracket 3, any number in 4–5.
+- **Barometers** — two-card infinite combos, chained extra turns and mass land denial push a deck up (fast two-card combos and land denial to 4+).
+- **Speed** — brackets are defined by how many turns a game should last (9+, 8+, 6+, 4+, any). With enough Accurate (Forge) wins, the deck's actual winning turns are checked against that.
+
+Game Changers, land denial, extra turns and combos come from [Commander Spellbook](https://commanderspellbook.com)'s bracket API, which tracks the current lists. Bracket 1 is about theme rather than power, so a Bracket 2 result reads "or 1 if theme-first".
+
+## Card performance
+
+For each game the quick engine records which cards the shuffle placed in the opening hand or the next 8 cards. That's pure luck, so comparing how the deck finishes in games where a card started early against games where it didn't is a fair test of the card — the same idea as 17lands' "improvement when drawn". (Comparing games where a card was merely *drawn* would be biased: decks that survive longer draw more, so every card looks good.) Each impact comes with a 95% margin of error, and a card is only called weak or strong when the whole range is on one side of zero. Cards held in hand most of the time are flagged separately, and cards the quick engine can't read aren't judged.
+
+Forge logs don't reveal draws, so the Forge view uses "games where the card was cast" — useful for ranking cards against each other, but biased upward.
+
 ## How the quick engine works
 
 The quick engine is **not** a full rules engine — use Accurate mode when that matters. Instead:
@@ -75,6 +93,7 @@ src/
   engine/     types, oracle-text classifier, game engine, seeded RNG
   import/     Archidekt + text/Scryfall importers
   sim/        Web Worker pool, Forge client, statistics
+  analysis/   bracket estimate, card performance, deck composition
   ui/         React components
 server/       Forge runner: deck conversion, process pool, log parser (Vite plugin)
 scripts/      setup-forge.mjs

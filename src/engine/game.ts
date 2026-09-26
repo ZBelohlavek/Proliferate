@@ -72,6 +72,10 @@ export interface Player {
   lastHitKind: LossReason;
   commanderRound: number | null;
   mulligans: number;
+  /** Names of cards drawn at random (opening hand and draws) and cast/played, for card stats. */
+  earlyNames: Set<string>;
+  drawnNames: Set<string>;
+  castNames: Set<string>;
   /** Per-game personality: >1 attacks more eagerly. */
   aggression: number;
 }
@@ -88,6 +92,8 @@ interface ManaSource {
 }
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
+/** Library cards (after the opening hand) counted as "early" for card stats: roughly the first 8 turns of draws. */
+const EARLY_LIBRARY_CARDS = 8;
 const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect']);
 
 export class Game {
@@ -127,6 +133,9 @@ export class Game {
       lastHitKind: 'combat',
       commanderRound: null,
       mulligans: 0,
+      earlyNames: new Set(),
+      drawnNames: new Set(),
+      castNames: new Set(),
       aggression: 0.8 + this.rng.next() * 0.5,
     }));
   }
@@ -171,6 +180,7 @@ export class Game {
       eliminations: this.eliminations,
       commanderRound: this.players.map((p) => p.commanderRound),
       mulligans: this.players.map((p) => p.mulligans),
+      cards: this.players.map((p) => ({ early: [...p.earlyNames], drawn: [...p.drawnNames], cast: [...p.castNames] })),
     };
   }
 
@@ -210,6 +220,8 @@ export class Game {
           p.library.push(worst);
         }
         p.mulligans = attempt;
+        for (const c of p.hand) p.drawnNames.add(c.name);
+        for (const c of [...p.hand, ...p.library.slice(0, EARLY_LIBRARY_CARDS)]) p.earlyNames.add(c.name);
         break;
       }
       p.library.push(...p.hand);
@@ -322,6 +334,7 @@ export class Game {
         return;
       }
       p.hand.push(c);
+      p.drawnNames.add(c.name);
     }
   }
 
@@ -370,6 +383,7 @@ export class Game {
     p.hand.splice(p.hand.indexOf(best.card), 1);
     this.putLand(p, best.card, best.info);
     p.landsPlayed++;
+    p.castNames.add(best.card.name);
   }
 
   private putLand(p: Player, card: SimCard, info: LandInfo, forceTapped = false) {
@@ -644,6 +658,7 @@ export class Game {
       if (p.commanderRound === null) p.commanderRound = this.round;
     } else {
       p.hand.splice(p.hand.indexOf(card), 1);
+      p.castNames.add(card.name);
     }
     this.say(`${this.name(p)} casts ${card.name}${x ? ` (X=${x})` : ''}${fromCommandZone ? ' from the command zone' : ''}.`);
 

@@ -159,4 +159,20 @@ export interface GameResult {
   commanderRound: (number | null)[];
   /** Mulligans taken per seat. */
   mulligans: number[];
+  /** Per-seat card usage, for per-card performance. */
+  cards?: SeatCards[];
+}
+
+export interface SeatCards {
+  /**
+   * The opening hand plus the next few library cards, fixed by the shuffle
+   * before any decisions. Whether a card is here is pure luck and doesn't
+   * depend on how long you survive, which makes it a fair basis for
+   * comparing games with and without the card. Empty for Forge games.
+   */
+  early: string[];
+  /** Cards actually drawn (opening hand and draws). Empty for Forge games. */
+  drawn: string[];
+  /** Cards cast or played. */
+  cast: string[];
 }
