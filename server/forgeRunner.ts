@@ -178,7 +178,9 @@ export class ForgeRunner {
 
   /** Least-played decks first (random tie-break), random seating. */
   private choosePod(): PreparedDeck[] {
-    const size = Math.min(this.settings!.podSize, this.prepared.length);
+    // podSize 0 = mixed: a random size from 2 to 6 each game.
+    const max = Math.min(6, this.prepared.length);
+    const size = this.settings!.podSize === 0 ? 2 + Math.floor(Math.random() * (max - 1)) : Math.min(this.settings!.podSize, this.prepared.length);
     const pod = [...this.prepared]
       .sort(() => Math.random() - 0.5)
       .sort((a, b) => (this.played.get(a.input.id) ?? 0) - (this.played.get(b.input.id) ?? 0))

@@ -109,6 +109,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                 {row('Win rate', (d) => sim(quickStats, quickRatings, d, 'win'))}
                 {row('Avg place', (d) => sim(quickStats, quickRatings, d, 'place'))}
                 {row('Games', (d) => sim(quickStats, quickRatings, d, 'games'))}
+                {row('By player count', (d) => <BySize stats={quickStats} deckId={d.id} />, 'Win rate vs a fair share at each pod size (run with Mixed pod sizes to fill this in)')}
 
                 {section('Accurate simulation (Forge)')}
                 {row('Rating', (d) => sim(forgeStats, forgeRatings, d, 'rating'))}
@@ -175,5 +176,25 @@ function CardList({ deck, stats, which }: { deck: SimDeck; stats: Stats; which: 
         </li>
       ))}
     </ul>
+  );
+}
+
+function BySize({ stats, deckId }: { stats: Stats; deckId: string }) {
+  const entries = Object.entries(stats.bySize ?? {})
+    .map(([size, s]) => ({ size, d: s.decks[deckId] }))
+    .filter((e) => e.d && e.d.games >= 20)
+    .sort((a, b) => +a.size - +b.size);
+  if (entries.length < 2) return <span className="muted small">Run with Mixed pod sizes</span>;
+  return (
+    <div className="small">
+      {entries.map(({ size, d }) => {
+        const ratio = d.wins / d.expectedWins;
+        return (
+          <div key={size}>
+            {size}p: <span className={ratio >= 1.1 ? 'good' : ratio <= 0.9 ? 'bad' : ''}>{ratio.toFixed(2)}×</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }

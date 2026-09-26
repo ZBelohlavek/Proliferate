@@ -4,6 +4,7 @@
 
 import { playGame } from '../engine/game';
 import type { GameResult, SimDeck } from '../engine/types';
+import { pickPodSize } from './pods';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 
 let running = false;
@@ -21,7 +22,7 @@ function post(msg: WorkerResponse) {
 function choosePod(): SimDeck[] {
   const shuffled = [...decks].sort(() => Math.random() - 0.5);
   shuffled.sort((a, b) => (played.get(a.id) ?? 0) - (played.get(b.id) ?? 0));
-  const pod = shuffled.slice(0, Math.min(podSize, decks.length));
+  const pod = shuffled.slice(0, pickPodSize(podSize, decks.length));
   for (const d of pod) played.set(d.id, (played.get(d.id) ?? 0) + 1);
   // Random seat order: going first matters.
   return pod.sort(() => Math.random() - 0.5);

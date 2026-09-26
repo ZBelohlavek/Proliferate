@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import type { SimController } from '../sim/controller';
 import type { ForgeController } from '../sim/forgeController';
-import { computeRatings, wilson, type DeckStats } from '../sim/stats';
+import { computeRatings, emptyStats, wilson, type DeckStats, type Stats } from '../sim/stats';
 import type { Settings } from '../storage';
 import { RatingChart } from './RatingChart';
 import { commanderNames, deckColor, pct } from './format';
@@ -20,7 +21,11 @@ interface Props {
 
 export function SimPanel({ decks, activeDecks, quick, forge, settings, onSettings, onStart, onStop, onReset }: Props) {
   const isForge = settings.engine === 'forge';
-  const stats = isForge ? forge.stats : quick.stats;
+  const allStats = isForge ? forge.stats : quick.stats;
+  // Optional filter: show only games with a given number of players.
+  const [sizeFilter, setSizeFilter] = useState('all');
+  const sizes = Object.keys(allStats.bySize ?? {}).filter((k) => allStats.bySize![k].games > 0).sort();
+  const stats: Stats = sizeFilter === 'all' ? allStats : allStats.bySize?.[sizeFilter] ?? emptyStats();
   const running = isForge ? forge.running : quick.running;
   const lastError = isForge ? forge.lastError : quick.lastError;
   const forgeStatus = forge.status;
@@ -60,6 +65,7 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
             Pod size
             <select value={settings.podSize} onChange={(e) => set({ podSize: +e.target.value })} disabled={running}>
               {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} players</option>)}
+              <option value={0}>Mixed (2–6 players)</option>
             </select>
           </label>
           {isForge ? (
@@ -97,13 +103,13 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
           {running ? (
             <button className="primary stop" onClick={onStop}>{isForge ? 'Stop' : 'Pause'}</button>
           ) : (
-            <button className="primary" disabled={!canRun} onClick={onStart}>{stats.games ? 'Resume' : 'Start simulating'}</button>
+            <button className="primary" disabled={!canRun} onClick={onStart}>{allStats.games ? 'Resume' : 'Start simulating'}</button>
           )}
-          <button onClick={() => confirm(`Clear all ${isForge ? 'Forge' : 'quick'} results?`) && onReset()} disabled={!stats.games}>Reset results</button>
+          <button onClick={() => confirm(`Clear all ${isForge ? 'Forge' : 'quick'} results?`) && onReset()} disabled={!allStats.games}>Reset results</button>
         </div>
 
         <div className="kpis">
-          <div className="kpi"><span>{stats.games.toLocaleString()}</span>games played</div>
+          <div className="kpi"><span>{allStats.games.toLocaleString()}</span>games played</div>
           <div className="kpi"><span>{rate}</span>games per {isForge ? 'minute' : 'second'}</div>
           <div className="kpi">
             <span>{isForge ? (forgeStatus?.activeGames ?? 0) : activeDecks.length}</span>
@@ -130,6 +136,9 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
         {isForge && forgeStatus?.errors.map((e, i) => <p key={i} className="err small">{e}</p>)}
         {!enoughDecks && <p className="warn">Select at least two decks on the Decks tab.</p>}
         {lastError && <p className="err">{lastError}</p>}
+        {settings.podSize === 0 && enoughDecks && (
+          <p className="muted small">Each game picks a random pod size from 2 to {Math.min(6, activeDecks.length)} players, so you can see how each deck does at every table size below.</p>
+        )}
         {settings.podSize > activeDecks.length && enoughDecks && (
           <p className="muted small">Only {activeDecks.length} decks selected, so pods will have {activeDecks.length} players.</p>
         )}
@@ -140,6 +149,14 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
           <section className="panel">
             <div className="panel-head">
               <h2>Leaderboard</h2>
+              {sizes.length > 1 && (
+                <div className="seg">
+                  <button className={sizeFilter === 'all' ? 'active' : ''} onClick={() => setSizeFilter('all')}>All pods</button>
+                  {sizes.map((k) => (
+                    <button key={k} className={sizeFilter === k ? 'active' : ''} onClick={() => setSizeFilter(k)}>{k} players</button>
+                  ))}
+                </div>
+              )}
               <span className="muted small">Each game counts as a match between every pair of decks in the pod, won by whoever outlasted the other. Rating is fitted to all of those matches (Elo scale: +100 ≈ 64% to outlast an average deck).</span>
             </div>
             <div className="table-wrap">
@@ -175,12 +192,22 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
             <HeadToHeadGrid decks={rows.map((r) => r.deck)} allDecks={decks} h2h={stats.h2h} />
           </section>
 
+          {sizes.length > 1 && (
+            <section className="panel">
+              <div className="panel-head">
+                <h2>By player count</h2>
+                <span className="muted small">Win rate compared with a fair share at each table size (1.00× = wins exactly 1 in N). Some decks shine 1v1, others in big pods.</span>
+              </div>
+              <PlayerCountGrid decks={decks} stats={allStats} sizes={sizes} />
+            </section>
+          )}
+
           <section className="panel">
             <div className="panel-head">
               <h2>Rating over time</h2>
               <span className="muted small">Lines flatten out as the ratings converge — once they stop moving, more games won't change the ranking.</span>
             </div>
-            <RatingChart history={stats.history} decks={rows.map((r) => r.deck)} allDecks={decks} />
+            <RatingChart history={allStats.history} decks={rows.map((r) => r.deck)} allDecks={decks} />
           </section>
         </>
       )}
@@ -269,4 +296,53 @@ function HeadToHeadGrid({ decks, allDecks, h2h }: { decks: SimDeck[]; allDecks: 
 
 function short(name: string): string {
   return name.length > 14 ? name.slice(0, 13) + '…' : name;
+}
+
+function PlayerCountGrid({ decks, stats, sizes }: { decks: SimDeck[]; stats: Stats; sizes: string[] }) {
+  const rows = decks.filter((d) => stats.decks[d.id]?.games);
+  return (
+    <div className="table-wrap">
+      <table className="h2h">
+        <thead>
+          <tr>
+            <th />
+            {sizes.map((k) => <th key={k}>{k} players</th>)}
+            <th>Best at</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((d) => {
+            let best: string | null = null;
+            let bestRatio = 0;
+            const cells = sizes.map((k) => {
+              const s = stats.bySize?.[k]?.decks[d.id];
+              if (!s || s.games < 20) return <td key={k} className="muted" title="Fewer than 20 games">{s ? '·' : ''}</td>;
+              const ratio = s.wins / s.expectedWins;
+              const [lo, hi] = wilson(s.wins, s.games);
+              const fair = s.expectedWins / s.games;
+              if (ratio > bestRatio) {
+                bestRatio = ratio;
+                best = k;
+              }
+              // Green above a fair share, red below; stronger colour = further from fair.
+              const strength = Math.min(1, Math.abs(ratio - 1));
+              const bg = ratio >= 1 ? `rgba(47, 158, 68, ${strength * 0.55})` : `rgba(224, 49, 49, ${strength * 0.55})`;
+              return (
+                <td key={k} style={{ background: bg }} title={`Won ${pct(s.wins / s.games)} of ${s.games} games (95%: ${pct(lo)}–${pct(hi)}); fair share ${pct(fair)}`}>
+                  {ratio.toFixed(2)}×
+                </td>
+              );
+            });
+            return (
+              <tr key={d.id}>
+                <th title={d.name}><span className="swatch" style={{ background: deckColor(decks, d.id) }} />{d.name.length > 26 ? d.name.slice(0, 25) + '…' : d.name}</th>
+                {cells}
+                <td>{best ? `${best} players` : '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }

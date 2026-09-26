@@ -55,6 +55,8 @@ export interface Stats {
   history: { games: number; ratings: Record<string, number> }[];
   /** Per deck, per card name. Optional for stats saved by older versions. */
   cards?: Record<string, Record<string, CardStat>>;
+  /** The same statistics split by number of players in the pod ("2".."6"). */
+  bySize?: Record<string, Stats>;
 }
 
 
@@ -85,9 +87,18 @@ function h2hCell(stats: Stats, a: string, b: string): HeadToHead {
   return stats.h2h[a][b];
 }
 
-export function addResult(stats: Stats, r: GameResult) {
+/**
+ * Fold one game into the stats. `top` is false for the per-pod-size copies,
+ * which skip the card tallies and chart history to stay small.
+ */
+export function addResult(stats: Stats, r: GameResult, top = true) {
   stats.games++;
   const n = r.seats.length;
+  if (top) {
+    stats.bySize ??= {};
+    const sub = (stats.bySize[n] ??= { games: 0, decks: {}, h2h: {}, history: [] });
+    addResult(sub, r, false);
+  }
 
   r.seats.forEach((id, seat) => {
     const d = deckStats(stats, id);
@@ -105,7 +116,7 @@ export function addResult(stats: Stats, r: GameResult) {
     d.scoreSum = (d.scoreSum ?? 0) + score;
     d.scoreSqSum = (d.scoreSqSum ?? 0) + score * score;
 
-    const seen = r.cards?.[seat];
+    const seen = top ? r.cards?.[seat] : undefined;
     if (seen) {
       stats.cards ??= {};
       const byName = (stats.cards[id] ??= {});
@@ -155,7 +166,7 @@ export function addResult(stats: Stats, r: GameResult) {
   }
 
   const every = stats.games < 500 ? 25 : stats.games < 5000 ? 100 : 500;
-  if (stats.games % every === 0) {
+  if (top && stats.games % every === 0) {
     const ratings = computeRatings(stats);
     for (const id of Object.keys(ratings)) ratings[id] = Math.round(ratings[id]);
     stats.history.push({ games: stats.games, ratings });

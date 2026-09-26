@@ -64,7 +64,7 @@ export function forgePlugin(projectRoot: string): Plugin {
           const clamp = (v: unknown, lo: number, hi: number, d: number) => Math.min(hi, Math.max(lo, Number(v) || d));
           return send(res, 200, r.start({
             decks: body.decks ?? [],
-            podSize: clamp(body.podSize, 2, 6, 4),
+            podSize: Number(body.podSize) === 0 ? 0 : clamp(body.podSize, 2, 6, 4), // 0 = mixed sizes
             workers: clamp(body.workers, 1, 32, 4),
             clockSeconds: clamp(body.clockSeconds, 60, 3600, 600),
             heapMb: clamp(body.heapMb, 1024, 16384, 3072),
