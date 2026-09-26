@@ -60,6 +60,13 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
           </button>
         </div>
 
+        {!isForge && (
+          <p className="small">
+            Pilot: <strong>{settings.usePlaystyle ? 'your playstyle' : 'default AI'}</strong>
+            <span className="muted"> — change it on the Playstyle tab.{allStats.games > 0 && ' Switching pilots mid-run mixes two play styles into the same results, so reset first for clean numbers.'}</span>
+          </p>
+        )}
+
         <div className="control-row">
           <label>
             Pod size

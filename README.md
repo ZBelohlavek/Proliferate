@@ -9,6 +9,8 @@ Upload your Commander decks from [Archidekt](https://archidekt.com), then let th
 - **Compare** with a leaderboard (strength rating, win rate with confidence intervals, average finishing place, how each deck kills), a head-to-head grid, and a rating-over-time chart.
 - **Compare** up to six decks side by side: bracket, results from both engines, mana curve, ramp/draw/removal counts, strongest and weakest cards.
 - **Deck report**: an estimated **Commander Bracket** with the reasons behind it, and **card performance** — which cards help or hurt the deck when they show up.
+- **Player count**: run with *Mixed* pod sizes (2–6) to see how each deck does at every table size — some decks shine 1v1, others in big pods.
+- **Playstyle**: answer quiz questions about frozen board states (biggest threat, who to attack, what to cast) and the quick engine learns to pilot decks your way.
 - **Watch a game** turn by turn to see how the AI pilots your cards.
 - **Audit** how each card is interpreted, and which ones the simulator doesn't understand.
 
@@ -66,6 +68,12 @@ For each game the quick engine records which cards the shuffle placed in the ope
 
 Forge logs don't reveal draws, so the Forge view uses "games where the card was cast" — useful for ranking cards against each other, but biased upward.
 
+## Playstyle learning
+
+The Playstyle tab plays one of your decks part-way into a real quick-engine game, freezes it at the start of your turn, and asks one of three questions: which opposing permanent is the biggest threat, which player you'd attack, or what you'd cast (including holding mana up). After each answer it shows what the default AI would have done.
+
+Every option is described by a few features — for attack targets, things like the player's life, whether they lead the table, whether you can kill them, and whether they attacked you last round — plus the default AI's own score for it. The AI picks options by a weighted sum of those features. Your answers are fitted with a conditional logit model (logistic regression over choice sets), regularised toward the default weights: with no answers the AI is unchanged, and each answer moves it toward your choices. The tab reports how often the default AI and your fitted style agree with you (scored leave-one-out), and summarises your biggest differences in plain English. Turn on **Pilot quick-engine games with my playstyle** to use it in simulations. Forge games use Forge's own AI and aren't affected.
+
 ## How the quick engine works
 
 The quick engine is **not** a full rules engine — use Accurate mode when that matters. Instead:
@@ -94,6 +102,7 @@ src/
   import/     Archidekt + text/Scryfall importers
   sim/        Web Worker pool, Forge client, statistics
   analysis/   bracket estimate, card performance, deck composition
+  ai/         playstyle learning (features, fitting) and quiz scenarios
   ui/         React components
 server/       Forge runner: deck conversion, process pool, log parser (Vite plugin)
 scripts/      setup-forge.mjs

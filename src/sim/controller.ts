@@ -1,6 +1,7 @@
 // Runs a pool of simulation workers and folds their results into Stats.
 
 import type { GameResult, SimDeck } from '../engine/types';
+import type { Weights } from '../ai/playstyle';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 import { addResult, type Stats } from './stats';
 
@@ -8,6 +9,8 @@ export interface RunSettings {
   podSize: number;
   workers: number;
   maxRounds: number;
+  /** Learned playstyle weights, or null for the default AI. */
+  playstyle: Weights | null;
 }
 
 export class SimController {
@@ -46,6 +49,7 @@ export class SimController {
         podSize: settings.podSize,
         maxRounds: settings.maxRounds,
         seed: (Date.now() + i * 7_919_111) >>> 0,
+        playstyle: settings.playstyle,
       };
       w.postMessage(msg);
       this.workers.push(w);
@@ -78,7 +82,7 @@ export class SimController {
   }
 
   /** Play one game with full logging in a throwaway worker. */
-  sample(decks: SimDeck[], maxRounds: number): Promise<{ result: GameResult; log: string[] }> {
+  sample(decks: SimDeck[], maxRounds: number, playstyle: Weights | null = null): Promise<{ result: GameResult; log: string[] }> {
     return new Promise((resolve, reject) => {
       const w = this.spawn();
       w.onmessage = (ev: MessageEvent<WorkerResponse>) => {
@@ -90,7 +94,7 @@ export class SimController {
         reject(new Error(e.message));
         w.terminate();
       };
-      const msg: WorkerRequest = { type: 'sample', decks, seed: (Math.random() * 2 ** 32) >>> 0, maxRounds };
+      const msg: WorkerRequest = { type: 'sample', decks, seed: (Math.random() * 2 ** 32) >>> 0, maxRounds, playstyle };
       w.postMessage(msg);
     });
   }

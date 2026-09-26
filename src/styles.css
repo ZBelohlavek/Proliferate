@@ -253,3 +253,52 @@ table.cards-table { width: 100%; border-collapse: collapse; font-size: 13px; mar
 .verdict { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .v-weak { color: var(--bad); } .v-dead { color: var(--warn); } .v-strong { color: var(--good); } .v-neutral, .v-unknown { color: var(--muted); font-weight: 400; }
 .warn-tag { background: var(--warn); margin-left: 6px; }
+
+/* ---------- Playstyle quiz ---------- */
+.toggle { display: inline-flex; gap: 8px; align-items: center; font-weight: 600; font-size: 13.5px; }
+.toggle input { width: 18px; height: 18px; }
+.traits { margin: 12px 0; padding-left: 0; list-style: none; display: grid; gap: 4px; font-size: 13.5px; }
+.quiz-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.quiz-controls select { width: auto; max-width: 320px; }
+.question { background: var(--panel-2); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.reveal { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.reveal.same { background: color-mix(in srgb, var(--good) 15%, transparent); }
+.reveal.diff { background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.reveal button { margin-left: auto; }
+.skip { margin-bottom: 10px; }
+.board { display: grid; gap: 10px; }
+.opponents { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.player-box { border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: var(--panel-2); }
+.player-box.you { border-color: var(--accent); }
+.player-box.pickable { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent); }
+.player-box.picked { box-shadow: 0 0 0 3px var(--accent); }
+.player-box.ai-pick { box-shadow: 0 0 0 3px var(--warn); }
+.pb-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.pb-life { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pb-meta { margin: 4px 0 6px; }
+.attack-btn { width: 100%; margin: 4px 0 8px; }
+.perms { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.perm { display: inline-flex; gap: 5px; align-items: baseline; flex-wrap: wrap; padding: 4px 8px; font-weight: 500; font-size: 12.5px; background: var(--panel); text-align: left; }
+.perm:disabled { opacity: 1; cursor: default; }
+.perm.tapped { font-style: italic; opacity: 0.75; }
+.perm.pickable { border-color: var(--accent); cursor: pointer; }
+.perm.pickable:hover { background: color-mix(in srgb, var(--accent) 15%, var(--panel)); }
+.perm.picked { background: var(--accent); color: var(--accent-text); }
+.perm.ai-pick { outline: 2px solid var(--warn); }
+.perm-count { font-weight: 800; }
+.perm-name { font-weight: 600; }
+.perm-pt { font-weight: 800; font-variant-numeric: tabular-nums; }
+.perm-kw { color: var(--muted); font-size: 11px; }
+.perm.picked .perm-kw { color: inherit; }
+.hand { border: 1px dashed var(--border); border-radius: 10px; padding: 10px; }
+.hand-title { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+.hand-cards { display: flex; flex-wrap: wrap; gap: 6px; }
+.hand-card { display: grid; gap: 2px; min-width: 120px; max-width: 190px; text-align: left; padding: 6px 9px; background: var(--panel); font-weight: 500; }
+.hand-card:disabled { opacity: 0.55; cursor: default; }
+.hand-card.pickable { opacity: 1; border-color: var(--accent); }
+.hand-card.picked { background: var(--accent); color: var(--accent-text); opacity: 1; }
+.hand-card.ai-pick { outline: 2px solid var(--warn); opacity: 1; }
+.hand-card.pass { font-style: italic; }
+.hc-name { font-weight: 600; font-size: 12.5px; }
+.hc-cost { font-size: 11px; color: var(--muted); }
+.hand-card.picked .hc-cost { color: inherit; }

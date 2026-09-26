@@ -13,8 +13,10 @@ import { SimPanel } from './ui/SimPanel';
 import { SampleGame } from './ui/SampleGame';
 import { ComparePanel } from './ui/ComparePanel';
 import { DeckReport } from './ui/DeckReport';
+import { PlaystylePanel } from './ui/PlaystylePanel';
+import { fitWeights, loadAnswers, saveAnswers, type Answer } from './ai/playstyle';
 
-type Tab = 'decks' | 'simulate' | 'compare' | 'report' | 'watch';
+type Tab = 'decks' | 'simulate' | 'compare' | 'report' | 'playstyle' | 'watch';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('decks');
@@ -22,6 +24,10 @@ export default function App() {
   const [selected, setSelected] = useState<string[]>(() => loadSelected() ?? loadDecks().map((d) => d.id));
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [reportDeck, setReportDeck] = useState<string | null>(null);
+  const [answers, setAnswers] = useState<Answer[]>(loadAnswers);
+  useEffect(() => saveAnswers(answers), [answers]);
+  // Learned weights, or null for the default AI.
+  const playstyle = useMemo(() => (settings.usePlaystyle && answers.length ? fitWeights(answers) : null), [settings.usePlaystyle, answers]);
   const openReport = (id: string) => {
     setReportDeck(id);
     setTab('report');
@@ -77,7 +83,7 @@ export default function App() {
     if (engine === 'forge') {
       void forge.start(activeDecks, { podSize, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds });
     } else {
-      quick.start(activeDecks, { podSize, workers: settings.workers, maxRounds: settings.maxRounds });
+      quick.start(activeDecks, { podSize, workers: settings.workers, maxRounds: settings.maxRounds, playstyle });
     }
   };
   const stopSim = () => (engine === 'forge' ? void forge.stop() : quick.stop());
@@ -132,6 +138,9 @@ export default function App() {
           <button className={tab === 'report' ? 'active' : ''} onClick={() => setTab('report')}>
             Deck report
           </button>
+          <button className={tab === 'playstyle' ? 'active' : ''} onClick={() => setTab('playstyle')}>
+            Playstyle
+          </button>
           <button className={tab === 'watch' ? 'active' : ''} onClick={() => setTab('watch')}>
             Watch a game
           </button>
@@ -171,7 +180,18 @@ export default function App() {
         {tab === 'report' && (
           <DeckReport decks={decks} deckId={reportDeck} onDeck={setReportDeck} quickStats={quick.stats} forgeStats={forge.stats} />
         )}
-        {tab === 'watch' && <SampleGame decks={activeDecks} allDecks={decks} quick={quick} forge={forge} settings={settings} />}
+        {tab === 'playstyle' && (
+          <PlaystylePanel
+            decks={decks}
+            selected={selected}
+            answers={answers}
+            onAnswer={(a) => setAnswers((xs) => [...xs, a])}
+            onResetAnswers={() => setAnswers([])}
+            usePlaystyle={settings.usePlaystyle}
+            onUsePlaystyle={(on) => setSettings((s) => ({ ...s, usePlaystyle: on }))}
+          />
+        )}
+        {tab === 'watch' && <SampleGame decks={activeDecks} allDecks={decks} quick={quick} forge={forge} settings={settings} playstyle={playstyle} />}
       </main>
 
       <footer>

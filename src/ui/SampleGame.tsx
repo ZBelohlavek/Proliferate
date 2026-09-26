@@ -4,6 +4,7 @@ import type { SimController } from '../sim/controller';
 import type { ForgeController } from '../sim/forgeController';
 import type { Settings } from '../storage';
 import { pickPodSize } from '../sim/pods';
+import type { Weights } from '../ai/playstyle';
 import { deckColor } from './format';
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
   quick: SimController;
   forge: ForgeController;
   settings: Settings;
+  playstyle: Weights | null;
 }
 
 interface ShownGame {
@@ -26,7 +28,7 @@ interface ShownGame {
  * Shows a play-by-play of one game: a fresh quick-engine game, or the most
  * recent game Forge finished (Forge games take too long to play on demand).
  */
-export function SampleGame({ decks, allDecks, quick, forge, settings }: Props) {
+export function SampleGame({ decks, allDecks, quick, forge, settings, playstyle }: Props) {
   const [game, setGame] = useState<ShownGame | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export function SampleGame({ decks, allDecks, quick, forge, settings }: Props) {
         setGame({ result: g.result, log: g.summary, seats: g.decks, note: `Forge game #${g.index + 1}, took ${(g.durationMs / 1000).toFixed(0)}s to simulate.` });
       } else {
         const pod = [...decks].sort(() => Math.random() - 0.5).slice(0, pickPodSize(settings.podSize, decks.length));
-        const { result, log } = await quick.sample(pod, settings.maxRounds);
+        const { result, log } = await quick.sample(pod, settings.maxRounds, playstyle);
         setGame({ result, log, seats: pod.map((d) => d.id) });
       }
     } catch (err) {

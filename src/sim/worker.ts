@@ -5,6 +5,7 @@
 import { playGame } from '../engine/game';
 import type { GameResult, SimDeck } from '../engine/types';
 import { pickPodSize } from './pods';
+import type { Weights } from '../ai/playstyle';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 
 let running = false;
@@ -12,6 +13,7 @@ let decks: SimDeck[] = [];
 let podSize = 4;
 let maxRounds = 25;
 let seed = 1;
+let playstyle: Weights | null = null;
 const played = new Map<string, number>();
 
 function post(msg: WorkerResponse) {
@@ -34,7 +36,7 @@ function loop() {
   const start = performance.now();
   while (performance.now() - start < 200) {
     try {
-      batch.push(playGame(choosePod(), seed++, { maxRounds }).result);
+      batch.push(playGame(choosePod(), seed++, { maxRounds, playstyle }).result);
     } catch (err) {
       post({ type: 'error', message: `Game with seed ${seed - 1} crashed: ${String(err)}` });
     }
@@ -51,6 +53,7 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
       podSize = msg.podSize;
       maxRounds = msg.maxRounds;
       seed = msg.seed;
+      playstyle = msg.playstyle;
       played.clear();
       if (!running) {
         running = true;
@@ -61,7 +64,7 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
       running = false;
       break;
     case 'sample': {
-      const { result, log } = playGame(msg.decks, msg.seed, { log: true, maxRounds: msg.maxRounds });
+      const { result, log } = playGame(msg.decks, msg.seed, { log: true, maxRounds: msg.maxRounds, playstyle: msg.playstyle });
       post({ type: 'sample', result, log: log ?? [] });
       break;
     }

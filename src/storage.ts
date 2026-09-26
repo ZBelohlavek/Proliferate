@@ -49,6 +49,8 @@ export interface Settings {
   forgeWorkers: number;
   /** Forge calls a game a draw after this many seconds. */
   forgeClockSeconds: number;
+  /** Pilot quick-engine games with the weights learned in the Playstyle quiz. */
+  usePlaystyle: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -59,6 +61,7 @@ const DEFAULT_SETTINGS: Settings = {
   // Forge's AI is multithreaded; beyond ~1 process per 4 threads games just slow each other down.
   forgeWorkers: Math.max(1, Math.min(8, Math.floor((navigator.hardwareConcurrency || 4) / 4))),
   forgeClockSeconds: 600,
+  usePlaystyle: false,
 };
 
 // Merge with defaults so settings saved by older versions gain the new fields.
