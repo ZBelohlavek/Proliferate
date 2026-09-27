@@ -28,6 +28,10 @@ export interface ForgeStartOptions {
   clockSeconds: number;
   heapMb: number;
   pairing: Pairing;
+  /** Stop launching games after this time (ms since epoch), or null. */
+  stopAt: number | null;
+  /** Stop after this many games in this run, or null. */
+  maxGames: number | null;
 }
 
 interface PreparedDeck {
@@ -60,6 +64,10 @@ export class ForgeRunner {
   private games: StoredGame[] = [];
   private errors: string[] = [];
   private finishedAt: number[] = [];
+  /** Games launched / finished in the current run, for run limits. */
+  private launchedThisRun = 0;
+  private finishedThisRun = 0;
+  private finishedByLimit = false;
 
   constructor(projectRoot: string) {
     const candidates = [process.env.FORGE_DIR, join(projectRoot, 'forge'), join(projectRoot, '..', 'forge')].filter(Boolean) as string[];
@@ -119,6 +127,15 @@ export class ForgeRunner {
       running: this.running,
       activeGames: this.procs.size,
       completed: this.games.length,
+      run: this.settings
+        ? {
+            stopAt: this.settings.stopAt,
+            maxGames: this.settings.maxGames,
+            games: this.finishedThisRun,
+            finishing: !this.running && this.procs.size > 0,
+            finishedByLimit: this.finishedByLimit,
+          }
+        : null,
       gamesPerMinute: this.finishedAt.length > 1 ? (this.finishedAt.length / windowMs) * 60_000 : 0,
       errors: this.errors.slice(-5),
     };
@@ -142,6 +159,9 @@ export class ForgeRunner {
     this.settings = opts;
     this.played.clear();
     this.running = true;
+    this.launchedThisRun = 0;
+    this.finishedThisRun = 0;
+    this.finishedByLimit = false;
     for (let i = 0; i < opts.workers; i++) this.launch();
     return { warnings };
   }
@@ -183,8 +203,23 @@ export class ForgeRunner {
     return choosePod(this.prepared, (d) => d.input.id, this.played, this.settings!.podSize, this.settings!.pairing);
   }
 
+  /** True once the run's time or game budget is used up. */
+  private limitReached(): boolean {
+    const s = this.settings!;
+    if (s.stopAt !== null && Date.now() >= s.stopAt) return true;
+    if (s.maxGames !== null && this.launchedThisRun >= s.maxGames) return true;
+    return false;
+  }
+
   private launch() {
     if (!this.running || !this.settings) return;
+    if (this.limitReached()) {
+      // Out of budget: start nothing new, but let games already running finish and count.
+      this.running = false;
+      this.finishedByLimit = true;
+      return;
+    }
+    this.launchedThisRun++;
     const pod = this.choosePod();
     const { clockSeconds, heapMb } = this.settings;
     const args = [
@@ -222,6 +257,7 @@ export class ForgeRunner {
         });
         this.games.push({ result: parsed.result, summary: parsed.summary.slice(0, 4000), decks: pod.map((d) => d.input.id), durationMs: Date.now() - started });
         this.finishedAt.push(Date.now());
+        this.finishedThisRun++;
         // Only keep full play-by-play for recent games.
         if (this.games.length > 20) this.games[this.games.length - 21].summary = [];
       } else {

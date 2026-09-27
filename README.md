@@ -9,6 +9,7 @@ Upload your Commander decks from [Archidekt](https://archidekt.com), then let th
 - **Compare** with a leaderboard (strength rating, win rate with confidence intervals, average finishing place, how each deck kills), a head-to-head grid, and a rating-over-time chart.
 - **Compare** up to six decks side by side: bracket, results from both engines, mana curve, ramp/draw/removal counts, strongest and weakest cards.
 - **Deck report**: an estimated **Commander Bracket** with the reasons behind it, and **card performance** — which cards help or hurt the deck when they show up.
+- **Run for as long as you like**: until you stop, for a set time (15 minutes to 24 hours), or for a set number of games — separate from Forge's per-game "draw after" limit. Forge runs keep to the limit even with the browser closed.
 - **Player count**: run with *Mixed* pod sizes (2–6) to see how each deck does at every table size — some decks shine 1v1, others in big pods.
 - **Playstyle**: answer quiz questions about frozen board states (biggest threat, who to attack, what to cast) and the quick engine learns to pilot decks your way.
 - **Watch a game** turn by turn to see how the AI pilots your cards.

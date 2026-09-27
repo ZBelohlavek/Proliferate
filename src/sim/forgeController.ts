@@ -15,11 +15,15 @@ export interface ForgeStatus {
   completed: number;
   gamesPerMinute: number;
   errors: string[];
+  /** The current (or last) run's limit and progress. */
+  run: { stopAt: number | null; maxGames: number | null; games: number; finishing: boolean; finishedByLimit: boolean } | null;
 }
 
 export interface ForgeSettings {
   podSize: number;
   pairing: 'balanced' | 'random';
+  stopAt: number | null;
+  maxGames: number | null;
   workers: number;
   clockSeconds: number;
 }

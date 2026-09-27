@@ -63,6 +63,10 @@ export interface Settings {
   archidektUsername: string;
   /** How decks are drawn for each game (see Pairing in sim/pods.ts). */
   pairing: 'balanced' | 'random';
+  /** How long a simulation run lasts (not the per-game time limit). */
+  runMode: 'untilStopped' | 'time' | 'games';
+  runMinutes: number;
+  runGames: number;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -76,6 +80,9 @@ const DEFAULT_SETTINGS: Settings = {
   usePlaystyle: false,
   archidektUsername: '',
   pairing: 'balanced',
+  runMode: 'untilStopped',
+  runMinutes: 60,
+  runGames: 10000,
 };
 
 // Merge with defaults so settings saved by older versions gain the new fields.

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { formatCountdown } from '../sim/limit';
 import type { SimDeck } from '../engine/types';
 import type { SimController } from '../sim/controller';
 import type { ForgeController } from '../sim/forgeController';
@@ -48,6 +49,24 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
     : quick.running ? Math.round(quick.gamesPerSecond).toLocaleString() : '—';
   const deckName = (id: string) => decks.find((d) => d.id === id)?.name ?? id;
 
+  // Progress of the current run against its "Run for" limit.
+  const run = isForge
+    ? forgeStatus?.run ?? null
+    : { stopAt: quick.limit.stopAt, maxGames: quick.limit.maxGames, games: quick.gamesThisRun, finishing: false, finishedByLimit: quick.finishedByLimit };
+  const finishing = !!run?.finishing;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!(running || finishing) || !run?.stopAt) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running, finishing, run?.stopAt]);
+  let runStatus: string | null = null;
+  if (running && run?.stopAt) runStatus = `${isForge ? "Stops starting new games" : "Stops"} in ${formatCountdown(run.stopAt - now)} · ${run.games.toLocaleString()} games this run`;
+  else if (running && run?.maxGames) runStatus = `${run.games.toLocaleString()} / ${run.maxGames.toLocaleString()} games this run`;
+  else if (running) runStatus = `Running until you stop it · ${run?.games.toLocaleString() ?? 0} games this run`;
+  else if (finishing) runStatus = `Limit reached — finishing the ${forgeStatus?.activeGames ?? 0} game${forgeStatus?.activeGames === 1 ? '' : 's'} already in progress…`;
+  else if (run?.finishedByLimit) runStatus = `Run finished: reached its ${run.maxGames ? `${run.maxGames.toLocaleString()}-game` : 'time'} limit after ${run.games.toLocaleString()} games.`;
+
   return (
     <>
       <section className="panel controls">
@@ -92,8 +111,8 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
                   {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </label>
-              <label title="Games still running after this long are called a draw.">
-                Time limit
+              <label title="A single game still running after this long is called a draw. This is per game, not for the whole run.">
+                Draw after
                 <select value={settings.forgeClockSeconds} onChange={(e) => set({ forgeClockSeconds: +e.target.value })} disabled={running}>
                   {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min per game</option>)}
                 </select>
@@ -115,14 +134,48 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
               </label>
             </>
           )}
+          <label title="How long to keep simulating. Separate from the per-game time limit.">
+            Run for
+            <select
+              value={settings.runMode === 'time' ? `t${settings.runMinutes}` : settings.runMode}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v.startsWith('t')) set({ runMode: 'time', runMinutes: +v.slice(1) });
+                else set({ runMode: v as Settings['runMode'] });
+              }}
+              disabled={running || finishing}
+            >
+              <option value="untilStopped">Until I stop</option>
+              {[15, 30, 60, 120, 240, 480, 720, 1440].map((m) => (
+                <option key={m} value={`t${m}`}>{m < 60 ? `${m} minutes` : `${m / 60} hour${m === 60 ? '' : 's'}`}</option>
+              ))}
+              <option value="games">A number of games…</option>
+            </select>
+          </label>
+          {settings.runMode === 'games' && (
+            <label>
+              Games
+              <input
+                type="number"
+                min={1}
+                step={isForge ? 10 : 1000}
+                value={settings.runGames}
+                onChange={(e) => set({ runGames: Math.max(1, Math.floor(+e.target.value || 1)) })}
+                disabled={running || finishing}
+                style={{ width: 110 }}
+              />
+            </label>
+          )}
           <div className="spacer" />
           {running ? (
             <button className="primary stop" onClick={onStop}>{isForge ? 'Stop' : 'Pause'}</button>
           ) : (
-            <button className="primary" disabled={!canRun} onClick={onStart}>{allStats.games ? 'Resume' : 'Start simulating'}</button>
+            <button className="primary" disabled={!canRun || finishing} onClick={onStart}>{allStats.games ? 'Resume' : 'Start simulating'}</button>
           )}
           <button onClick={() => confirm(`Clear all ${isForge ? 'Forge' : 'quick'} results?`) && onReset()} disabled={!allStats.games}>Reset results</button>
         </div>
+
+        {runStatus && <p className={`run-status ${running || finishing ? 'live' : ''}`}>{runStatus}</p>}
 
         <div className="kpis">
           <div className="kpi"><span>{allStats.games.toLocaleString()}</span>games played</div>

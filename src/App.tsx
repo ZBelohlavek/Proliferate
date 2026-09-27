@@ -84,10 +84,15 @@ export default function App() {
     setSelected((s) => (on ? [...new Set([...s, ...ids])] : s.filter((x) => !ids.includes(x))));
 
   const startSim = () => {
+    // How long this run lasts — separate from Forge's per-game time limit.
+    const limit = {
+      stopAt: settings.runMode === 'time' ? Date.now() + settings.runMinutes * 60_000 : null,
+      maxGames: settings.runMode === 'games' ? settings.runGames : null,
+    };
     if (engine === 'forge') {
-      void forge.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds });
+      void forge.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds, ...limit });
     } else {
-      quick.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.workers, maxRounds: settings.maxRounds, playstyle });
+      quick.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.workers, maxRounds: settings.maxRounds, playstyle, limit });
     }
   };
   const stopSim = () => (engine === 'forge' ? void forge.stop() : quick.stop());
