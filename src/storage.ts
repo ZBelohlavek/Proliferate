@@ -61,6 +61,8 @@ export interface Settings {
   usePlaystyle: boolean;
   /** Linked Archidekt account, for "Find my decks". */
   archidektUsername: string;
+  /** How decks are drawn for each game (see Pairing in sim/pods.ts). */
+  pairing: 'balanced' | 'random';
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -73,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
   forgeClockSeconds: 600,
   usePlaystyle: false,
   archidektUsername: '',
+  pairing: 'balanced',
 };
 
 // Merge with defaults so settings saved by older versions gain the new fields.

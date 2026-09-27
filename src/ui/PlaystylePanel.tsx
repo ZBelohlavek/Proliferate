@@ -3,6 +3,7 @@ import type { SimDeck } from '../engine/types';
 import { agreement, describe, fitWeights, type Answer, type DecisionKind } from '../ai/playstyle';
 import { makeScenario, type PermView, type PlayerView, type Scenario } from '../ai/scenario';
 import { pct } from './format';
+import { shuffle } from '../sim/pods';
 
 interface Props {
   decks: SimDeck[];
@@ -33,7 +34,7 @@ export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnsw
   function next() {
     if (!deck) return;
     // In "mix" mode, ask about whatever you've answered least.
-    const order = kindMode === 'mix' ? [...KINDS].sort((a, b) => counts[KINDS.indexOf(a)] - counts[KINDS.indexOf(b)] || Math.random() - 0.5) : [kindMode];
+    const order = kindMode === 'mix' ? shuffle([...KINDS]).sort((a, b) => counts[KINDS.indexOf(a)] - counts[KINDS.indexOf(b)]) : [kindMode];
     for (const kind of order) {
       const s = makeScenario(decks, deck, kind);
       if (s) {

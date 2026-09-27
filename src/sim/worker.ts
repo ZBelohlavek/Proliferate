@@ -4,7 +4,7 @@
 
 import { playGame } from '../engine/game';
 import type { GameResult, SimDeck } from '../engine/types';
-import { pickPodSize } from './pods';
+import { choosePod as pickPod, type Pairing } from './pods';
 import type { Weights } from '../ai/playstyle';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 
@@ -14,20 +14,16 @@ let podSize = 4;
 let maxRounds = 25;
 let seed = 1;
 let playstyle: Weights | null = null;
+let pairing: Pairing = 'balanced';
 const played = new Map<string, number>();
 
 function post(msg: WorkerResponse) {
   (self as unknown as Worker).postMessage(msg);
 }
 
-/** Pick the decks that have played least so far, so sample sizes stay even. */
+/** A fresh random pod for every game (see choosePod in pods.ts). */
 function choosePod(): SimDeck[] {
-  const shuffled = [...decks].sort(() => Math.random() - 0.5);
-  shuffled.sort((a, b) => (played.get(a.id) ?? 0) - (played.get(b.id) ?? 0));
-  const pod = shuffled.slice(0, pickPodSize(podSize, decks.length));
-  for (const d of pod) played.set(d.id, (played.get(d.id) ?? 0) + 1);
-  // Random seat order: going first matters.
-  return pod.sort(() => Math.random() - 0.5);
+  return pickPod(decks, (d) => d.id, played, podSize, pairing);
 }
 
 function loop() {
@@ -54,6 +50,7 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
       maxRounds = msg.maxRounds;
       seed = msg.seed;
       playstyle = msg.playstyle;
+      pairing = msg.pairing;
       played.clear();
       if (!running) {
         running = true;

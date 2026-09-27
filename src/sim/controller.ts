@@ -2,6 +2,7 @@
 
 import type { GameResult, SimDeck } from '../engine/types';
 import type { Weights } from '../ai/playstyle';
+import type { Pairing } from './pods';
 import type { WorkerRequest, WorkerResponse } from './protocol';
 import { addResult, type Stats } from './stats';
 
@@ -11,6 +12,7 @@ export interface RunSettings {
   maxRounds: number;
   /** Learned playstyle weights, or null for the default AI. */
   playstyle: Weights | null;
+  pairing: Pairing;
 }
 
 export class SimController {
@@ -50,6 +52,7 @@ export class SimController {
         maxRounds: settings.maxRounds,
         seed: (Date.now() + i * 7_919_111) >>> 0,
         playstyle: settings.playstyle,
+        pairing: settings.pairing,
       };
       w.postMessage(msg);
       this.workers.push(w);

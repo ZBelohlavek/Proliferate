@@ -66,6 +66,7 @@ export function forgePlugin(projectRoot: string): Plugin {
           return send(res, 200, r.start({
             decks: body.decks ?? [],
             podSize: sanitizePodSize(body.podSize), // 2–6, or 0 = mixed sizes
+            pairing: body.pairing === 'random' ? 'random' : 'balanced',
             workers: clamp(body.workers, 1, 32, 4),
             clockSeconds: clamp(body.clockSeconds, 60, 3600, 600),
             heapMb: clamp(body.heapMb, 1024, 16384, 3072),

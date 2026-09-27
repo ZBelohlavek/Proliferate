@@ -3,7 +3,7 @@ import type { GameResult, SimDeck } from '../engine/types';
 import type { SimController } from '../sim/controller';
 import type { ForgeController } from '../sim/forgeController';
 import type { Settings } from '../storage';
-import { pickPodSize } from '../sim/pods';
+import { pickPodSize, shuffle } from '../sim/pods';
 import type { Weights } from '../ai/playstyle';
 import { deckColor } from './format';
 
@@ -43,7 +43,7 @@ export function SampleGame({ decks, allDecks, quick, forge, settings, playstyle 
         const g = await forge.latestGame();
         setGame({ result: g.result, log: g.summary, seats: g.decks, note: `Forge game #${g.index + 1}, took ${(g.durationMs / 1000).toFixed(0)}s to simulate.` });
       } else {
-        const pod = [...decks].sort(() => Math.random() - 0.5).slice(0, pickPodSize(settings.podSize, decks.length));
+        const pod = shuffle([...decks]).slice(0, pickPodSize(settings.podSize, decks.length));
         const { result, log } = await quick.sample(pod, settings.maxRounds, playstyle);
         setGame({ result, log, seats: pod.map((d) => d.id) });
       }

@@ -2,9 +2,10 @@
 
 import type { GameResult, SimDeck } from '../engine/types';
 import type { Weights } from '../ai/playstyle';
+import type { Pairing } from './pods';
 
 export type WorkerRequest =
-  | { type: 'start'; decks: SimDeck[]; podSize: number; maxRounds: number; seed: number; playstyle: Weights | null }
+  | { type: 'start'; decks: SimDeck[]; podSize: number; maxRounds: number; seed: number; playstyle: Weights | null; pairing: Pairing }
   | { type: 'stop' }
   | { type: 'sample'; decks: SimDeck[]; seed: number; maxRounds: number; playstyle: Weights | null };
 

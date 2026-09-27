@@ -11,7 +11,7 @@ import { join, resolve } from 'node:path';
 import type { GameResult } from '../src/engine/types.ts';
 import { ForgeCardDb } from './forgeCards.ts';
 import { parseForgeLog } from './forgeLog.ts';
-import { pickPodSize } from '../src/sim/pods.ts';
+import { choosePod, type Pairing } from '../src/sim/pods.ts';
 
 export interface ForgeDeckInput {
   id: string;
@@ -27,6 +27,7 @@ export interface ForgeStartOptions {
   /** Forge's per-game clock; a game still running after this is a draw. */
   clockSeconds: number;
   heapMb: number;
+  pairing: Pairing;
 }
 
 interface PreparedDeck {
@@ -177,15 +178,9 @@ export class ForgeRunner {
     return { input: d, file, forgeName };
   }
 
-  /** Least-played decks first (random tie-break), random seating. */
+  /** A fresh random pod for every game (see choosePod in src/sim/pods.ts). */
   private choosePod(): PreparedDeck[] {
-    const size = pickPodSize(this.settings!.podSize, this.prepared.length);
-    const pod = [...this.prepared]
-      .sort(() => Math.random() - 0.5)
-      .sort((a, b) => (this.played.get(a.input.id) ?? 0) - (this.played.get(b.input.id) ?? 0))
-      .slice(0, size);
-    for (const d of pod) this.played.set(d.input.id, (this.played.get(d.input.id) ?? 0) + 1);
-    return pod.sort(() => Math.random() - 0.5);
+    return choosePod(this.prepared, (d) => d.input.id, this.played, this.settings!.podSize, this.settings!.pairing);
   }
 
   private launch() {

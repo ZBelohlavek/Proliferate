@@ -4,6 +4,7 @@
 import { Game, type Perm, type Player } from '../engine/game';
 import type { SimDeck } from '../engine/types';
 import { argmax, defaultWeights, type DecisionKind } from './playstyle';
+import { shuffle } from '../sim/pods';
 
 export interface PermView {
   name: string;
@@ -83,8 +84,8 @@ export function makeScenario(pool: SimDeck[], yours: SimDeck, kind: DecisionKind
   if (!others.length) return null;
 
   for (let attempt = 0; attempt < 60; attempt++) {
-    const opponents = [...others].sort(() => Math.random() - 0.5).slice(0, Math.max(1, Math.min(podSize - 1, others.length)));
-    const pod = [yours, ...opponents].sort(() => Math.random() - 0.5);
+    const opponents = shuffle([...others]).slice(0, Math.max(1, Math.min(podSize - 1, others.length)));
+    const pod = shuffle([yours, ...opponents]);
     const seat = pod.indexOf(yours);
     const round = 3 + Math.floor(Math.random() * 6);
     const game = new Game(pod, (Math.random() * 2 ** 32) >>> 0);

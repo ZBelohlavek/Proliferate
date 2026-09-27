@@ -19,6 +19,7 @@ export interface ForgeStatus {
 
 export interface ForgeSettings {
   podSize: number;
+  pairing: 'balanced' | 'random';
   workers: number;
   clockSeconds: number;
 }

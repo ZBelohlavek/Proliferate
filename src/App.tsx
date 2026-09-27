@@ -81,9 +81,9 @@ export default function App() {
 
   const startSim = () => {
     if (engine === 'forge') {
-      void forge.start(activeDecks, { podSize, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds });
+      void forge.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.forgeWorkers, clockSeconds: settings.forgeClockSeconds });
     } else {
-      quick.start(activeDecks, { podSize, workers: settings.workers, maxRounds: settings.maxRounds, playstyle });
+      quick.start(activeDecks, { podSize, pairing: settings.pairing, workers: settings.workers, maxRounds: settings.maxRounds, playstyle });
     }
   };
   const stopSim = () => (engine === 'forge' ? void forge.stop() : quick.stop());

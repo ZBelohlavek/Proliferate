@@ -75,6 +75,13 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
               <option value={0}>Mixed (2–6 players)</option>
             </select>
           </label>
+          <label title="Every game draws a new random set of decks and seats them in random order. Balanced also makes sure every deck plays about the same number of games.">
+            Matchups
+            <select value={settings.pairing} onChange={(e) => set({ pairing: e.target.value as Settings['pairing'] })} disabled={running}>
+              <option value="balanced">Random, balanced</option>
+              <option value="random">Fully random</option>
+            </select>
+          </label>
           {isForge ? (
             <>
               <label title="Each Forge process plays one game at a time and uses 1–2 GB of RAM.">
@@ -145,7 +152,8 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
         {lastError && <p className="err">{lastError}</p>}
         {settings.podSize !== 0 && activeDecks.length > settings.podSize && (
           <p className="muted small">
-            Every game seats {settings.podSize} of your {activeDecks.length} selected decks; they rotate so each deck plays about the same number of games.
+            Every game seats a random {settings.podSize} of your {activeDecks.length} selected decks in random order
+            {settings.pairing === 'balanced' ? ', favouring decks that have played fewer games so everyone plays about equally.' : ' — a completely fresh draw each game.'}
           </p>
         )}
         {settings.podSize === 0 && enoughDecks && (
