@@ -4,6 +4,7 @@ import { agreement, describe, fitWeights, type Answer, type DecisionKind } from 
 import { makeScenario, type PermView, type PlayerView, type Scenario } from '../ai/scenario';
 import { pct } from './format';
 import { shuffle } from '../sim/pods';
+import { Help } from './Help';
 
 interface Props {
   decks: SimDeck[];
@@ -78,6 +79,7 @@ export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnsw
           <div className="kpi" title="How often each AI picks what you picked. Your style is scored on answers it wasn't trained on (leave-one-out).">
             <span>{agree ? `${pct(agree.defaultAi, 0)} → ${pct(agree.yourStyle, 0)}` : '—'}</span>
             agreement: default AI → your style
+            <Help>How often each AI would have made the same choice you did. The first number is the built-in AI; the second is the AI trained on your answers, tested only on answers it wasn&apos;t trained on, so it can&apos;t just memorise them. It rises as you answer more questions.</Help>
           </div>
         </div>
         {traits.length > 0 ? (

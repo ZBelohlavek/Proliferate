@@ -3,6 +3,7 @@ import type { SimDeck } from '../engine/types';
 import { deckSize, modeledFraction } from '../import/deck';
 import { ColorPips, commanderNames, deckColor, pct } from './format';
 import { matchSearch } from '../import/search';
+import { Help } from './Help';
 
 interface Props {
   decks: SimDeck[];
@@ -38,7 +39,11 @@ export function DeckList({ decks, selected, forgeMissing, onToggle, onSetSelecte
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Your decks</h2>
+        <h2>Your decks <Help>
+          Tick a deck to include it in simulations.
+          <br /><br /><strong>% modeled</strong> — share of the deck&apos;s non-land cards the quick engine understands. Anything it can&apos;t read plays as a blank card, so lower numbers make quick results less reliable (click <strong>Cards</strong> to see how each card is read). Forge doesn&apos;t have this problem.
+          <br /><br /><strong>Forge ✓</strong> — Forge (the full-rules engine) knows every card. <strong>Forge: N unknown</strong> — those cards would be left out of Forge games.
+        </Help></h2>
         <span className="muted">{selected.length} of {decks.length} selected — checked decks take part in simulations.</span>
       </div>
       <div className="deck-toolbar">

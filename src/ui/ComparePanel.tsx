@@ -6,6 +6,7 @@ import { composition, type Composition } from '../analysis/composition';
 import { computeRatings, type Stats } from '../sim/stats';
 import { ColorPips, commanderNames, deckColor, pct } from './format';
 import { useBracketData } from './useBracket';
+import { Help, SpellbookTag } from './Help';
 
 interface Props {
   decks: SimDeck[];
@@ -32,7 +33,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
 
   const row = (label: ReactNode, cell: (d: SimDeck) => ReactNode, hint?: string) => (
     <tr>
-      <th title={hint}>{label}</th>
+      <th>{label}{hint && <Help>{hint}</Help>}</th>
       {columns.map((d) => <td key={d.id}>{cell(d)}</td>)}
     </tr>
   );
@@ -99,11 +100,11 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                       <div className="small">{est.reasons[0]?.text}</div>
                     </div>
                   );
-                }, 'Estimated from the official Commander Brackets rules. Open the full report for every reason.')}
-                {row('Your Archidekt bracket', (d) => d.archidektBracket ?? <span className="muted">—</span>, 'The bracket set on the deck in Archidekt (re-import older decks to fill this in)')}
-                {row('Game Changers', (d) => states[d.id]?.data ? states[d.id].data!.gameChangers.length : '…')}
-                {row('Two-card combos', (d) => states[d.id]?.data ? states[d.id].data!.combos.filter((c) => c.twoCard).length : '…')}
-                {row('Commander Spellbook', (d) => states[d.id]?.data?.spellbookTag ?? '…', "Commander Spellbook's own power label (their scale, not the official brackets)")}
+                }, 'Estimated from the official Commander Brackets: 1 Exhibition, 2 Core, 3 Upgraded, 4 Optimized, 5 cEDH. The one hard rule is the number of Game Changers; combos, extra turns, land destruction and speed also count. Open the full report for every reason.')}
+                {row('Your Archidekt bracket', (d) => d.archidektBracket ?? <span className="muted">—</span>, 'The bracket you set on the deck in Archidekt, for comparison with the estimate. Re-import older decks to fill this in.')}
+                {row('Game Changers', (d) => states[d.id]?.data ? states[d.id].data!.gameChangers.length : '…', "Cards on Wizards' official Game Changers list (53 especially powerful cards like Rhystic Study and Demonic Tutor). 0 = Brackets 1–2 possible, 1–3 = Bracket 3, 4+ = Bracket 4+.")}
+                {row('Two-card combos', (d) => states[d.id]?.data ? states[d.id].data!.combos.filter((c) => c.twoCard).length : '…', 'Known two-card game-ending combos in the deck, from Commander Spellbook. These aren\'t expected in Brackets 1–2.')}
+                {row('Commander Spellbook', (d) => (states[d.id]?.data ? <SpellbookTag tag={states[d.id].data!.spellbookTag} /> : '…'), "Commander Spellbook's own power label, based on the strongest combo in the deck. Their scale, not the official brackets — click the ⓘ next to a label to see what it means.")}
 
                 {section('Quick simulation')}
                 {row('Rating', (d) => sim(quickStats, quickRatings, d, 'rating'))}
@@ -121,7 +122,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                 })}
                 {row('Games', (d) => sim(forgeStats, forgeRatings, d, 'games'))}
 
-                {section('Deck makeup (approximate)')}
+                {section('Deck makeup (approximate — counted from how the quick engine reads each card)')}
                 {row('Lands', comp('lands'))}
                 {row('Avg mana value', comp('avgManaValue', 2), 'Average mana value of non-land cards')}
                 {row('Mana curve', (d) => <Curve curve={comps.get(d.id)!.curve} color={deckColor(decks, d.id)} />)}
@@ -135,7 +136,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                 {row('Protection', comp('protection'))}
                 {row('Understood by quick engine', (d) => pct(comps.get(d.id)!.modeled, 0))}
 
-                {section('Cards (quick engine)')}
+                {section('Cards (quick engine) — impact on finish score; open the full report for details')}
                 {row('Weakest', (d) => <CardList deck={d} stats={quickStats} which="weak" />)}
                 {row('Strongest', (d) => <CardList deck={d} stats={quickStats} which="strong" />)}
                 {row('', (d) => <button onClick={() => onOpenReport(d.id)}>Full report →</button>)}

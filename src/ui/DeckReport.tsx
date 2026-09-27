@@ -5,6 +5,7 @@ import { cardReport, type Basis, type CardPerformance, type Verdict } from '../a
 import type { Stats } from '../sim/stats';
 import { commanderNames, pct } from './format';
 import { useBracketData } from './useBracket';
+import { Help, SpellbookTag } from './Help';
 
 interface Props {
   decks: SimDeck[];
@@ -53,7 +54,17 @@ function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Bracket</h2>
+        <h2>Bracket <Help>
+                  The official Commander Brackets (Wizards of the Coast, beta) describe what kind of game to expect:
+                  <span className="help-list">
+                    <span><strong>1 Exhibition</strong> — theme over power; games last 9+ turns</span>
+                    <span><strong>2 Core</strong> — unoptimized, like most precons; 8+ turns</span>
+                    <span><strong>3 Upgraded</strong> — strong synergy, up to 3 Game Changers; 6+ turns</span>
+                    <span><strong>4 Optimized</strong> — fast and lethal, any Game Changers; 4+ turns</span>
+                    <span><strong>5 cEDH</strong> — tuned for the competitive metagame; any turn</span>
+                  </span>
+                  <br />The only hard rule is the number of <strong>Game Changers</strong> (a list of 53 especially powerful cards). Combos, extra turns and land destruction push a deck up, and so does winning fast in Forge games.
+                </Help></h2>
         <button onClick={() => refresh(deck)} disabled={st?.loading}>Re-check</button>
       </div>
       {!st || st.loading ? <p className="muted">Checking Game Changers and combos with Commander Spellbook…</p> : null}
@@ -68,11 +79,14 @@ function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats
                 <strong>{BRACKET_NAMES[est.bracket]}</strong>{est.note && <span className="muted"> — {est.note}</span>}
                 <div className="muted small">
                   Estimated from the official <a href="https://magic.wizards.com/en/formats/commander#brackets" target="_blank" rel="noreferrer">Commander Brackets</a> rules.
-                  Commander Spellbook&apos;s own label for this deck: <strong>{st.data.spellbookTag}</strong>.
+                  Commander Spellbook&apos;s own label for this deck: <SpellbookTag tag={st.data.spellbookTag} />.
                   {deck.archidektBracket ? <> You marked it <strong>Bracket {deck.archidektBracket}</strong> on Archidekt{deck.archidektBracket !== est.bracket ? ' — see the reasons below for the difference' : ''}.</> : null}
                 </div>
               </div>
             </div>
+            <p className="muted small">
+              Why: <Help>Each line below is one thing found in the deck. The badge is the <strong>lowest bracket that finding allows</strong> — &quot;4+&quot; means it only fits Bracket 4 or higher, &quot;ok&quot; means it fits any bracket. The deck&apos;s bracket is the highest of these.</Help>
+            </p>
             <ul className="reasons">
               {est.reasons.map((r, i) => (
                 <li key={i}><span className={`floor b${Math.max(r.floor, 1)}`}>{r.floor > 1 ? `${r.floor}+` : 'ok'}</span>{r.text}</li>
@@ -146,7 +160,14 @@ function CardSection({ deck, quickStats, forgeStats }: { deck: SimDeck; quickSta
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Card performance</h2>
+        <h2>Card performance <Help>
+          How much better or worse the deck does in games where each card shows up.
+          <br /><br /><strong>Impact</strong> — difference in finish score (100 = won, 0 = first out) between games with and without the card early. +5 means the deck does 5 points better with it. The bar is the 95% range: the true effect is very probably inside it.
+          <br /><br /><strong>Weak / Strong</strong> — the whole range is below / above zero, so the effect is real, not luck.
+          <br /><strong>No clear effect</strong> — the range crosses zero; could be either.
+          <br /><strong>Often stuck in hand</strong> — cast in under 35% of the games it was drawn: often uncastable or not worth casting.
+          <br /><strong>Not enough data</strong> — needs more games.
+        </Help></h2>
         <div className="seg">
           <button className={basis === 'early' ? 'active' : ''} onClick={() => setBasis('early')}>Quick engine</button>
           <button className={basis === 'cast' ? 'active' : ''} onClick={() => setBasis('cast')}>Forge (when cast)</button>

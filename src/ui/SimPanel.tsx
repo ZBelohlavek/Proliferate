@@ -6,6 +6,7 @@ import type { ForgeController } from '../sim/forgeController';
 import { computeRatings, emptyStats, wilson, type DeckStats, type Stats } from '../sim/stats';
 import type { Settings } from '../storage';
 import { RatingChart } from './RatingChart';
+import { Help } from './Help';
 import { commanderNames, deckColor, pct } from './format';
 
 interface Props {
@@ -92,15 +93,15 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
         )}
 
         <div className="control-row">
-          <label title="How many decks sit at each game. Selected decks rotate through the seats, so every deck plays about equally. Never more than 6.">
-            Players per game
+          <label>
+            <span>Players per game <Help>How many decks sit at each game — 4 is standard Commander. If you select more decks than this, each game uses a random subset. Never more than 6. <strong>Mixed</strong> varies the table size from 2 to 6 so you can compare decks at every size.</Help></span>
             <select value={settings.podSize} onChange={(e) => set({ podSize: +e.target.value })} disabled={running}>
               {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} players{n === 4 ? ' (standard)' : ''}</option>)}
               <option value={0}>Mixed (2–6 players)</option>
             </select>
           </label>
-          <label title="Every game draws a new random set of decks and seats them in random order. Balanced also makes sure every deck plays about the same number of games.">
-            Matchups
+          <label>
+            <span>Matchups <Help>Every game draws a new random set of decks and seats them in a random order. <strong>Balanced</strong> picks decks that have played fewer games first (ties at random), so every deck gets the same number of games. <strong>Fully random</strong> is a completely fresh draw each game. Both give every pairing an equal chance.</Help></span>
             <select value={settings.pairing} onChange={(e) => set({ pairing: e.target.value as Settings['pairing'] })} disabled={running}>
               <option value="balanced">Random, balanced</option>
               <option value="random">Fully random</option>
@@ -108,37 +109,37 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
           </label>
           {isForge ? (
             <>
-              <label title="Each Forge process plays one game at a time and uses 1–2 GB of RAM.">
-                Forge processes
+              <label>
+                <span>Forge processes <Help>How many Forge games run at once. Each uses several CPU cores and about 1 GB of RAM. Beyond roughly one process per 4 CPU threads, games just slow each other down.</Help></span>
                 <select value={settings.forgeWorkers} onChange={(e) => set({ forgeWorkers: +e.target.value })} disabled={running}>
                   {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </label>
-              <label title="A single game still running after this long is called a draw. This is per game, not for the whole run.">
-                Draw after
+              <label>
+                <span>Draw after <Help>If a single Forge game is still going after this long, it&apos;s called a draw. This is <strong>real time</strong> — how long your computer spends on that one game (Magic has no in-game clock). A 4-player game usually takes 35 seconds to 4 minutes, so this mostly catches stuck games like board stalls or loops. Running many Forge processes at once makes each game slower, so watch the draw count. It&apos;s per game — not how long the whole simulation runs (that&apos;s &quot;Run for&quot;).</Help></span>
                 <select value={settings.forgeClockSeconds} onChange={(e) => set({ forgeClockSeconds: +e.target.value })} disabled={running}>
-                  {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min per game</option>)}
+                  {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min real time</option>)}
                 </select>
               </label>
             </>
           ) : (
             <>
               <label>
-                CPU threads
+                <span>CPU threads <Help>How many browser workers play games in parallel. More threads = more games per second, until your CPU is full.</Help></span>
                 <select value={settings.workers} onChange={(e) => set({ workers: +e.target.value })} disabled={running}>
                   {Array.from({ length: cores }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </label>
               <label>
-                Turn limit
+                <span>Turn limit <Help>A quick-engine game still going after this many rounds is called a draw. A round is one turn for every player.</Help></span>
                 <select value={settings.maxRounds} onChange={(e) => set({ maxRounds: +e.target.value })} disabled={running}>
                   {[15, 20, 25, 30, 40].map((n) => <option key={n} value={n}>{n} rounds</option>)}
                 </select>
               </label>
             </>
           )}
-          <label title="How long to keep simulating. Separate from the per-game time limit.">
-            Run for
+          <label>
+            <span>Run for <Help>How long to keep simulating: until you press Stop, for a set time, or for a set number of games. Separate from the per-game limit. Forge runs keep to this even with the browser closed; when time is up, games already in progress finish and still count.</Help></span>
             <select
               value={settings.runMode === 'time' ? `t${settings.runMinutes}` : settings.runMode}
               onChange={(e) => {
@@ -181,17 +182,20 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
         {runStatus && <p className={`run-status ${running || finishing ? 'live' : ''}`}>{runStatus}</p>}
 
         <div className="kpis">
-          <div className="kpi"><span>{allStats.games.toLocaleString()}</span>games played</div>
-          <div className="kpi" title="Games that ended with a winner. The rest were draws: they hit the turn limit (quick) or the 'Draw after' time limit (Forge).">
+          <div className="kpi">
             <span>{finished.toLocaleString()}</span>
-            games finished{allStats.games > 0 && <> · {draws.toLocaleString()} draw{draws === 1 ? '' : 's'} ({pct(draws / allStats.games, 1)})</>}
+            games finished{draws > 0 && <> · {draws.toLocaleString()} draw{draws === 1 ? '' : 's'} ({pct(draws / allStats.games, 1)})</>}
+            <Help>Games that ended with a winner. <strong>Draws</strong> are games cut off by the turn limit (quick engine) or the &quot;Draw after&quot; time (Forge). Lots of draws means the limit is ending games early — raise it to see how decks actually close games out.</Help>
           </div>
           <div className="kpi"><span>{rate}</span>games per {isForge ? 'minute' : 'second'}</div>
           <div className="kpi">
             <span>{isForge ? (forgeStatus?.activeGames ?? 0) : activeDecks.length}</span>
             {isForge ? 'games in progress' : 'decks in rotation'}
           </div>
-          <div className="kpi"><span>{rows.length ? (rows.reduce((s, r) => s + r.s.winRoundSum, 0) / Math.max(1, rows.reduce((s, r) => s + r.s.wins, 0))).toFixed(1) : '—'}</span>avg winning round</div>
+          <div className="kpi">
+            <span>{rows.length ? (rows.reduce((s, r) => s + r.s.winRoundSum, 0) / Math.max(1, rows.reduce((s, r) => s + r.s.wins, 0))).toFixed(1) : '—'}</span>
+            avg winning round <Help>On average, the round in which games were won. A round is one turn for every player, so round 8 ≈ each player&apos;s 8th turn.</Help>
+          </div>
         </div>
 
         {isForge && !forgeStatus && (
@@ -251,7 +255,7 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
                   ))}
                 </div>
               )}
-              <span className="muted small">Each game counts as a match between every pair of decks in the pod, won by whoever outlasted the other. Rating is fitted to all of those matches (Elo scale: +100 ≈ 64% to outlast an average deck).</span>
+              <span className="muted small">Ranked by rating <Help>Each game counts as a mini-match between every pair of decks at the table, won by whoever lasted longer. The <strong>rating</strong> is fitted to all of those matches on an Elo-like scale: 1500 is average, and a deck rated 100 points higher outlasts an average deck about 64% of the time. It uses every game, not just wins, so it settles faster than win rate.</Help> — click any ⓘ to see what a column means.</span>
             </div>
             <div className="table-wrap">
               <table className="leaderboard">
@@ -259,14 +263,19 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
                   <tr>
                     <th>#</th>
                     <th>Deck</th>
-                    <th title="Strength rating fitted to all head-to-head results (Elo scale)">Rating</th>
-                    <th title="Win rate with 95% confidence interval">Win rate</th>
-                    <th title="Win rate relative to a fair share (1 / pod size)">vs. fair</th>
-                    <th title="Average finishing position (1 = won)">Avg place</th>
-                    <th title="Average round in which this deck won">Win round</th>
-                    <th title="How this deck eliminated opponents">Kills by</th>
-                    <th title="Average round the commander was first cast">Cmdr out</th>
-                    <th>Games</th>
+                    <th>Rating <Help>Strength on an Elo-like scale: 1500 is average; +100 means outlasting an average deck about 64% of the time. Fitted to every pairing in every game.</Help></th>
+                    <th>Win rate <Help>
+                      Share of games this deck won. The little bar under it shows how sure we are:
+                      <br /><br /><strong>Shaded band</strong> — the 95% range: the deck&apos;s true win rate is very probably in here. It shrinks as more games are played.
+                      <br /><strong>Coloured tick</strong> — the win rate measured so far.
+                      <br /><strong>Thin grey line</strong> — a fair share (1 ÷ number of players, e.g. 25% in 4-player games). Band entirely right of it = genuinely better than average; entirely left = genuinely worse.
+                    </Help></th>
+                    <th>vs. fair <Help>Win rate divided by a fair share. 1.00× = wins exactly as often as chance would give it; 1.50× = 50% more often; 0.50× = half as often. Green above 1.1×, red below 0.9×.</Help></th>
+                    <th>Avg place <Help>Average finishing position: 1 = won, 4 = first out in a 4-player game. Lower is better. Unlike win rate, this also rewards coming second.</Help></th>
+                    <th>Win round <Help>Average round in which this deck won its games. Lower = faster deck.</Help></th>
+                    <th>Kills by <Help>How this deck knocked opponents out. <span className="legend-swatch k-combat" /> combat damage, <span className="legend-swatch k-commander" /> 21 commander damage, <span className="legend-swatch k-noncombat" /> drain / burn / other life loss. Hover the bar for exact numbers.</Help></th>
+                    <th>Cmdr out <Help>Average round in which the commander was first cast.</Help></th>
+                    <th>Games <Help>Games this deck has played. More games = narrower win-rate band = more trustworthy numbers.</Help></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -276,11 +285,24 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
                 </tbody>
               </table>
             </div>
+            <div className="legend-row">
+              <span className="item">
+                <span className="legend-ci">
+                  <span className="ci-bar" style={{ left: '20%', width: '45%' }} />
+                  <span className="ci-mark" style={{ left: '42%' }} />
+                  <span className="ci-fair" style={{ left: '30%' }} />
+                </span>
+                Win-rate bar: shaded band = likely range (95%), coloured tick = measured win rate, thin grey line = fair share
+              </span>
+              <span className="item"><span className="legend-swatch k-combat" />combat</span>
+              <span className="item"><span className="legend-swatch k-commander" />commander damage</span>
+              <span className="item"><span className="legend-swatch k-noncombat" />drain / burn</span>
+            </div>
           </section>
 
           <section className="panel">
             <div className="panel-head">
-              <h2>Head to head</h2>
+              <h2>Head to head <Help>Each cell: how often the <strong>row</strong> deck lasted longer than the <strong>column</strong> deck in games where both played. 50% = even. Green = the row deck usually wins that matchup, red = usually loses. Hover a cell for the number of games.</Help></h2>
               <span className="muted small">How often the row deck outlasted the column deck when they shared a pod.</span>
             </div>
             <HeadToHeadGrid decks={rows.map((r) => r.deck)} allDecks={decks} h2h={stats.h2h} />
@@ -289,7 +311,7 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
           {sizes.length > 1 && (
             <section className="panel">
               <div className="panel-head">
-                <h2>By player count</h2>
+                <h2>By player count <Help>Each deck&apos;s win rate at each table size, compared with a fair share (1 in 2 for 1v1, 1 in 4 for 4-player…). 1.00× = exactly fair. Decks with &quot;each opponent&quot; effects often get stronger with more players; big single threats often do best 1v1. Cells need 20+ games to show.</Help></h2>
                 <span className="muted small">Win rate compared with a fair share at each table size (1.00× = wins exactly 1 in N). Some decks shine 1v1, others in big pods.</span>
               </div>
               <PlayerCountGrid decks={decks} stats={allStats} sizes={sizes} />
