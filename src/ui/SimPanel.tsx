@@ -12,6 +12,8 @@ interface Props {
   activeDecks: SimDeck[];
   quick: SimController;
   forge: ForgeController;
+  forgeMissing: Record<string, string[]> | null;
+  onUnselect: (ids: string[]) => void;
   settings: Settings;
   onSettings: (s: Settings) => void;
   onStart: () => void;
@@ -19,7 +21,7 @@ interface Props {
   onReset: () => void;
 }
 
-export function SimPanel({ decks, activeDecks, quick, forge, settings, onSettings, onStart, onStop, onReset }: Props) {
+export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUnselect, settings, onSettings, onStart, onStop, onReset }: Props) {
   const isForge = settings.engine === 'forge';
   const allStats = isForge ? forge.stats : quick.stats;
   // Optional filter: show only games with a given number of players.
@@ -142,6 +144,18 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
             Games keep running while this page is closed, as long as the dev server is up.
           </p>
         )}
+        {isForge && forgeMissing && (() => {
+          const problems = activeDecks.filter((d) => (forgeMissing[d.id]?.length ?? 0) > 0);
+          if (!problems.length) return null;
+          return (
+            <div className="forge-warning">
+              <span>
+                Forge doesn&apos;t recognise some cards in {problems.map((d) => `${d.name} (${forgeMissing[d.id].length})`).join(', ')} and would play without them.
+              </span>
+              <button onClick={() => onUnselect(problems.map((d) => d.id))} disabled={running}>Unselect {problems.length === 1 ? 'it' : 'them'}</button>
+            </div>
+          );
+        })()}
         {isForge && forge.warnings.map((w) => (
           <p key={w.deckId} className="warn small">
             {deckName(w.deckId)}: Forge doesn&apos;t know {w.missing.join(', ')}, so {w.missing.length === 1 ? 'it was' : 'they were'} left out of the deck.

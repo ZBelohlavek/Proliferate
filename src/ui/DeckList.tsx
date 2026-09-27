@@ -1,18 +1,31 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import { deckSize, modeledFraction } from '../import/deck';
 import { ColorPips, commanderNames, deckColor, pct } from './format';
+import { matchSearch } from '../import/search';
 
 interface Props {
   decks: SimDeck[];
   selected: string[];
+  /** Deck id -> cards Forge doesn't know; null when Forge isn't available. */
+  forgeMissing: Record<string, string[]> | null;
   onToggle: (id: string) => void;
+  onSetSelected: (ids: string[], on: boolean) => void;
   onRemove: (id: string) => void;
   onReport: (id: string) => void;
 }
 
-export function DeckList({ decks, selected, onToggle, onRemove, onReport }: Props) {
+export function DeckList({ decks, selected, forgeMissing, onToggle, onSetSelected, onRemove, onReport }: Props) {
   const [open, setOpen] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+
+  const shown = useMemo(
+    () => decks.map((deck) => ({ deck, why: matchSearch(deck, query) })).filter((x) => x.why !== null),
+    [decks, query],
+  );
+  const shownIds = shown.map((x) => x.deck.id);
+  const forgeProblems = forgeMissing ? decks.filter((d) => (forgeMissing[d.id]?.length ?? 0) > 0) : [];
+  const selectedProblems = forgeProblems.filter((d) => selected.includes(d.id));
 
   if (!decks.length) {
     return (
@@ -26,10 +39,31 @@ export function DeckList({ decks, selected, onToggle, onRemove, onReport }: Prop
     <section className="panel">
       <div className="panel-head">
         <h2>Your decks</h2>
-        <span className="muted">Checked decks take part in simulations.</span>
+        <span className="muted">{selected.length} of {decks.length} selected — checked decks take part in simulations.</span>
       </div>
+      <div className="deck-toolbar">
+        <input
+          type="search"
+          placeholder="Search by deck name, commander or card…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button onClick={() => onSetSelected(shownIds, true)} disabled={!shown.length}>Select {query ? 'shown' : 'all'}</button>
+        <button onClick={() => onSetSelected(shownIds, false)} disabled={!shown.length}>Unselect {query ? 'shown' : 'all'}</button>
+      </div>
+      {forgeMissing && selectedProblems.length > 0 && (
+        <div className="forge-warning">
+          <span>
+            <strong>{selectedProblems.length}</strong> selected deck{selectedProblems.length === 1 ? ' has' : 's have'} cards Forge doesn&apos;t recognise.
+            Forge games leave those cards out, which makes the deck weaker than it really is.
+          </span>
+          <button onClick={() => onSetSelected(selectedProblems.map((d) => d.id), false)}>Unselect {selectedProblems.length === 1 ? 'it' : 'them'}</button>
+        </div>
+      )}
+      {query && <p className="muted small">Showing {shown.length} of {decks.length} decks.</p>}
       <div className="deck-grid">
-        {decks.map((deck) => {
+        {shown.map(({ deck, why }) => {
+          const unknown = forgeMissing?.[deck.id];
           const modeled = modeledFraction(deck);
           const size = deckSize(deck);
           return (
@@ -42,13 +76,16 @@ export function DeckList({ decks, selected, onToggle, onRemove, onReport }: Prop
                   {deck.url ? <a href={deck.url} target="_blank" rel="noreferrer">{deck.name}</a> : deck.name}
                   <ColorPips colors={deck.colorIdentity} />
                 </div>
-                <div className="deck-sub">{commanderNames(deck)}</div>
+                <div className="deck-sub">{commanderNames(deck)}{why && <span className="muted small"> · {why}</span>}</div>
                 <div className="deck-meta">
                   <span className={size === 100 ? '' : 'warn'}>{size} cards</span>
                   <span title="Share of non-land cards the simulator understands. Unmodeled cards are played as blanks.">
                     <span className={`meter ${modeled < 0.8 ? 'low' : ''}`}><span style={{ width: pct(modeled, 0) }} /></span>
                     {pct(modeled, 0)} modeled
                   </span>
+                  {unknown && (unknown.length === 0
+                    ? <span className="forge-ok" title="Forge has scripts for every card in this deck">Forge ✓</span>
+                    : <span className="forge-bad" title={`Forge doesn't recognise: ${unknown.join(', ')}`}>Forge: {unknown.length} unknown card{unknown.length === 1 ? '' : 's'}</span>)}
                 </div>
               </div>
               <div className="deck-actions">

@@ -14,6 +14,7 @@ import { SampleGame } from './ui/SampleGame';
 import { ComparePanel } from './ui/ComparePanel';
 import { DeckReport } from './ui/DeckReport';
 import { PlaystylePanel } from './ui/PlaystylePanel';
+import { useForgeCheck } from './ui/useForgeCheck';
 import { fitWeights, loadAnswers, saveAnswers, type Answer } from './ai/playstyle';
 
 type Tab = 'decks' | 'simulate' | 'compare' | 'report' | 'playstyle' | 'watch';
@@ -78,6 +79,9 @@ export default function App() {
     setSelected((s) => s.filter((x) => x !== id));
   };
   const toggleDeck = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  /** Select or unselect many decks at once. */
+  const setDecksSelected = (ids: string[], on: boolean) =>
+    setSelected((s) => (on ? [...new Set([...s, ...ids])] : s.filter((x) => !ids.includes(x))));
 
   const startSim = () => {
     if (engine === 'forge') {
@@ -114,6 +118,8 @@ export default function App() {
   }, [selected, quick, forge]);
 
   const anyRunning = quick.running || forge.running;
+  // Which cards Forge doesn't know, per deck (null when Forge isn't available).
+  const forgeMissing = useForgeCheck(decks, !!forge.status?.available);
 
   return (
     <div className="app">
@@ -156,7 +162,15 @@ export default function App() {
               onArchidektUsername={(name) => setSettings((s) => ({ ...s, archidektUsername: name }))}
               onImported={addDeck}
             />
-            <DeckList decks={decks} selected={selected} onToggle={toggleDeck} onRemove={removeDeck} onReport={openReport} />
+            <DeckList
+              decks={decks}
+              selected={selected}
+              forgeMissing={forgeMissing}
+              onToggle={toggleDeck}
+              onSetSelected={setDecksSelected}
+              onRemove={removeDeck}
+              onReport={openReport}
+            />
             {decks.length >= 2 && (
               <div className="cta">
                 <button className="primary" onClick={() => setTab('simulate')}>
@@ -172,6 +186,8 @@ export default function App() {
             activeDecks={activeDecks}
             quick={quick}
             forge={forge}
+            forgeMissing={forgeMissing}
+            onUnselect={(ids) => setDecksSelected(ids, false)}
             settings={settings}
             onSettings={setSettings}
             onStart={startSim}
