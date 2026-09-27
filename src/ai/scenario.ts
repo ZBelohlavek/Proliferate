@@ -21,6 +21,8 @@ export interface PermView {
   commander: boolean;
   keywords: string[];
   detail: string;
+  /** Card picture (tokens have none). */
+  imageUrl: string | null;
   /** Part of the situation the question is about. */
   focus: boolean;
 }
@@ -47,6 +49,17 @@ export interface HandCardView {
   detail: string;
   /** A card we added for the question ("you're holding a counterspell"). */
   hypothetical: boolean;
+  imageUrl: string | null;
+}
+
+/** A card shown large at the top of the question. */
+export interface SpotlightCard {
+  name: string;
+  imageUrl: string | null;
+  /** e.g. "Your attacker", "Their blocker", "Being cast". */
+  label: string;
+  /** Power/toughness right now, for creatures. */
+  pt: string | null;
 }
 
 export interface Scenario {
@@ -61,6 +74,9 @@ export interface Scenario {
   players: PlayerView[];
   hand: HandCardView[];
   mana: number;
+  /** The cards the question is about, left to right, and what joins them ("vs", "→"). */
+  spotlight: SpotlightCard[];
+  spotlightJoin: string;
 }
 
 export const QUESTION_KINDS: QuestionKind[] = ['attackTrade', 'counter', 'trick', 'blockTrade', 'destroyArtifact'];
@@ -74,6 +90,11 @@ function costText(card: SimCard): string {
 }
 
 const pt = (g: Game, p: Perm) => `${g.power(p)}/${g.toughness(p)}`;
+
+/** A card's picture: the one saved at import, or Scryfall's image by name (for cards we add to a question). */
+export function cardImage(card: SimCard | null, name: string): string {
+  return card?.imageUrl ?? `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}&format=image&version=normal`;
+}
 
 /**
  * Play random games with your deck until one reaches a moment where the
@@ -105,6 +126,14 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
   let yesLabel = '';
   let noLabel = '';
   const context: ProfileAnswer['context'] = {};
+  let spotlight: SpotlightCard[] = [];
+  let spotlightJoin = 'vs';
+  const spot = (p: Perm, label: string): SpotlightCard => ({
+    name: p.card.name,
+    imageUrl: p.token ? null : cardImage(p.card, p.card.name),
+    label,
+    pt: p.card.isCreature ? pt(game, p) : null,
+  });
 
   const untappedLands = (p: Player) => p.battlefield.filter((x) => x.landInfo && !x.tapped).length;
   const pick = <T,>(xs: T[]): T => xs[Math.floor(Math.random() * xs.length)];
@@ -126,6 +155,8 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
     context.oppHasMana = open >= 2;
     situation = `Your ${a.card.name} (${pt(game, a)}) can attack ${o.deck.name}. Their untapped ${b.card.name} (${pt(game, b)}) could block it, and both would die. They have ${open} untapped land${open === 1 ? '' : 's'}.`;
     question = `Do you attack ${o.deck.name} with ${a.card.name}?`;
+    spotlight = [spot(a, 'Your attacker'), spot(b, 'Their possible blocker')];
+    spotlightJoin = '⚔';
     yesLabel = 'Attack';
     noLabel = "Don't attack with it";
   } else if (kind === 'blockTrade') {
@@ -144,6 +175,8 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
     context.life = me.life;
     situation = `${o.deck.name} attacks you with ${x.card.name} (${pt(game, x)}). You're at ${me.life} life. Your ${y.card.name} (${pt(game, y)}) can block it, and both would die.`;
     question = `Do you block with ${y.card.name}, or take ${game.power(x)} damage?`;
+    spotlight = [spot(x, 'Attacking you'), spot(y, 'Your possible blocker')];
+    spotlightJoin = '⚔';
     yesLabel = `Block with ${y.card.name}`;
     noLabel = `Take ${game.power(x)} damage`;
   } else if (kind === 'trick') {
@@ -158,9 +191,11 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
     const pumpText = own?.notes.find((n) => /^Combat trick/.test(n))?.replace(/^Combat trick /, '') ?? '+3/+3';
     focus.add(a);
     focusPlayer = o;
-    if (!own || !me.hand.includes(own)) extraHand.push({ name: trick, cost: own ? costText(own) : '{G}', detail: `Combat trick: ${pumpText} until end of turn`, hypothetical: true });
+    if (!own || !me.hand.includes(own)) extraHand.push({ name: trick, cost: own ? costText(own) : '{G}', detail: `Combat trick: ${pumpText} until end of turn`, hypothetical: true, imageUrl: cardImage(own ?? null, trick) });
     situation = `You attack ${o.deck.name} with ${a.card.name} (${pt(game, a)}). They have untapped creatures that could block. You're holding ${trick} (${pumpText}) and have the mana for it.`;
     question = `Do you cast ${trick} now, or wait to see how they block?`;
+    spotlight = [spot(a, 'Your attacker'), { name: trick, imageUrl: cardImage(own ?? null, trick), label: 'Your combat trick', pt: null }];
+    spotlightJoin = '+';
     yesLabel = 'Cast it now';
     noLabel = 'Wait for blocks';
   } else if (kind === 'counter') {
@@ -174,10 +209,15 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
     const { o, card } = pick(casts);
     focusPlayer = o;
     context.manaValue = card.cmc;
-    extraHand.push({ name: 'Counterspell', cost: '{U}{U}', detail: 'Counter target spell.', hypothetical: true });
+    extraHand.push({ name: 'Counterspell', cost: '{U}{U}', detail: 'Counter target spell.', hypothetical: true, imageUrl: cardImage(null, 'Counterspell') });
     const what = card.notes.filter((n) => !/^Creature/.test(n) && !/^Not modeled/.test(n)).slice(0, 2).join('; ');
     situation = `${o.deck.name} casts ${card.name} (mana value ${card.cmc}, ${card.typeLine}${what ? ` — ${what}` : ''}). You're holding Counterspell with two blue mana open.`;
     question = `Do you counter ${card.name}?`;
+    spotlight = [
+      { name: card.name, imageUrl: cardImage(card, card.name), label: `${o.deck.name} casts`, pt: card.isCreature ? `${card.power}/${card.toughness}` : null },
+      { name: 'Counterspell', imageUrl: cardImage(null, 'Counterspell'), label: 'In your hand', pt: null },
+    ];
+    spotlightJoin = '↩';
     yesLabel = 'Counter it';
     noLabel = 'Let it resolve';
   } else {
@@ -190,10 +230,12 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
     const { o, p } = pick(targets);
     focus.add(p);
     focusPlayer = o;
-    extraHand.push({ name: "Nature's Claim", cost: '{G}', detail: 'Destroy target artifact or enchantment. Its controller gains 4 life.', hypothetical: true });
+    extraHand.push({ name: "Nature's Claim", cost: '{G}', detail: 'Destroy target artifact or enchantment. Its controller gains 4 life.', hypothetical: true, imageUrl: cardImage(null, "Nature's Claim") });
     const what = p.card.notes.filter((n) => !/^Not modeled/.test(n)).slice(0, 2).join('; ');
     situation = `${o.deck.name} controls ${p.card.name}${what ? ` (${what})` : ''}. You're holding Nature's Claim, which can destroy an artifact or enchantment.`;
     question = `Do you destroy ${p.card.name} now, or save the removal for later?`;
+    spotlight = [spot(p, `${o.deck.name}'s permanent`), { name: "Nature's Claim", imageUrl: cardImage(null, "Nature's Claim"), label: 'In your hand', pt: null }];
+    spotlightJoin = '→';
     yesLabel = 'Destroy it now';
     noLabel = 'Save it';
   }
@@ -221,6 +263,7 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
         commander: perm.isCommander,
         keywords,
         detail: [perm.card.typeLine, ...perm.card.notes.filter((n) => !/^Not modeled/.test(n))].filter(Boolean).join(' · '),
+        imageUrl: perm.token ? null : cardImage(perm.card, perm.card.name),
         focus: isFocus,
       });
     }
@@ -244,9 +287,9 @@ function build(game: Game, me: Player, kind: QuestionKind, round: number): Scena
   }));
 
   const hand: HandCardView[] = [
-    ...me.hand.map((c) => ({ name: c.name, cost: c.isLand ? 'land' : costText(c), detail: [c.typeLine, ...c.notes.filter((n) => !/^Not modeled/.test(n))].join(' · '), hypothetical: false })),
+    ...me.hand.map((c) => ({ name: c.name, cost: c.isLand ? 'land' : costText(c), detail: [c.typeLine, ...c.notes.filter((n) => !/^Not modeled/.test(n))].join(' · '), hypothetical: false, imageUrl: cardImage(c, c.name) })),
     ...extraHand,
   ];
 
-  return { kind, round, situation, question, yesLabel, noLabel, context, players, hand, mana: game.availableMana(me) };
+  return { kind, round, situation, question, yesLabel, noLabel, context, players, hand, mana: game.availableMana(me), spotlight, spotlightJoin };
 }

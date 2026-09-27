@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import { estimateRates, type ProfileAnswer, type QuestionKind } from '../ai/forgeProfile';
-import { makeScenario, QUESTION_KINDS, type PermView, type PlayerView, type Scenario } from '../ai/scenario';
+import { makeScenario, QUESTION_KINDS, type Scenario } from '../ai/scenario';
+import { BoardView } from './BoardView';
 import { Help } from './Help';
 import { pct } from './format';
 
@@ -136,73 +137,10 @@ export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnsw
                 <button className="link" onClick={next}>Skip (S)</button>
               </div>
             </div>
-            <Board scenario={scenario} />
+            <BoardView scenario={scenario} />
           </>
         )}
       </section>
     </>
-  );
-}
-
-function Board({ scenario }: { scenario: Scenario }) {
-  const you = scenario.players.find((p) => p.you)!;
-  const opponents = scenario.players.filter((p) => !p.you);
-  return (
-    <div className="board">
-      <div className="opponents">
-        {opponents.map((p) => <PlayerBox key={p.seat} p={p} />)}
-      </div>
-      <PlayerBox p={you} />
-      <div className="hand">
-        <div className="hand-title">Your hand · {scenario.mana} mana available</div>
-        <div className="hand-cards">
-          {scenario.hand.map((c, i) => (
-            <div key={i} className={`hand-card ${c.hypothetical ? 'hypothetical' : ''}`} title={c.detail}>
-              <span className="hc-name">{c.name}</span>
-              <span className="hc-cost">{c.cost}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PlayerBox({ p }: { p: PlayerView }) {
-  return (
-    <div className={`player-box ${p.you ? 'you' : ''} ${p.focus ? 'focus' : ''}`}>
-      <div className="pb-head">
-        <div>
-          <strong>{p.you ? 'You' : p.deckName}</strong>
-          <div className="muted small">{p.commander}</div>
-        </div>
-        <div className="pb-life">{p.life}</div>
-      </div>
-      <div className="pb-meta small muted">
-        {p.lands} lands ({p.untappedLands} untapped) · {p.hand} cards in hand · {p.library} in library
-        {p.commanderDamage.length > 0 && <div>Commander damage taken: {p.commanderDamage.join(', ')}</div>}
-      </div>
-      <PermList perms={p.creatures} />
-      <PermList perms={p.others} />
-    </div>
-  );
-}
-
-function PermList({ perms }: { perms: PermView[] }) {
-  if (!perms.length) return null;
-  return (
-    <div className="perms">
-      {perms.map((perm, i) => (
-        <span key={i} className={`perm ${perm.focus ? 'focus' : ''} ${perm.tapped ? 'tapped' : ''}`} title={perm.detail}>
-          {perm.count > 1 && <span className="perm-count">{perm.count}×</span>}
-          {perm.commander && <span className="tag">CMDR</span>}
-          <span className="perm-name">{perm.name}</span>
-          {perm.pt && <span className="perm-pt">{perm.pt}</span>}
-          {perm.keywords.length > 0 && <span className="perm-kw">{perm.keywords.join(', ')}</span>}
-          {perm.tapped && <span className="perm-kw">tapped</span>}
-          {perm.sick && <span className="perm-kw">summoning sick</span>}
-        </span>
-      ))}
-    </div>
   );
 }

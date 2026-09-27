@@ -368,3 +368,50 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; border: 1px solid c
 .profile-table th, .profile-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: left; }
 .profile-table th { color: var(--muted); font-size: 12px; }
 button.link.danger { color: var(--bad); }
+
+/* ---------- Visual board (Playstyle) ---------- */
+.tabletop { display: grid; gap: 12px; margin-top: 12px; }
+.spotlight { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 8px; padding: 14px; border-radius: 12px;
+  background: radial-gradient(ellipse at center, color-mix(in srgb, var(--accent) 16%, var(--panel-2)), var(--panel-2)); }
+.spotlight-item { display: flex; align-items: center; gap: 8px; }
+.spotlight figure { margin: 0; display: grid; gap: 6px; justify-items: center; }
+.spotlight figcaption { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.spotlight-join { font-size: 28px; font-weight: 800; color: var(--accent); padding: 0 6px; }
+.mats { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
+.mat { border: 1px solid var(--border); border-radius: 12px; padding: 10px; background: color-mix(in srgb, var(--panel-2) 85%, #2b8a3e 15%); }
+.mat.you { border-color: var(--accent); background: color-mix(in srgb, var(--panel-2) 85%, #6741d9 15%); }
+.mat.focus { box-shadow: 0 0 0 2px var(--warn); }
+.mat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+.mat-life { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; background: var(--panel); border-radius: 50%; min-width: 46px; height: 46px; display: grid; place-items: center; border: 2px solid var(--border); }
+.mat-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 8px; }
+.empty-board { padding: 12px 0; }
+.card-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.card-row.others { margin-top: 8px; }
+.board-card { position: relative; width: 84px; height: 117px; flex: none; transition: transform 0.15s; }
+.board-card.tapped { width: 117px; height: 84px; }
+.board-card.tapped .card-face { transform: rotate(90deg); transform-origin: center; position: absolute; left: 16px; top: -16px; }
+.board-card.focus .card-face { box-shadow: 0 0 0 3px var(--warn), 0 0 16px 2px color-mix(in srgb, var(--warn) 70%, transparent); }
+.board-card.hand.hypothetical .card-face { box-shadow: 0 0 0 2px var(--accent); }
+.card-face { position: relative; width: 84px; height: 117px; border-radius: 5px; overflow: hidden; background: var(--panel); cursor: zoom-in; }
+.card-face.big { width: 200px; height: 279px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); }
+.card-face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-frame { width: 100%; height: 100%; display: grid; place-content: center; text-align: center; gap: 4px; padding: 6px; font-size: 11px; font-weight: 700;
+  border: 2px solid var(--border); border-radius: 5px; background: linear-gradient(160deg, var(--panel), var(--panel-2)); }
+.card-frame.token { border-style: dashed; }
+.card-frame em { font-weight: 400; color: var(--muted); }
+.card-face.big .card-frame { font-size: 15px; }
+.pt-badge { position: absolute; right: 3px; bottom: 3px; background: rgba(0, 0, 0, 0.8); color: #fff; font-size: 11px; font-weight: 800; padding: 1px 5px; border-radius: 4px; }
+.card-face.big .pt-badge { font-size: 16px; padding: 2px 8px; right: 8px; bottom: 8px; }
+.count-badge, .cmdr-badge, .sick-badge, .hypo-badge { position: absolute; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 1px 4px; pointer-events: none; }
+.count-badge { left: 3px; top: 3px; background: var(--accent); color: var(--accent-text); }
+.cmdr-badge { right: 3px; top: 3px; background: #f59f00; color: #1a1a1a; }
+.sick-badge { left: 3px; bottom: 3px; background: rgba(0, 0, 0, 0.75); color: #9ecbff; }
+.hypo-badge { left: 0; right: 0; bottom: -2px; text-align: center; background: var(--accent); color: var(--accent-text); border-radius: 0 0 5px 5px; }
+.hand-mat { border: 1px dashed var(--border); border-radius: 12px; padding: 10px; }
+.card-preview { position: fixed; z-index: 60; width: 250px; border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); pointer-events: none; }
+@media (max-width: 600px) {
+  .card-face.big { width: 140px; height: 195px; }
+  .board-card, .card-face { width: 64px; height: 89px; }
+  .board-card.tapped { width: 89px; height: 64px; }
+  .board-card.tapped .card-face { left: 12px; top: -12px; }
+}
