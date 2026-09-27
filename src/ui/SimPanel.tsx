@@ -48,6 +48,9 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
     ? forgeStatus?.running ? (forgeStatus.gamesPerMinute || 0).toFixed(1) : '—'
     : quick.running ? Math.round(quick.gamesPerSecond).toLocaleString() : '—';
   const deckName = (id: string) => decks.find((d) => d.id === id)?.name ?? id;
+  // Every game with a winner gives exactly one deck a win, so finished games = total wins.
+  const finished = Object.values(allStats.decks).reduce((sum, d) => sum + d.wins, 0);
+  const draws = Math.max(0, allStats.games - finished);
 
   // Progress of the current run against its "Run for" limit.
   const run = isForge
@@ -179,6 +182,10 @@ export function SimPanel({ decks, activeDecks, quick, forge, forgeMissing, onUns
 
         <div className="kpis">
           <div className="kpi"><span>{allStats.games.toLocaleString()}</span>games played</div>
+          <div className="kpi" title="Games that ended with a winner. The rest were draws: they hit the turn limit (quick) or the 'Draw after' time limit (Forge).">
+            <span>{finished.toLocaleString()}</span>
+            games finished{allStats.games > 0 && <> · {draws.toLocaleString()} draw{draws === 1 ? '' : 's'} ({pct(draws / allStats.games, 1)})</>}
+          </div>
           <div className="kpi"><span>{rate}</span>games per {isForge ? 'minute' : 'second'}</div>
           <div className="kpi">
             <span>{isForge ? (forgeStatus?.activeGames ?? 0) : activeDecks.length}</span>
