@@ -69,6 +69,7 @@ function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats
                 <div className="muted small">
                   Estimated from the official <a href="https://magic.wizards.com/en/formats/commander#brackets" target="_blank" rel="noreferrer">Commander Brackets</a> rules.
                   Commander Spellbook&apos;s own label for this deck: <strong>{st.data.spellbookTag}</strong>.
+                  {deck.archidektBracket ? <> You marked it <strong>Bracket {deck.archidektBracket}</strong> on Archidekt{deck.archidektBracket !== est.bracket ? ' — see the reasons below for the difference' : ''}.</> : null}
                 </div>
               </div>
             </div>

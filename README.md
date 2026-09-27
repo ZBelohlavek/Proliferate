@@ -2,7 +2,7 @@
 
 Upload your Commander decks from [Archidekt](https://archidekt.com), then let them play thousands of simulated 4-player EDH games against each other to see how they stack up.
 
-- **Import** decks from an Archidekt link, or upload/paste a text decklist (card data comes from Scryfall).
+- **Import** decks by linking your Archidekt account (lists all your public decks and syncs ones you've changed), from an Archidekt link, or by uploading/pasting a text decklist (card data comes from Scryfall).
 - **Two engines:**
   - **Quick** — a built-in simplified engine that runs in the browser at a few thousand games per second.
   - **Accurate** — full Magic rules via [Forge](https://github.com/Card-Forge/forge), the open-source rules engine with ~33,000 scripted cards and its own AI. A few games per minute, run locally.

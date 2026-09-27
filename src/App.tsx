@@ -150,7 +150,12 @@ export default function App() {
       <main>
         {tab === 'decks' && (
           <>
-            <ImportPanel onImported={addDeck} />
+            <ImportPanel
+              decks={decks}
+              archidektUsername={settings.archidektUsername}
+              onArchidektUsername={(name) => setSettings((s) => ({ ...s, archidektUsername: name }))}
+              onImported={addDeck}
+            />
             <DeckList decks={decks} selected={selected} onToggle={toggleDeck} onRemove={removeDeck} onReport={openReport} />
             {decks.length >= 2 && (
               <div className="cta">

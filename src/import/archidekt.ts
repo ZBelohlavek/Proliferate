@@ -68,11 +68,49 @@ export async function importArchidekt(input: string): Promise<SimDeck> {
       colorIdentity: raw.colorIdentity,
     });
   }
-  return buildDeck({
+  const deck = buildDeck({
     id: `archidekt-${id}`,
     name: data.name ?? `Archidekt ${id}`,
     source: 'archidekt',
     url: `https://archidekt.com/decks/${id}`,
     cards,
   });
+  deck.archidektBracket = typeof data.edhBracket === 'number' ? data.edhBracket : null;
+  deck.archidektUpdatedAt = data.updatedAt ? Date.parse(data.updatedAt) : undefined;
+  return deck;
+}
+
+/** One deck in an Archidekt user's deck list. */
+export interface ArchidektDeckSummary {
+  id: string;
+  name: string;
+  size: number;
+  updatedAt: number;
+  /** Archidekt format id; 3 is Commander / EDH. */
+  format: number;
+  bracket: number | null;
+  image: string | null;
+}
+
+export const ARCHIDEKT_COMMANDER_FORMAT = 3;
+
+/** A user's public decks (private and unlisted decks aren't visible without logging in). */
+export async function listArchidektDecks(username: string): Promise<ArchidektDeckSummary[]> {
+  const name = username.trim().replace(/^.*archidekt\.com\/u(?:ser)?\//i, '').replace(/\/.*$/, '');
+  if (!name) throw new Error('Enter your Archidekt username.');
+  const res = await fetch(`/api/archidekt?user=${encodeURIComponent(name)}`);
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `Archidekt request failed (${res.status}).`);
+  if (!data.results?.length) throw new Error(`No public decks found for "${name}". Check the spelling, and note that private and unlisted decks can't be listed.`);
+  return data.results
+    .map((d: any) => ({
+      id: String(d.id),
+      name: d.name,
+      size: d.size ?? 0,
+      updatedAt: Date.parse(d.updatedAt ?? '') || 0,
+      format: d.deckFormat,
+      bracket: typeof d.edhBracket === 'number' ? d.edhBracket : null,
+      image: d.featured || null,
+    }))
+    .sort((a: ArchidektDeckSummary, b: ArchidektDeckSummary) => b.updatedAt - a.updatedAt);
 }

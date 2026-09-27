@@ -134,6 +134,10 @@ export interface SimDeck {
   cards: DeckEntry[];
   colorIdentity: Color[];
   importedAt: number;
+  /** Bracket the owner set on Archidekt (1–5), if any. */
+  archidektBracket?: number | null;
+  /** When the deck was last changed on Archidekt (ms), for syncing. */
+  archidektUpdatedAt?: number;
 }
 
 export type LossReason = 'combat' | 'commander' | 'noncombat' | 'decked' | 'timeout';

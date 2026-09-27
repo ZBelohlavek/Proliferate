@@ -59,6 +59,8 @@ export interface Settings {
   forgeClockSeconds: number;
   /** Pilot quick-engine games with the weights learned in the Playstyle quiz. */
   usePlaystyle: boolean;
+  /** Linked Archidekt account, for "Find my decks". */
+  archidektUsername: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -70,6 +72,7 @@ const DEFAULT_SETTINGS: Settings = {
   forgeWorkers: Math.max(1, Math.min(8, Math.floor((navigator.hardwareConcurrency || 4) / 4))),
   forgeClockSeconds: 600,
   usePlaystyle: false,
+  archidektUsername: '',
 };
 
 // Merge with defaults so settings saved by older versions gain the new fields.

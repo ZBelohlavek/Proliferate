@@ -2,9 +2,17 @@ import { useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import { importArchidekt } from '../import/archidekt';
 import { importText } from '../import/text';
+import { AccountImport } from './AccountImport';
 
-export function ImportPanel({ onImported }: { onImported: (deck: SimDeck) => void }) {
-  const [mode, setMode] = useState<'archidekt' | 'text'>('archidekt');
+interface Props {
+  decks: SimDeck[];
+  archidektUsername: string;
+  onArchidektUsername: (name: string) => void;
+  onImported: (deck: SimDeck) => void;
+}
+
+export function ImportPanel({ decks, archidektUsername, onArchidektUsername, onImported }: Props) {
+  const [mode, setMode] = useState<'account' | 'archidekt' | 'text'>('account');
   const [urls, setUrls] = useState('');
   const [name, setName] = useState('');
   const [text, setText] = useState('');
@@ -66,12 +74,15 @@ export function ImportPanel({ onImported }: { onImported: (deck: SimDeck) => voi
       <div className="panel-head">
         <h2>Add decks</h2>
         <div className="seg">
+          <button className={mode === 'account' ? 'active' : ''} onClick={() => setMode('account')}>My Archidekt account</button>
           <button className={mode === 'archidekt' ? 'active' : ''} onClick={() => setMode('archidekt')}>Archidekt link</button>
           <button className={mode === 'text' ? 'active' : ''} onClick={() => setMode('text')}>Decklist file / text</button>
         </div>
       </div>
 
-      {mode === 'archidekt' ? (
+      {mode === 'account' ? (
+        <AccountImport decks={decks} username={archidektUsername} onUsername={onArchidektUsername} onImported={onImported} />
+      ) : mode === 'archidekt' ? (
         <div className="import-row">
           <textarea
             rows={2}

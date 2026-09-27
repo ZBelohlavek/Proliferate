@@ -302,3 +302,20 @@ table.cards-table { width: 100%; border-collapse: collapse; font-size: 13px; mar
 .hc-name { font-weight: 600; font-size: 12.5px; }
 .hc-cost { font-size: 11px; color: var(--muted); }
 .hand-card.picked .hc-cost { color: inherit; }
+
+/* ---------- Archidekt account import ---------- */
+.account-import { display: grid; gap: 8px; }
+.account-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.account-bar .spacer { flex: 1; }
+button.link { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; font-size: 13px; cursor: pointer; }
+.progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--accent); transition: width 0.2s; }
+.account-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 460px; overflow: auto; }
+.account-list label { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); cursor: pointer; }
+.account-list li.on label { border-color: var(--accent); }
+.account-list input { width: 16px; height: 16px; flex: none; }
+.account-list img { width: 52px; height: 38px; object-fit: cover; border-radius: 5px; flex: none; }
+.al-main { display: grid; flex: 1; min-width: 0; }
+.al-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-status { font-size: 12px; font-weight: 700; white-space: nowrap; }
+.s-new { color: var(--accent); } .s-changed { color: var(--warn); } .s-current { color: var(--muted); font-weight: 500; }

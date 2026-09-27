@@ -100,6 +100,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                     </div>
                   );
                 }, 'Estimated from the official Commander Brackets rules. Open the full report for every reason.')}
+                {row('Your Archidekt bracket', (d) => d.archidektBracket ?? <span className="muted">—</span>, 'The bracket set on the deck in Archidekt (re-import older decks to fill this in)')}
                 {row('Game Changers', (d) => states[d.id]?.data ? states[d.id].data!.gameChangers.length : '…')}
                 {row('Two-card combos', (d) => states[d.id]?.data ? states[d.id].data!.combos.filter((c) => c.twoCard).length : '…')}
                 {row('Commander Spellbook', (d) => states[d.id]?.data?.spellbookTag ?? '…', "Commander Spellbook's own power label (their scale, not the official brackets)")}
