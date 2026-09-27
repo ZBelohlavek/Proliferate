@@ -7,8 +7,8 @@ import { DEFAULT_PLAYERS, sanitizePodSize } from './sim/pods';
 
 const KEYS = {
   decks: 'proliferate.decks.v1',
-  stats: 'proliferate.stats.v1',
-  forgeStats: 'proliferate.stats.forge.v1',
+  // Forge results. (Older versions also had a separate quick-engine key, no longer used.)
+  stats: 'proliferate.stats.forge.v1',
   selected: 'proliferate.selected.v1',
   settings: 'proliferate.settings.v1',
 };
@@ -39,26 +39,24 @@ function write(key: string, value: unknown) {
 
 export const loadDecks = () => read<SimDeck[]>(KEYS.decks, []);
 export const saveDecks = (decks: SimDeck[]) => write(KEYS.decks, decks);
-export type Engine = 'quick' | 'forge';
-
-/** Each engine keeps its own results: quick and full-rules games shouldn't be mixed. */
-export const loadStats = (engine: Engine) => read<Stats>(engine === 'forge' ? KEYS.forgeStats : KEYS.stats, emptyStats());
-export const saveStats = (engine: Engine, stats: Stats) => write(engine === 'forge' ? KEYS.forgeStats : KEYS.stats, stats);
+export const loadStats = () => read<Stats>(KEYS.stats, emptyStats());
+export const saveStats = (stats: Stats) => write(KEYS.stats, stats);
 export const loadSelected = () => read<string[] | null>(KEYS.selected, null);
 export const saveSelected = (ids: string[]) => write(KEYS.selected, ids);
 
+/** Forge AI personalities: Forge's own four, "You" (learned in the Playstyle quiz), or a random mix per seat. */
+export type AiProfileChoice = 'Default' | 'Cautious' | 'Reckless' | 'Experimental' | 'You' | 'Mixed';
+
 export interface Settings {
-  engine: Engine;
   podSize: number;
-  /** Web Workers for the quick engine. */
-  workers: number;
-  maxRounds: number;
   /** Parallel Forge processes. */
   forgeWorkers: number;
-  /** Forge calls a game a draw after this many seconds. */
+  /** Forge calls a game a draw after this many seconds of real time. */
   forgeClockSeconds: number;
-  /** Pilot quick-engine games with the weights learned in the Playstyle quiz. */
-  usePlaystyle: boolean;
+  /** Games each Forge process plays before restarting (saves Forge's ~8 s start-up). */
+  gamesPerLaunch: number;
+  /** Which AI personality pilots the decks. */
+  aiProfile: AiProfileChoice;
   /** Linked Archidekt account, for "Find my decks". */
   archidektUsername: string;
   /** How decks are drawn for each game (see Pairing in sim/pods.ts). */
@@ -70,24 +68,32 @@ export interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  engine: 'quick',
   podSize: DEFAULT_PLAYERS,
-  workers: Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)),
-  maxRounds: 25,
   // Forge's AI is multithreaded; beyond ~1 process per 4 threads games just slow each other down.
   forgeWorkers: Math.max(1, Math.min(8, Math.floor((navigator.hardwareConcurrency || 4) / 4))),
   forgeClockSeconds: 600,
-  usePlaystyle: false,
+  gamesPerLaunch: 2,
+  aiProfile: 'Default',
   archidektUsername: '',
   pairing: 'balanced',
   runMode: 'untilStopped',
   runMinutes: 60,
-  runGames: 10000,
+  runGames: 500,
 };
 
-// Merge with defaults so settings saved by older versions gain the new fields.
+const PROFILES: AiProfileChoice[] = ['Default', 'Cautious', 'Reckless', 'Experimental', 'You', 'Mixed'];
+
+// Merge with defaults so settings saved by older versions gain the new fields
+// (and drop ones that no longer exist, like the quick engine's).
 export const loadSettings = (): Settings => {
-  const s = { ...DEFAULT_SETTINGS, ...read<Partial<Settings>>(KEYS.settings, {}) };
-  return { ...s, podSize: sanitizePodSize(s.podSize) };
+  const saved = read<Partial<Settings> & Record<string, unknown>>(KEYS.settings, {});
+  const s: Settings = { ...DEFAULT_SETTINGS };
+  for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
+    if (saved[key] !== undefined) (s as unknown as Record<string, unknown>)[key] = saved[key];
+  }
+  s.podSize = sanitizePodSize(s.podSize);
+  if (!PROFILES.includes(s.aiProfile)) s.aiProfile = 'Default';
+  s.gamesPerLaunch = Math.min(5, Math.max(1, Math.floor(Number(s.gamesPerLaunch)) || 2));
+  return s;
 };
 export const saveSettings = (s: Settings) => write(KEYS.settings, s);

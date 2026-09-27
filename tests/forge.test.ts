@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { forgeSlug } from '../server/forgeCards';
-import { parseForgeLog } from '../server/forgeLog';
+import { parseForgeGames, parseForgeLog } from '../server/forgeLog';
 
 describe('forgeSlug', () => {
   it('matches Forge card file names', () => {
@@ -14,6 +14,8 @@ describe('forgeSlug', () => {
 const LOG = `
 Simulation mode
 Mulligan: Ai(1)-P-a has kept a hand of 7 cards
+Mulligan: Ai(2)-P-b has mulliganed down to 7 cards.
+Mulligan: Ai(2)-P-b has mulliganed down to 6 cards.
 Mulligan: Ai(2)-P-b has kept a hand of 6 cards
 Mulligan: Ai(3)-P-c has kept a hand of 7 cards
 Turn: Turn 1 (Ai(1)-P-a)
@@ -48,7 +50,7 @@ describe('parseForgeLog', () => {
     expect(r.winner).toBe(0);
     expect(r.rounds).toBe(3);
     expect(r.placements).toEqual([1, 3, 2]); // b died first, then c
-    expect(r.mulligans).toEqual([0, 1, 0]);
+    expect(r.mulligans).toEqual([0, 2, 0]); // a free mulligan to 7, then one to 6
     expect(r.commanderRound).toEqual([2, null, null]);
     expect(r.eliminations).toEqual([
       { seat: 1, round: 2, reason: 'noncombat', killer: null },
@@ -87,5 +89,18 @@ describe('parseForgeLog', () => {
     const r = parseForgeLog(drawn, ['a', 'b'], [[], []], ['A', 'B'])!.result;
     expect(r.winner).toBeNull();
     expect(r.placements).toEqual([1.5, 1.5]);
+  });
+});
+
+describe('parseForgeGames', () => {
+  it('splits a multi-game log at each Game Result line', () => {
+    const two = [...LOG, ...LOG.map((l) => l.replace('Game 1 ended', 'Game 2 ended'))];
+    const games = parseForgeGames(two, ['a', 'b', 'c'], [[], [], []], ['A', 'B', 'C']);
+    expect(games).toHaveLength(2);
+    expect(games.every((g) => g.result.winner === 0)).toBe(true);
+  });
+  it('ignores a game cut off before its result', () => {
+    const cut = [...LOG, 'Turn: Turn 1 (Ai(1)-P-a)', 'Land: Ai(1)-P-a played Forest (12)'];
+    expect(parseForgeGames(cut, ['a', 'b', 'c'], [[], [], []], ['A', 'B', 'C'])).toHaveLength(1);
   });
 });

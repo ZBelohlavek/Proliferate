@@ -96,8 +96,11 @@ export function parseForgeLog(lines: string[], seats: string[], commanderNames: 
       prevPosition = position;
       lastTurnIndex[seat] = i;
       summary.push(`— Round ${round}, ${deckNames[seat]} (P${seat + 1}) —`);
-    } else if ((m = line.match(/^Mulligan: Ai\((\d+)\)-.* has kept a hand of (\d+) cards/))) {
-      mulligans[+m[1] - 1] = Math.max(0, 7 - +m[2]);
+    } else if ((m = line.match(/^Mulligan: Ai\((\d+)\)-.* has mulliganed/))) {
+      // Count every mulligan, including Commander's free first one (which still leaves 7 cards).
+      mulligans[+m[1] - 1]++;
+      summary.push(pretty(line.replace(/^Mulligan: /, '')));
+    } else if (line.startsWith('Mulligan: ')) {
       summary.push(pretty(line.replace(/^Mulligan: /, '')));
     } else if ((m = line.match(/^Add To Stack: Ai\((\d+)\)-\S* cast (.+?)(?: targeting .*)?$/))) {
       const seat = +m[1] - 1;
@@ -180,4 +183,21 @@ export function parseForgeLog(lines: string[], seats: string[], commanderNames: 
     result: { seats, winner, placements, rounds: round, eliminations, commanderRound, mulligans, cards: castNames.map((s) => ({ early: [], drawn: [], cast: [...s] })) },
     summary,
   };
+}
+
+/**
+ * A Forge process started with `-n N` plays N games and prints them one after
+ * another, each ending with a "Game Result:" line. Split and parse each game.
+ */
+export function parseForgeGames(lines: string[], seats: string[], commanderNames: string[][], deckNames: string[]): ParsedForgeGame[] {
+  const games: ParsedForgeGame[] = [];
+  let start = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('Game Result:')) continue;
+    const parsed = parseForgeLog(lines.slice(start, i + 1), seats, commanderNames, deckNames);
+    if (parsed) games.push(parsed);
+    start = i + 1;
+  }
+  // A game cut off without a result line (e.g. the process was stopped) is ignored.
+  return games;
 }

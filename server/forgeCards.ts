@@ -23,6 +23,8 @@ export function forgeSlug(name: string): string {
 export class ForgeCardDb {
   /** slug -> name to write in the deck file */
   private readonly names = new Map<string, string>();
+  /** Slugs of cards Forge's developers mark as ones its AI can't play well (AI:RemoveDeck:All). */
+  private readonly aiWeak = new Set<string>();
 
   constructor(cardsZipPath: string) {
     for (const entry of readZip(cardsZipPath)) {
@@ -35,11 +37,17 @@ export class ForgeCardDb {
       // other multi-face card (MDFC, adventure, transform) by its front face.
       const split = /^AlternateMode:Split/m.test(text);
       this.names.set(slug, split ? faceNames.join(' // ') : faceNames[0]);
+      if (/^AI:RemoveDeck:All/m.test(text)) this.aiWeak.add(slug);
     }
   }
 
   get size(): number {
     return this.names.size;
+  }
+
+  /** True if Forge flags this card as one its AI plays poorly. */
+  isAiWeak(name: string): boolean {
+    return this.aiWeak.has(forgeSlug(name)) || this.aiWeak.has(forgeSlug(name.split(' // ')[0]));
   }
 
   /** The Forge deck-file name for a card, or null if Forge doesn't know it. */

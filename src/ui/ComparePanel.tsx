@@ -11,19 +11,17 @@ import { Help, SpellbookTag } from './Help';
 interface Props {
   decks: SimDeck[];
   selected: string[];
-  quickStats: Stats;
-  forgeStats: Stats;
+  stats: Stats;
   onOpenReport: (deckId: string) => void;
 }
 
 const MAX_COLUMNS = 6;
 
-export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenReport }: Props) {
+export function ComparePanel({ decks, selected, stats, onOpenReport }: Props) {
   const [chosen, setChosen] = useState<string[]>(() => selected.slice(0, MAX_COLUMNS));
   const columns = decks.filter((d) => chosen.includes(d.id));
   const { states } = useBracketData(columns);
-  const quickRatings = useMemo(() => computeRatings(quickStats), [quickStats, quickStats.games]);
-  const forgeRatings = useMemo(() => computeRatings(forgeStats), [forgeStats, forgeStats.games]);
+  const ratings = useMemo(() => computeRatings(stats), [stats, stats.games]);
   const comps = useMemo(() => new Map(columns.map((d) => [d.id, composition(d)])), [columns]);
 
   const toggle = (id: string) =>
@@ -92,7 +90,7 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                   const st = states[d.id];
                   if (!st || st.loading) return <span className="muted">Checking…</span>;
                   if (!st.data) return <span className="err small">{st.error ?? 'Unavailable'}</span>;
-                  const est = estimateBracket(st.data, forgeStats.decks[d.id]);
+                  const est = estimateBracket(st.data, stats.decks[d.id]);
                   return (
                     <div>
                       <span className={`bracket-badge b${est.bracket}`}>{est.bracket}</span> <strong>{BRACKET_NAMES[est.bracket]}</strong>
@@ -106,23 +104,22 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                 {row('Two-card combos', (d) => states[d.id]?.data ? states[d.id].data!.combos.filter((c) => c.twoCard).length : '…', 'Known two-card game-ending combos in the deck, from Commander Spellbook. These aren\'t expected in Brackets 1–2.')}
                 {row('Commander Spellbook', (d) => (states[d.id]?.data ? <SpellbookTag tag={states[d.id].data!.spellbookTag} /> : '…'), "Commander Spellbook's own power label, based on the strongest combo in the deck. Their scale, not the official brackets — click the ⓘ next to a label to see what it means.")}
 
-                {section('Quick simulation')}
-                {row('Rating', (d) => sim(quickStats, quickRatings, d, 'rating'))}
-                {row('Win rate', (d) => sim(quickStats, quickRatings, d, 'win'))}
-                {row('Avg place', (d) => sim(quickStats, quickRatings, d, 'place'))}
-                {row('Games', (d) => sim(quickStats, quickRatings, d, 'games'))}
-                {row('By player count', (d) => <BySize stats={quickStats} deckId={d.id} />, 'Win rate vs a fair share at each pod size (run with Mixed pod sizes to fill this in)')}
-
-                {section('Accurate simulation (Forge)')}
-                {row('Rating', (d) => sim(forgeStats, forgeRatings, d, 'rating'))}
-                {row('Win rate', (d) => sim(forgeStats, forgeRatings, d, 'win'))}
+                {section('Simulation results (Forge)')}
+                {row('Rating', (d) => sim(stats, ratings, d, 'rating'))}
+                {row('Win rate', (d) => sim(stats, ratings, d, 'win'))}
+                {row('Avg place', (d) => sim(stats, ratings, d, 'place'))}
                 {row('Avg winning round', (d) => {
-                  const s = forgeStats.decks[d.id];
+                  const s = stats.decks[d.id];
                   return s?.wins ? (s.winRoundSum / s.wins).toFixed(1) : <span className="muted">—</span>;
                 })}
-                {row('Games', (d) => sim(forgeStats, forgeRatings, d, 'games'))}
+                {row('Avg mulligans', (d) => {
+                  const s = stats.decks[d.id];
+                  return s?.games ? (s.mulligans / s.games).toFixed(2) : <span className="muted">—</span>;
+                }, "Average mulligans per game, counting Commander's free first mulligan. High numbers point to a shaky mana base or too many expensive cards.")}
+                {row('By player count', (d) => <BySize stats={stats} deckId={d.id} />, 'Win rate vs a fair share at each pod size (run with Mixed pod sizes to fill this in)')}
+                {row('Games', (d) => sim(stats, ratings, d, 'games'))}
 
-                {section('Deck makeup (approximate — counted from how the quick engine reads each card)')}
+                {section('Deck makeup (approximate — counted from rules text)')}
                 {row('Lands', comp('lands'))}
                 {row('Avg mana value', comp('avgManaValue', 2), 'Average mana value of non-land cards')}
                 {row('Mana curve', (d) => <Curve curve={comps.get(d.id)!.curve} color={deckColor(decks, d.id)} />)}
@@ -134,11 +131,10 @@ export function ComparePanel({ decks, selected, quickStats, forgeStats, onOpenRe
                 {row('Counterspells', comp('counters'))}
                 {row('Tutors', comp('tutors'))}
                 {row('Protection', comp('protection'))}
-                {row('Understood by quick engine', (d) => pct(comps.get(d.id)!.modeled, 0))}
 
-                {section('Cards (quick engine) — impact on finish score; open the full report for details')}
-                {row('Weakest', (d) => <CardList deck={d} stats={quickStats} which="weak" />)}
-                {row('Strongest', (d) => <CardList deck={d} stats={quickStats} which="strong" />)}
+                {section('Cards (when cast in Forge games) — open the full report for details')}
+                {row('Weakest', (d) => <CardList deck={d} stats={stats} which="weak" />)}
+                {row('Strongest', (d) => <CardList deck={d} stats={stats} which="strong" />)}
                 {row('', (d) => <button onClick={() => onOpenReport(d.id)}>Full report →</button>)}
               </tbody>
             </table>
@@ -164,10 +160,10 @@ function Curve({ curve, color }: { curve: number[]; color: string }) {
 }
 
 function CardList({ deck, stats, which }: { deck: SimDeck; stats: Stats; which: 'weak' | 'strong' }) {
-  const report = cardReport(stats, deck, 'early');
+  const report = cardReport(stats, deck);
   if (report.notice && report.games < 400) return <span className="muted small">Needs more games</span>;
   const rows = report.rows
-    .filter((r) => !r.card.isLand && r.card.modeled && r.impact !== null)
+    .filter((r) => !r.card.isLand && r.impact !== null)
     .sort((a, b) => (which === 'weak' ? a.impact! - b.impact! : b.impact! - a.impact!))
     .slice(0, 3);
   return (

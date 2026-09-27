@@ -349,3 +349,22 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); fon
 .legend-row .item { display: inline-flex; align-items: center; gap: 6px; }
 .legend-ci { position: relative; display: inline-block; width: 46px; height: 6px; background: var(--panel-2); border-radius: 3px; }
 .legend-swatch { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
+.forge-weak { color: var(--muted); font-weight: 600; cursor: help; }
+
+/* ---------- Forge personality quiz ---------- */
+.question .situation { margin: 4px 0; font-size: 15px; }
+.question .ask { margin: 8px 0 12px; font-size: 16px; }
+.question.saved { box-shadow: 0 0 0 2px var(--good); transition: box-shadow 0.2s; }
+.answer-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+button.big { padding: 10px 18px; font-size: 15px; }
+kbd { font-family: ui-monospace, monospace; font-size: 11px; border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; margin-right: 6px; opacity: 0.7; }
+.player-box.focus { box-shadow: 0 0 0 2px var(--warn); }
+.perm { display: inline-flex; gap: 5px; align-items: baseline; flex-wrap: wrap; padding: 4px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; background: var(--panel); }
+.perm.focus { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); }
+.hand-card { border: 1px solid var(--border); border-radius: 8px; }
+.hand-card.hypothetical { border-style: dashed; border-color: var(--accent); }
+.profile-details { margin-top: 8px; }
+.profile-table { border-collapse: collapse; font-size: 13px; margin-top: 8px; width: 100%; max-width: 620px; }
+.profile-table th, .profile-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+.profile-table th { color: var(--muted); font-size: 12px; }
+button.link.danger { color: var(--bad); }

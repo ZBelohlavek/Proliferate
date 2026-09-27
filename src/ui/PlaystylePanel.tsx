@@ -1,62 +1,79 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SimDeck } from '../engine/types';
-import { agreement, describe, fitWeights, type Answer, type DecisionKind } from '../ai/playstyle';
-import { makeScenario, type PermView, type PlayerView, type Scenario } from '../ai/scenario';
-import { pct } from './format';
-import { shuffle } from '../sim/pods';
+import { estimateRates, type ProfileAnswer, type QuestionKind } from '../ai/forgeProfile';
+import { makeScenario, QUESTION_KINDS, type PermView, type PlayerView, type Scenario } from '../ai/scenario';
 import { Help } from './Help';
+import { pct } from './format';
 
 interface Props {
   decks: SimDeck[];
   selected: string[];
-  answers: Answer[];
-  onAnswer: (a: Answer) => void;
+  answers: ProfileAnswer[];
+  onAnswer: (a: ProfileAnswer) => void;
   onResetAnswers: () => void;
-  usePlaystyle: boolean;
-  onUsePlaystyle: (on: boolean) => void;
+  usingProfile: boolean;
+  onUseProfile: (on: boolean) => void;
 }
 
-const KIND_LABEL: Record<DecisionKind, string> = { threat: 'Biggest threat', attack: 'Who to attack', cast: 'What to cast' };
-const KINDS: DecisionKind[] = ['threat', 'attack', 'cast'];
-
-export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnswers, usePlaystyle, onUsePlaystyle }: Props) {
+/**
+ * The Playstyle quiz: an endless stream of real board states, each asking one
+ * yes/no decision. Answers quietly tune a Forge AI personality ("You").
+ */
+export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnswers, usingProfile, onUseProfile }: Props) {
   const [deckId, setDeckId] = useState<string>(() => selected[0] ?? decks[0]?.id ?? '');
-  const [kindMode, setKindMode] = useState<DecisionKind | 'mix'>('mix');
   const [scenario, setScenario] = useState<Scenario | null>(null);
-  const [picked, setPicked] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
-
+  const [flash, setFlash] = useState(false);
   const deck = decks.find((d) => d.id === deckId) ?? decks[0];
-  const weights = useMemo(() => fitWeights(answers), [answers]);
-  const agree = useMemo(() => agreement(answers), [answers]);
-  const traits = useMemo(() => describe(weights, answers), [weights, answers]);
-  const counts = KINDS.map((k) => answers.filter((a) => a.kind === k).length);
+  const rates = useMemo(() => estimateRates(answers), [answers]);
 
-  function next() {
+  const next = useCallback(() => {
     if (!deck) return;
-    // In "mix" mode, ask about whatever you've answered least.
-    const order = kindMode === 'mix' ? shuffle([...KINDS]).sort((a, b) => counts[KINDS.indexOf(a)] - counts[KINDS.indexOf(b)]) : [kindMode];
+    // Weighted random order: any situation can come next (so there's no pattern to
+    // play along with), but ones you've answered less are a bit more likely.
+    const counts = new Map<QuestionKind, number>(QUESTION_KINDS.map((k) => [k, answers.filter((a) => a.kind === k).length]));
+    const min = Math.min(...counts.values());
+    const pool = QUESTION_KINDS.map((k) => ({ k, w: 1 / (1 + (counts.get(k)! - min) / 3) }));
+    const order: QuestionKind[] = [];
+    while (pool.length) {
+      let r = Math.random() * pool.reduce((s, x) => s + x.w, 0);
+      const i = pool.findIndex((x) => (r -= x.w) <= 0);
+      order.push(pool.splice(i === -1 ? pool.length - 1 : i, 1)[0].k);
+    }
     for (const kind of order) {
       const s = makeScenario(decks, deck, kind);
       if (s) {
         setScenario(s);
-        setPicked(null);
         setFailed(false);
         return;
       }
     }
     setScenario(null);
     setFailed(true);
-  }
+  }, [deck, decks, answers]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => next(), [deckId, kindMode]);
+  useEffect(() => next(), [deckId]);
 
-  function choose(option: number) {
-    if (!scenario || picked !== null) return;
-    setPicked(option);
-    onAnswer({ kind: scenario.kind, options: scenario.options, chosen: option, aiChoice: scenario.aiChoice, at: Date.now() });
-  }
+  const answer = useCallback((yes: boolean) => {
+    if (!scenario) return;
+    onAnswer({ kind: scenario.kind, yes, context: scenario.context, at: Date.now() });
+    setFlash(true);
+    setTimeout(() => setFlash(false), 400);
+    next();
+  }, [scenario, onAnswer, next]);
+
+  // Keys 1 / 2 answer, S skips — handy for answering lots of questions quickly.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === '1') answer(true);
+      else if (e.key === '2') answer(false);
+      else if (e.key.toLowerCase() === 's') next();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [answer, next]);
 
   if (decks.length < 2) return <section className="panel empty"><p>Import at least two decks — the quiz needs opponents.</p></section>;
 
@@ -64,69 +81,62 @@ export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnsw
     <>
       <section className="panel">
         <div className="panel-head">
-          <h2>Your playstyle</h2>
+          <h2>Your Forge personality <Help>
+            Every question is a real situation from a game with your deck. Your answers tune a Forge AI profile called <strong>You</strong>: how often you attack into trades, counter spells (by mana value), hold combat tricks until blocks, trade when blocking (at high and low life) and destroy artifacts/enchantments.
+            <br /><br />It starts as Forge&apos;s Default AI and moves toward your choices as you answer. Answer honestly — there are no right answers, and the more you answer the closer it gets.
+          </Help></h2>
           <label className="toggle">
-            <input type="checkbox" checked={usePlaystyle} onChange={(e) => onUsePlaystyle(e.target.checked)} disabled={!answers.length} />
-            Pilot quick-engine games with my playstyle
+            <input type="checkbox" checked={usingProfile} onChange={(e) => onUseProfile(e.target.checked)} />
+            Use my personality in simulations
           </label>
         </div>
         <p className="muted small">
-          Answer questions about real game situations. Each answer teaches the simulator how you weigh threats, targets and plays; with the switch on, the quick engine
-          plays every deck your way. With no answers it plays exactly like the default AI. (Forge games use Forge&apos;s own AI and aren&apos;t affected.)
+          {answers.length} answer{answers.length === 1 ? '' : 's'} so far. Keep going as long as you like — every answer refines it. Forge picks it up the next time a run starts.
+          {answers.length > 0 && <> <button className="link danger" onClick={() => confirm(`Forget all ${answers.length} answers?`) && onResetAnswers()}>Reset answers</button></>}
         </p>
-        <div className="kpis">
-          {KINDS.map((k, i) => <div key={k} className="kpi"><span>{counts[i]}</span>{KIND_LABEL[k]} answers</div>)}
-          <div className="kpi" title="How often each AI picks what you picked. Your style is scored on answers it wasn't trained on (leave-one-out).">
-            <span>{agree ? `${pct(agree.defaultAi, 0)} → ${pct(agree.yourStyle, 0)}` : '—'}</span>
-            agreement: default AI → your style
-            <Help>How often each AI would have made the same choice you did. The first number is the built-in AI; the second is the AI trained on your answers, tested only on answers it wasn&apos;t trained on, so it can&apos;t just memorise them. It rises as you answer more questions.</Help>
-          </div>
-        </div>
-        {traits.length > 0 ? (
-          <ul className="traits">{traits.map((t, i) => <li key={i}><span className="tag">{KIND_LABEL[t.kind]}</span> {t.text}</li>)}</ul>
-        ) : (
-          <p className="muted small">Answer a few questions of each type to see how your style differs from the AI.</p>
-        )}
         {answers.length > 0 && (
-          <button className="danger" onClick={() => confirm(`Forget all ${answers.length} answers?`) && onResetAnswers()}>Reset answers</button>
+          <details className="profile-details">
+            <summary>See what your answers have taught Forge</summary>
+            <table className="profile-table">
+              <thead><tr><th>Situation</th><th>You</th><th>Forge default</th><th>Answers</th></tr></thead>
+              <tbody>
+                {rates.map((r) => (
+                  <tr key={r.key} className={r.answers ? '' : 'muted'}>
+                    <td>{r.label}</td>
+                    <td className="num"><strong>{pct(r.value, 0)}</strong></td>
+                    <td className="num">{pct(r.forgeDefault, 0)}</td>
+                    <td className="num">{r.answers}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="muted small">&quot;You&quot; blends your answers with Forge&apos;s default, weighted as if the default were 4 answers, so a few early answers can&apos;t swing it too far.</p>
+          </details>
         )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
-          <h2>Quiz</h2>
-          <div className="quiz-controls">
-            <select value={deck?.id} onChange={(e) => setDeckId(e.target.value)} title="The deck you play in these scenarios">
-              {decks.map((d) => <option key={d.id} value={d.id}>You play: {d.name}</option>)}
-            </select>
-            <div className="seg">
-              <button className={kindMode === 'mix' ? 'active' : ''} onClick={() => setKindMode('mix')}>Mix</button>
-              {KINDS.map((k) => <button key={k} className={kindMode === k ? 'active' : ''} onClick={() => setKindMode(k)}>{KIND_LABEL[k]}</button>)}
-            </div>
-          </div>
+          <h2>What would you do?</h2>
+          <select value={deck?.id} onChange={(e) => setDeckId(e.target.value)} title="The deck you play in these situations" style={{ maxWidth: 360 }}>
+            {decks.map((d) => <option key={d.id} value={d.id}>You play: {d.name}</option>)}
+          </select>
         </div>
 
-        {failed && <p className="warn">Couldn&apos;t find a situation for that question with this deck — try another question type or deck.</p>}
+        {failed && <p className="warn">Couldn&apos;t build a situation with this deck right now — try another deck.</p>}
         {scenario && (
           <>
-            <div className="question">
-              <strong>Round {scenario.round}.</strong> {scenario.prompt}
-              {scenario.kind === 'attack' && <div className="small muted">Your attackers: {scenario.attackers.join(', ')}</div>}
-              {scenario.kind === 'cast' && <div className="small muted">You have {scenario.mana} mana available.</div>}
-            </div>
-
-            {picked !== null && (
-              <div className={`reveal ${picked === scenario.aiChoice ? 'same' : 'diff'}`}>
-                You picked <strong>{scenario.optionLabels[picked]}</strong>.{' '}
-                {picked === scenario.aiChoice
-                  ? 'The default AI agrees.'
-                  : <>The default AI would have picked <strong>{scenario.optionLabels[scenario.aiChoice]}</strong>.</>}
-                <button className="primary" onClick={next}>Next situation →</button>
+            <div className={`question ${flash ? 'saved' : ''}`}>
+              <div className="small muted">Round {scenario.round}</div>
+              <p className="situation">{scenario.situation}</p>
+              <p className="ask"><strong>{scenario.question}</strong></p>
+              <div className="answer-row">
+                <button className="primary big" onClick={() => answer(true)}><kbd>1</kbd> {scenario.yesLabel}</button>
+                <button className="big" onClick={() => answer(false)}><kbd>2</kbd> {scenario.noLabel}</button>
+                <button className="link" onClick={next}>Skip (S)</button>
               </div>
-            )}
-            {picked === null && <button className="skip" onClick={next}>Skip this one</button>}
-
-            <Board scenario={scenario} picked={picked} onChoose={choose} />
+            </div>
+            <Board scenario={scenario} />
           </>
         )}
       </section>
@@ -134,42 +144,33 @@ export function PlaystylePanel({ decks, selected, answers, onAnswer, onResetAnsw
   );
 }
 
-function Board({ scenario, picked, onChoose }: { scenario: Scenario; picked: number | null; onChoose: (i: number) => void }) {
+function Board({ scenario }: { scenario: Scenario }) {
   const you = scenario.players.find((p) => p.you)!;
   const opponents = scenario.players.filter((p) => !p.you);
-  const state = (option: number | null) =>
-    option === null ? '' : picked === null ? 'pickable' : option === picked ? 'picked' : option === scenario.aiChoice ? 'ai-pick' : '';
-
   return (
     <div className="board">
       <div className="opponents">
-        {opponents.map((p) => <PlayerBox key={p.seat} p={p} state={state} onChoose={onChoose} kind={scenario.kind} />)}
+        {opponents.map((p) => <PlayerBox key={p.seat} p={p} />)}
       </div>
-      <PlayerBox p={you} state={state} onChoose={onChoose} kind={scenario.kind} />
+      <PlayerBox p={you} />
       <div className="hand">
-        <div className="hand-title">Your hand</div>
+        <div className="hand-title">Your hand · {scenario.mana} mana available</div>
         <div className="hand-cards">
           {scenario.hand.map((c, i) => (
-            <button key={i} className={`hand-card ${state(c.option)}`} disabled={scenario.kind !== 'cast' || c.option === null || picked !== null} onClick={() => c.option !== null && onChoose(c.option)} title={c.detail}>
+            <div key={i} className={`hand-card ${c.hypothetical ? 'hypothetical' : ''}`} title={c.detail}>
               <span className="hc-name">{c.name}</span>
               <span className="hc-cost">{c.cost}</span>
-            </button>
+            </div>
           ))}
-          {scenario.kind === 'cast' && scenario.passOption !== null && (
-            <button className={`hand-card pass ${state(scenario.passOption)}`} disabled={picked !== null} onClick={() => onChoose(scenario.passOption!)}>
-              <span className="hc-name">Hold up mana / cast nothing</span>
-            </button>
-          )}
         </div>
       </div>
     </div>
   );
 }
 
-function PlayerBox({ p, state, onChoose, kind }: { p: PlayerView; state: (o: number | null) => string; onChoose: (i: number) => void; kind: DecisionKind }) {
-  const pickPlayer = kind === 'attack' && p.option !== null;
+function PlayerBox({ p }: { p: PlayerView }) {
   return (
-    <div className={`player-box ${p.you ? 'you' : ''} ${pickPlayer ? state(p.option) : ''}`}>
+    <div className={`player-box ${p.you ? 'you' : ''} ${p.focus ? 'focus' : ''}`}>
       <div className="pb-head">
         <div>
           <strong>{p.you ? 'You' : p.deckName}</strong>
@@ -178,36 +179,30 @@ function PlayerBox({ p, state, onChoose, kind }: { p: PlayerView; state: (o: num
         <div className="pb-life">{p.life}</div>
       </div>
       <div className="pb-meta small muted">
-        {p.lands} lands · {p.hand} cards in hand · {p.library} in library
-        {p.attackedYouLastRound && <span className="tag warn-tag">attacked you last round</span>}
+        {p.lands} lands ({p.untappedLands} untapped) · {p.hand} cards in hand · {p.library} in library
         {p.commanderDamage.length > 0 && <div>Commander damage taken: {p.commanderDamage.join(', ')}</div>}
       </div>
-      {pickPlayer && (
-        <button className="primary attack-btn" disabled={state(p.option) !== 'pickable'} onClick={() => onChoose(p.option!)}>Attack this player</button>
-      )}
-      <PermList perms={p.creatures} state={state} onChoose={onChoose} clickable={kind === 'threat'} />
-      <PermList perms={p.others} state={state} onChoose={onChoose} clickable={kind === 'threat'} />
+      <PermList perms={p.creatures} />
+      <PermList perms={p.others} />
     </div>
   );
 }
 
-function PermList({ perms, state, onChoose, clickable }: { perms: PermView[]; state: (o: number | null) => string; onChoose: (i: number) => void; clickable: boolean }) {
+function PermList({ perms }: { perms: PermView[] }) {
   if (!perms.length) return null;
   return (
     <div className="perms">
-      {perms.map((perm, i) => {
-        const s = clickable ? state(perm.option) : '';
-        return (
-          <button key={i} className={`perm ${s} ${perm.tapped ? 'tapped' : ''}`} disabled={s !== 'pickable'} onClick={() => perm.option !== null && onChoose(perm.option)} title={perm.detail}>
-            {perm.count > 1 && <span className="perm-count">{perm.count}×</span>}
-            {perm.commander && <span className="tag">CMDR</span>}
-            <span className="perm-name">{perm.name}</span>
-            {perm.pt && <span className="perm-pt">{perm.pt}</span>}
-            {perm.keywords.length > 0 && <span className="perm-kw">{perm.keywords.join(', ')}</span>}
-            {perm.sick && <span className="perm-kw">summoning sick</span>}
-          </button>
-        );
-      })}
+      {perms.map((perm, i) => (
+        <span key={i} className={`perm ${perm.focus ? 'focus' : ''} ${perm.tapped ? 'tapped' : ''}`} title={perm.detail}>
+          {perm.count > 1 && <span className="perm-count">{perm.count}×</span>}
+          {perm.commander && <span className="tag">CMDR</span>}
+          <span className="perm-name">{perm.name}</span>
+          {perm.pt && <span className="perm-pt">{perm.pt}</span>}
+          {perm.keywords.length > 0 && <span className="perm-kw">{perm.keywords.join(', ')}</span>}
+          {perm.tapped && <span className="perm-kw">tapped</span>}
+          {perm.sick && <span className="perm-kw">summoning sick</span>}
+        </span>
+      ))}
     </div>
   );
 }

@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { GameResult } from '../src/engine/types.ts';
 import { ForgeCardDb } from './forgeCards.ts';
-import { parseForgeLog } from './forgeLog.ts';
+import { parseForgeGames } from './forgeLog.ts';
 import { choosePod, type Pairing } from '../src/sim/pods.ts';
 
 export interface ForgeDeckInput {
@@ -32,7 +32,18 @@ export interface ForgeStartOptions {
   stopAt: number | null;
   /** Stop after this many games in this run, or null. */
   maxGames: number | null;
+  /** Games each Forge process plays before restarting (saves Forge's start-up time). */
+  gamesPerLaunch: number;
+  /** Default, Cautious, Reckless, Experimental, You (learned profile) or Mixed (random per seat). */
+  aiProfile: string;
+  /** Settings for the "You" profile, written on top of Forge's Default profile. */
+  profileOverrides: Record<string, string> | null;
 }
+
+/** Forge's built-in AI profiles (files in forge/res/ai). */
+const BUILT_IN_PROFILES = ['Default', 'Cautious', 'Reckless', 'Experimental'];
+/** File name (without .ai) of the profile learned in the Playstyle quiz. */
+export const YOU_PROFILE = 'ProliferateYou';
 
 interface PreparedDeck {
   input: ForgeDeckInput;
@@ -142,13 +153,52 @@ export class ForgeRunner {
   }
 
   /** Check which cards Forge doesn't know, per deck. */
-  check(decks: ForgeDeckInput[]): { deckId: string; missing: string[] }[] {
+  /** Per deck: cards Forge doesn't know, and cards its AI is flagged as playing poorly. */
+  check(decks: ForgeDeckInput[]): { deckId: string; missing: string[]; aiWeak: string[] }[] {
     if (this.problem) return [];
     const db = this.cardDb();
-    return decks.map((d) => ({
-      deckId: d.id,
-      missing: [...d.commanders, ...d.cards.map((c) => c.name)].filter((name) => !db.lookup(name)),
-    }));
+    return decks.map((d) => {
+      const names = [...d.commanders, ...d.cards.map((c) => c.name)];
+      return {
+        deckId: d.id,
+        missing: names.filter((name) => !db.lookup(name)),
+        aiWeak: names.filter((name) => db.lookup(name) && db.isAiWeak(name)),
+      };
+    });
+  }
+
+  /**
+   * Write the "You" AI profile: Forge's Default profile with the settings
+   * learned in the Playstyle quiz swapped in. Forge reads every *.ai file in
+   * res/ai, so the new profile can then be named with -a.
+   */
+  private writeYouProfile(overrides: Record<string, string>) {
+    const dir = join(this.forgeDir!, 'res', 'ai');
+    const lines = readFileSync(join(dir, 'Default.ai'), 'utf8').split(/\r?\n/);
+    const safe = Object.entries(overrides).filter(([k, v]) => /^[A-Z0-9_]+$/.test(k) && /^[\w.-]+$/.test(v));
+    const pending = new Map(safe);
+    const out = lines.map((line) => {
+      const key = line.match(/^([A-Z0-9_]+)=/)?.[1];
+      if (key && pending.has(key)) {
+        const value = pending.get(key)!;
+        pending.delete(key);
+        return `${key}=${value}`;
+      }
+      return line;
+    });
+    for (const [k, v] of pending) out.push(`${k}=${v}`);
+    out.unshift('# Written by Proliferate from your Playstyle quiz answers (Forge Default + your settings).');
+    writeFileSync(join(dir, `${YOU_PROFILE}.ai`), out.join('\n'));
+  }
+
+  /** The -a profile name for each seat. */
+  private profilesFor(size: number): string[] {
+    const choice = this.settings!.aiProfile;
+    return Array.from({ length: size }, () => {
+      if (choice === 'You') return YOU_PROFILE;
+      if (choice === 'Mixed') return BUILT_IN_PROFILES[Math.floor(Math.random() * BUILT_IN_PROFILES.length)];
+      return BUILT_IN_PROFILES.includes(choice) ? choice : 'Default';
+    });
   }
 
   start(opts: ForgeStartOptions) {
@@ -156,6 +206,7 @@ export class ForgeRunner {
     this.stop();
     const warnings = this.check(opts.decks).filter((w) => w.missing.length);
     this.prepared = opts.decks.map((d) => this.writeDeck(d));
+    if (opts.aiProfile === 'You') this.writeYouProfile(opts.profileOverrides ?? {});
     this.settings = opts;
     this.played.clear();
     this.running = true;
@@ -211,6 +262,13 @@ export class ForgeRunner {
     return false;
   }
 
+  /** Games the next launch should play: gamesPerLaunch, but never past a game limit. */
+  private gamesForNextLaunch(): number {
+    const s = this.settings!;
+    const n = Math.max(1, s.gamesPerLaunch);
+    return s.maxGames === null ? n : Math.max(1, Math.min(n, s.maxGames - this.launchedThisRun));
+  }
+
   private launch() {
     if (!this.running || !this.settings) return;
     if (this.limitReached()) {
@@ -219,12 +277,16 @@ export class ForgeRunner {
       this.finishedByLimit = true;
       return;
     }
-    this.launchedThisRun++;
+    const games = this.gamesForNextLaunch();
+    this.launchedThisRun += games;
     const pod = this.choosePod();
     const { clockSeconds, heapMb } = this.settings;
+    // -n plays several games with the same pod (Forge rotates the starting player);
+    // -c is Forge's per-game clock; -a gives each seat an AI profile.
     const args = [
       `-Xmx${heapMb}m`, '-Dio.netty.tryReflectionSetAccessible=true', '-Dfile.encoding=UTF-8',
-      '-jar', this.jar!, 'sim', '-d', ...pod.map((d) => d.file), '-f', 'commander', '-n', '1', '-c', String(clockSeconds),
+      '-jar', this.jar!, 'sim', '-d', ...pod.map((d) => d.file), '-f', 'commander', '-n', String(games), '-c', String(clockSeconds),
+      '-a', ...this.profilesFor(pod.length),
     ];
     const started = Date.now();
     const proc = spawn(this.java, args, { cwd: this.forgeDir!, windowsHide: true });
@@ -233,7 +295,7 @@ export class ForgeRunner {
     let out = '';
     proc.stdout.on('data', (chunk) => (out += chunk));
     proc.stderr.on('data', (chunk) => (out += chunk));
-    const killTimer = setTimeout(() => killTree(proc), (clockSeconds + 120) * 1000);
+    const killTimer = setTimeout(() => killTree(proc), (clockSeconds * games + 120) * 1000);
 
     proc.on('error', (err) => this.error(`Couldn't start Java: ${err.message}. Is Java 17+ installed?`));
     proc.on('close', () => {
@@ -241,26 +303,31 @@ export class ForgeRunner {
       const wasTracked = this.procs.delete(proc);
       if (!wasTracked) return; // stopped by the user
       const lines = out.split(/\r?\n/);
-      const parsed = parseForgeLog(
+      const parsedGames = parseForgeGames(
         lines,
         pod.map((d) => d.input.id),
         pod.map((d) => d.input.commanders),
         pod.map((d) => d.input.name),
       );
-      if (parsed) {
-        // Forge names cards by their front face; map back to the deck's own names.
-        parsed.result.cards?.forEach((seatCards, seat) => {
-          const byFront = new Map<string, string>();
-          const deck = pod[seat].input;
-          for (const name of [...deck.commanders, ...deck.cards.map((c) => c.name)]) byFront.set(name.split(' // ')[0], name);
-          seatCards.cast = seatCards.cast.map((n) => byFront.get(n) ?? byFront.get(n.split(' // ')[0]) ?? n);
+      const parsed = parsedGames.length > 0;
+      // Forge names cards by their front face; map back to the deck's own names.
+      const byFront = pod.map((d) => {
+        const m = new Map<string, string>();
+        for (const name of [...d.input.commanders, ...d.input.cards.map((c) => c.name)]) m.set(name.split(' // ')[0], name);
+        return m;
+      });
+      const each = (Date.now() - started) / Math.max(1, parsedGames.length);
+      for (const game of parsedGames) {
+        game.result.cards?.forEach((seatCards, seat) => {
+          seatCards.cast = seatCards.cast.map((n) => byFront[seat].get(n) ?? byFront[seat].get(n.split(' // ')[0]) ?? n);
         });
-        this.games.push({ result: parsed.result, summary: parsed.summary.slice(0, 4000), decks: pod.map((d) => d.input.id), durationMs: Date.now() - started });
+        this.games.push({ result: game.result, summary: game.summary.slice(0, 4000), decks: pod.map((d) => d.input.id), durationMs: each });
         this.finishedAt.push(Date.now());
         this.finishedThisRun++;
         // Only keep full play-by-play for recent games.
         if (this.games.length > 20) this.games[this.games.length - 21].summary = [];
-      } else {
+      }
+      if (!parsed) {
         const hint = lines.find((l) => /could not load deck|exception|error/i.test(l)) ?? lines.filter(Boolean).slice(-1)[0] ?? 'no output';
         this.error(`A Forge game produced no result: ${hint.slice(0, 300)}`);
       }

@@ -1,113 +1,81 @@
 # Proliferate
 
-Upload your Commander decks from [Archidekt](https://archidekt.com), then let them play thousands of simulated 4-player EDH games against each other to see how they stack up.
+Import your Commander decks from [Archidekt](https://archidekt.com), then let them play each other again and again under the full Magic rules to see how they really compare. Every game is played by [Forge](https://github.com/Card-Forge/forge), the open-source Magic rules engine with ~33,000 scripted cards and its own AI.
 
-- **Import** decks by linking your Archidekt account (lists all your public decks and syncs ones you've changed), from an Archidekt link, or by uploading/pasting a text decklist (card data comes from Scryfall).
-- **Two engines:**
-  - **Quick** — a built-in simplified engine that runs in the browser at a few thousand games per second.
-  - **Accurate** — full Magic rules via [Forge](https://github.com/Card-Forge/forge), the open-source rules engine with ~33,000 scripted cards and its own AI. A few games per minute, run locally.
-- **Compare** with a leaderboard (strength rating, win rate with confidence intervals, average finishing place, how each deck kills), a head-to-head grid, and a rating-over-time chart.
-- **Compare** up to six decks side by side: bracket, results from both engines, mana curve, ramp/draw/removal counts, strongest and weakest cards.
-- **Deck report**: an estimated **Commander Bracket** with the reasons behind it, and **card performance** — which cards help or hurt the deck when they show up.
-- **Run for as long as you like**: until you stop, for a set time (15 minutes to 24 hours), or for a set number of games — separate from Forge's per-game "draw after" limit. Forge runs keep to the limit even with the browser closed.
-- **Player count**: run with *Mixed* pod sizes (2–6) to see how each deck does at every table size — some decks shine 1v1, others in big pods.
-- **Playstyle**: answer quiz questions about frozen board states (biggest threat, who to attack, what to cast) and the quick engine learns to pilot decks your way.
-- **Watch a game** turn by turn to see how the AI pilots your cards.
-- **Audit** how each card is interpreted, and which ones the simulator doesn't understand.
+- **Import**: link your Archidekt account (lists all your public decks and syncs ones you've changed), paste a deck link, or upload/paste a text decklist.
+- **Simulate** balanced random pods for as long as you like — until you stop, for a set time, or a set number of games. Several Forge games run in parallel.
+- **Leaderboard**: strength rating, win rate with confidence range, average place, how each deck kills, commander cast turn, average mulligans — overall or by player count (2–6).
+- **Compare** up to six decks side by side, including deck makeup and bracket.
+- **Deck report**: estimated **Commander Bracket** with reasons, and **card performance** — which cards pull their weight.
+- **Playstyle**: answer an endless stream of real board-state questions; your answers tune a **Forge AI personality** so your decks can be piloted your way.
+- **Watch a game**: play-by-play of the latest Forge game.
 
-Decks and results are saved in your browser's local storage; each engine keeps its own results.
+Decks and results are saved in your browser; simulations run on your own computer.
 
 ## Running it
 
-Requires [Node.js](https://nodejs.org) 20 or newer.
+Requires [Node.js](https://nodejs.org) 20+ and Java 17+ ([Adoptium](https://adoptium.net) is fine).
 
 ```bash
 npm install
+npm run setup:forge
 npm run dev
 ```
 
-Then open http://localhost:5173.
-
-### Accurate mode (Forge)
-
-Needs Java 17+ ([Adoptium](https://adoptium.net) is fine). Then:
-
-```bash
-npm run setup:forge
-```
-
-This downloads the latest Forge release (~300 MB) into `../forge` and gives it its own data folder (`../forge-data`), so it never touches a Forge install you play with yourself. Set `FORGE_DIR` to put it elsewhere. Then run `npm run dev`, open the Simulate tab and pick **Accurate (Forge)**.
-
-How it works: the dev server converts each deck to a Forge `.dck` file, then runs a pool of `java -jar forge.jar sim -d … -f commander` processes on balanced random pods and parses each game log (elimination order, cause of death, commander cast turn, mulligans) into the same statistics the quick engine produces. Each game uses several CPU cores and about 1 GB of RAM; on a 24-thread desktop, 6–8 parallel processes give roughly 3–6 games a minute. Games keep running while the browser tab is closed, as long as the dev server is up. Cards Forge doesn't know are reported and left out.
-
-Other commands:
+`setup:forge` downloads the latest Forge release (~300 MB) into `../forge` and gives it its own data folder (`../forge-data`), so it never touches a Forge install you play with yourself. Set `FORGE_DIR` to put it elsewhere. Then open http://localhost:5173.
 
 | Command | What it does |
 | --- | --- |
+| `npm run dev` | Start the site and the Forge runner |
+| `npm run setup:forge` | Download and configure Forge |
 | `npm test` | Run the unit tests |
-| `npm run setup:forge` | Download and configure Forge for Accurate mode |
-| `npm run build` | Type-check and build the static site into `dist/` |
-| `npm run preview` | Serve the production build locally |
+| `npm run build` | Type-check and build |
 
-### Deploying
+## How simulations work
 
-Quick mode deploys as a static site. Accurate mode needs Forge and Java on the machine running the server, so it only works locally (or on a server you run yourself). The static site has one tiny endpoint: Archidekt's API doesn't allow requests from other websites, so deck imports go through `/api/archidekt?id=…`. In development, Vite serves that endpoint (see `vite.config.ts`). For hosting, `api/archidekt.js` is a ready-made [Vercel](https://vercel.com) function — importing the repo into Vercel deploys both the site and the endpoint with no configuration. On a host without serverless functions, text-decklist import still works (Scryfall allows browser requests).
+The dev server converts each deck to a Forge `.dck` file (checking every card against Forge's card list) and runs a pool of `java -jar forge.jar sim … -f commander` processes on balanced random pods. Each process can play several games back to back (`-n`) to skip Forge's ~8-second start-up, with a per-game time limit (`-c`, "Draw after") and an AI personality per player (`-a`). Each game log is parsed for finishing order, cause of death and killer, commander cast round, mulligans and every card cast, and folded into the statistics.
+
+Every game counts as a set of pairwise matches — each deck "beats" every deck it outlasted — and a Bradley–Terry model fitted to all of them gives the **rating** (Elo scale: 1500 average, +100 ≈ 64% to outlast an average deck).
+
+Forge's shuffles are fair: its AI "mana cheat" shuffle option only works when a game-level flag is set, which simulation mode never does.
+
+### AI personalities
+
+Forge's AI reads ~300 settings from a profile file (`forge/res/ai/*.ai`). You can pilot every deck with Forge's **Default**, **Cautious**, **Reckless** or **Experimental** profile, a **Mixed** table (random per player), or **You**: Default with the settings learned in the Playstyle quiz, written to `forge/res/ai/ProliferateYou.ai` when a run starts.
+
+The quiz shows real board states from games with your deck (built by a small internal board engine) and asks one yes/no question each. Each question type maps to real Forge settings:
+
+| Situation | Forge settings |
+| --- | --- |
+| Attack into a blocker that would trade? | `CHANCE_TO_ATTACK_INTO_TRADE`, `CHANCE_TO_ATKTRADE_WHEN_OPP_HAS_MANA`, `PLAY_AGGRO`, `ATTACK_INTO_TRADE_WHEN_TAPPED_OUT` |
+| Counter a spell of mana value N? | `CHANCE_TO_COUNTER_CMC_1/2/3` |
+| Cast a combat trick now or wait for blocks? | `TRY_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK`, `CHANCE_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK` |
+| Block and trade, or take the damage? (by life total) | `MIN/MAX_CHANCE_TO_RANDOMLY_TRADE_ON_BLOCK` |
+| Destroy an artifact/enchantment now or save removal? | `ACTIVELY_DESTROY_ARTS_AND_NONAURA_ENCHS` |
+
+Your rate for each is blended with Forge's default (weighted as 4 answers), so early answers can't swing it too far. Things Forge's settings can't express — like who you consider the biggest threat, or how strict you are with mulligans — can't be learned this way.
+
+### Card performance
+
+Forge logs show what each player cast, not what they drew. Comparing games where a card was cast against games where it wasn't is biased upward (decks that survive longer cast more), so each card is reported **relative to the rest of the same deck** — its impact minus the deck's median card — with a 95% margin of error. Cards Forge's developers flag as ones its AI plays poorly are marked on the Decks tab.
 
 ## Brackets
 
-The estimate follows the official [Commander Brackets](https://magic.wizards.com/en/formats/commander#brackets) (beta, February 2026 update):
-
-- **Game Changers** — the one hard rule: none in Brackets 1–2, up to three in Bracket 3, any number in 4–5.
-- **Barometers** — two-card infinite combos, chained extra turns and mass land denial push a deck up (fast two-card combos and land denial to 4+).
-- **Speed** — brackets are defined by how many turns a game should last (9+, 8+, 6+, 4+, any). With enough Accurate (Forge) wins, the deck's actual winning turns are checked against that.
-
-Game Changers, land denial, extra turns and combos come from [Commander Spellbook](https://commanderspellbook.com)'s bracket API, which tracks the current lists. Bracket 1 is about theme rather than power, so a Bracket 2 result reads "or 1 if theme-first".
-
-## Card performance
-
-For each game the quick engine records which cards the shuffle placed in the opening hand or the next 8 cards. That's pure luck, so comparing how the deck finishes in games where a card started early against games where it didn't is a fair test of the card — the same idea as 17lands' "improvement when drawn". (Comparing games where a card was merely *drawn* would be biased: decks that survive longer draw more, so every card looks good.) Each impact comes with a 95% margin of error, and a card is only called weak or strong when the whole range is on one side of zero. Cards held in hand most of the time are flagged separately, and cards the quick engine can't read aren't judged.
-
-Forge logs don't reveal draws, so the Forge view uses "games where the card was cast" — useful for ranking cards against each other, but biased upward.
-
-## Playstyle learning
-
-The Playstyle tab plays one of your decks part-way into a real quick-engine game, freezes it at the start of your turn, and asks one of three questions: which opposing permanent is the biggest threat, which player you'd attack, or what you'd cast (including holding mana up). After each answer it shows what the default AI would have done.
-
-Every option is described by a few features — for attack targets, things like the player's life, whether they lead the table, whether you can kill them, and whether they attacked you last round — plus the default AI's own score for it. The AI picks options by a weighted sum of those features. Your answers are fitted with a conditional logit model (logistic regression over choice sets), regularised toward the default weights: with no answers the AI is unchanged, and each answer moves it toward your choices. The tab reports how often the default AI and your fitted style agree with you (scored leave-one-out), and summarises your biggest differences in plain English. Turn on **Pilot quick-engine games with my playstyle** to use it in simulations. Forge games use Forge's own AI and aren't affected.
-
-## How the quick engine works
-
-The quick engine is **not** a full rules engine — use Accurate mode when that matters. Instead:
-
-1. **Card interpretation** (`src/engine/classify.ts`). Each card's oracle text is matched against patterns for common Commander effects: ramp, mana rocks and dorks, card draw, spot removal, board wipes, counterspells, tokens, anthems, equipment, combat tricks, drain/burn, tutors, recursion, cost reduction and extra lands. It also recognises when they happen: on cast/ETB, each turn, on attack, on combat damage, when you cast a spell, when a creature enters or dies, landfall, and activated abilities. Conditional triggers ("if…") fire about half the time. Anything unrecognised is played as a blank card; the Decks tab shows the percentage modeled and lists every card's interpretation.
-
-2. **The game** (`src/engine/game.ts`). Real turn structure with Commander rules: 40 life, command zone and commander tax, 21 commander damage, free first mulligan then London mulligans, decking. Combat supports flying/reach, trample, first and double strike, deathtouch, lifelink, menace, vigilance, indestructible, hexproof and unblockable.
-
-3. **The AI** is heuristic: it plays lands to fix colors, ramps early, holds up counterspells, removes the biggest threat (weighted toward the table leader), wipes when the board is against it, picks attack targets by threat and life total, avoids bad attacks, chump-blocks to survive, and uses instants at the end of the previous player's turn.
-
-4. **Statistics** (`src/sim/stats.ts`). Every game is treated as a set of pairwise matches: each deck "beats" every deck it outlasted. A Bradley–Terry model fitted to all of those matches gives the **rating** (Elo scale: 1500 is average, +100 ≈ a 64% chance to outlast an average deck). Pods are drawn so every deck plays about the same number of games, with random seating.
-
-### Quick-engine limitations — read before trusting the numbers
-
-- Combos, infinite loops, extra turns/combats, stax, theft, copy effects, most planeswalker ultimates, and "cheat into play" effects (Kaalia, Sneak Attack…) aren't modeled. Combo decks and heavy-synergy decks will be **underrated**; simple value/beatdown decks are modeled best.
-- The AI plays reasonably but not like a strong human: no politics, no bluffing, no complex sequencing.
-- Treat results as a **relative** comparison between your decks under the same simplified rules, not as a prediction of real win rates. The "% modeled" figure tells you how much of each deck the simulator actually sees.
-
-Accurate mode removes these limits, but results still reflect **Forge's AI**, which plays reasonably but misses some combos and makes political mistakes a human wouldn't.
+The estimate follows the official [Commander Brackets](https://magic.wizards.com/en/formats/commander#brackets) (beta, February 2026 update): the Game Changer limits (none in Brackets 1–2, up to three in 3, any in 4–5), with two-card combos, extra turns, mass land denial and — once there are enough Forge wins — actual winning turns as barometers. Game Changers and combos come from [Commander Spellbook](https://commanderspellbook.com)'s bracket API.
 
 ## Project layout
 
 ```
 src/
-  engine/     types, oracle-text classifier, game engine, seeded RNG
-  import/     Archidekt + text/Scryfall importers
-  sim/        Web Worker pool, Forge client, statistics
+  engine/     card classifier and the internal board engine used for quiz board states
+  import/     Archidekt + text/Scryfall importers, deck search
+  sim/        Forge client, pod selection, run limits, statistics
   analysis/   bracket estimate, card performance, deck composition
-  ai/         playstyle learning (features, fitting) and quiz scenarios
+  ai/         Forge personality learning and quiz scenarios
   ui/         React components
-server/       Forge runner: deck conversion, process pool, log parser (Vite plugin)
+server/       Forge runner: deck conversion, AI profiles, process pool, log parser (Vite plugin)
 scripts/      setup-forge.mjs
-api/          Vercel serverless proxy for Archidekt
+api/          Archidekt proxy (shared by Vite and Vercel)
 tests/        Vitest unit tests
 ```
 

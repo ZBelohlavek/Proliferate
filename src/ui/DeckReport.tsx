@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import { BRACKET_NAMES, estimateBracket } from '../analysis/bracket';
-import { cardReport, type Basis, type CardPerformance, type Verdict } from '../analysis/cards';
+import { cardReport, type CardPerformance, type Verdict } from '../analysis/cards';
 import type { Stats } from '../sim/stats';
-import { commanderNames, pct } from './format';
+import { commanderNames } from './format';
 import { useBracketData } from './useBracket';
 import { Help, SpellbookTag } from './Help';
 
@@ -11,21 +11,19 @@ interface Props {
   decks: SimDeck[];
   deckId: string | null;
   onDeck: (id: string) => void;
-  quickStats: Stats;
-  forgeStats: Stats;
+  stats: Stats;
 }
 
 const VERDICT_LABEL: Record<Verdict, string> = {
-  weak: 'Weak',
-  strong: 'Strong',
-  dead: 'Often stuck in hand',
-  neutral: 'No clear effect',
+  weak: 'Weaker than your other cards',
+  strong: 'Stronger than your other cards',
+  neutral: 'About average',
   unknown: 'Not enough data',
 };
 
-type SortKey = 'impact' | 'name' | 'seen' | 'castRate' | 'cmc';
+type SortKey = 'impact' | 'name' | 'seen' | 'cmc';
 
-export function DeckReport({ decks, deckId, onDeck, quickStats, forgeStats }: Props) {
+export function DeckReport({ decks, deckId, onDeck, stats }: Props) {
   const deck = decks.find((d) => d.id === deckId) ?? decks[0];
   if (!deck) return <section className="panel empty"><p>Import a deck first.</p></section>;
 
@@ -40,13 +38,13 @@ export function DeckReport({ decks, deckId, onDeck, quickStats, forgeStats }: Pr
         </div>
         <p className="muted small">{commanderNames(deck)}</p>
       </section>
-      <BracketSection deck={deck} forgeStats={forgeStats} />
-      <CardSection deck={deck} quickStats={quickStats} forgeStats={forgeStats} />
+      <BracketSection deck={deck} stats={stats} />
+      <CardSection deck={deck} stats={stats} />
     </>
   );
 }
 
-function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats }) {
+function BracketSection({ deck, stats }: { deck: SimDeck; stats: Stats }) {
   const decks = useMemo(() => [deck], [deck]);
   const { states, refresh } = useBracketData(decks);
   const st = states[deck.id];
@@ -70,7 +68,7 @@ function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats
       {!st || st.loading ? <p className="muted">Checking Game Changers and combos with Commander Spellbook…</p> : null}
       {st?.error && <p className="err">{st.error}</p>}
       {st?.data && (() => {
-        const est = estimateBracket(st.data, forgeStats.decks[deck.id]);
+        const est = estimateBracket(st.data, stats.decks[deck.id]);
         return (
           <div className="bracket">
             <div className="bracket-head">
@@ -121,18 +119,16 @@ function BracketSection({ deck, forgeStats }: { deck: SimDeck; forgeStats: Stats
   );
 }
 
-function CardSection({ deck, quickStats, forgeStats }: { deck: SimDeck; quickStats: Stats; forgeStats: Stats }) {
-  const [basis, setBasis] = useState<Basis>('early');
+function CardSection({ deck, stats }: { deck: SimDeck; stats: Stats }) {
   const [hideLands, setHideLands] = useState(true);
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'impact', asc: true });
-  const report = cardReport(basis === 'early' ? quickStats : forgeStats, deck, basis);
+  const report = cardReport(stats, deck);
 
   const rows = report.rows.filter((r) => !hideLands || !r.card.isLand);
   const value = (r: CardPerformance): number | string => {
     switch (sort.key) {
       case 'name': return r.name;
       case 'seen': return r.seen;
-      case 'castRate': return r.castRate ?? -1;
       case 'cmc': return r.card.cmc;
       default: return r.impact ?? (sort.asc ? Infinity : -Infinity);
     }
@@ -149,35 +145,23 @@ function CardSection({ deck, quickStats, forgeStats }: { deck: SimDeck; quickSta
     </th>
   );
 
-  // In the quick engine, cards it can't read are played as blanks, so their numbers say nothing about the real card.
-  const blank = (r: CardPerformance) => basis === 'early' && !r.card.modeled;
-  const weak = report.rows
-    .filter((r) => (r.verdict === 'weak' || r.verdict === 'dead') && !r.card.isLand && !blank(r))
-    .sort((a, b) => (a.impact ?? 0) - (b.impact ?? 0));
-  const blanks = report.rows.filter((r) => blank(r) && !r.card.isLand);
+  const weak = report.rows.filter((r) => r.verdict === 'weak' && !r.card.isLand).sort((a, b) => (a.impact ?? 0) - (b.impact ?? 0));
   const maxAbs = Math.max(5, ...rows.map((r) => Math.abs(r.impact ?? 0) + (r.margin ?? 0)));
 
   return (
     <section className="panel">
       <div className="panel-head">
         <h2>Card performance <Help>
-          How much better or worse the deck does in games where each card shows up.
-          <br /><br /><strong>Impact</strong> — difference in finish score (100 = won, 0 = first out) between games with and without the card early. +5 means the deck does 5 points better with it. The bar is the 95% range: the true effect is very probably inside it.
-          <br /><br /><strong>Weak / Strong</strong> — the whole range is below / above zero, so the effect is real, not luck.
-          <br /><strong>No clear effect</strong> — the range crosses zero; could be either.
-          <br /><strong>Often stuck in hand</strong> — cast in under 35% of the games it was drawn: often uncastable or not worth casting.
-          <br /><strong>Not enough data</strong> — needs more games.
+          Which cards pull their weight compared with the rest of this deck, from Forge games.
+          <br /><br /><strong>Impact</strong> — how much better (+) or worse (−) the deck finishes in games where it cast the card, compared with a typical card in the same deck. Finish score runs from 100 (won) to 0 (first out). The bar is the 95% range: the true value is very probably inside it.
+          <br /><br /><strong>Weak / Strong</strong> — the whole range is below / above the deck&apos;s typical card, so the difference is real, not luck.
+          <br /><strong>About average</strong> — the range includes zero.
+          <br /><strong>Not enough data</strong> — cast in too few (or too many) games to compare yet.
+          <br /><br />Why &quot;compared with the rest of the deck&quot;? Forge&apos;s logs don&apos;t show draws, only casts, and decks that survive longer cast more cards — so every card looks good in absolute terms. Comparing cards with each other cancels that out.
         </Help></h2>
-        <div className="seg">
-          <button className={basis === 'early' ? 'active' : ''} onClick={() => setBasis('early')}>Quick engine</button>
-          <button className={basis === 'cast' ? 'active' : ''} onClick={() => setBasis('cast')}>Forge (when cast)</button>
-        </div>
       </div>
       <p className="muted small">
-        {basis === 'early'
-          ? "Impact compares how well the deck finishes (100 = win, 0 = first out) in games where the shuffle put the card in the opening hand or the next 8 cards, against games where it didn't. That's pure luck, so it's a fair test — but it only reflects how the quick engine plays the card."
-          : "Impact compares games where Forge cast the card against games where it didn't. Forge doesn't log draws, so this is much weaker evidence: decks that survive longer cast more cards, so most cards look good. Use it to rank cards against each other, not as absolute numbers."}
-        {' '}Bars show the 95% margin of error — a card is only called weak or strong when the whole bar is on one side of zero.
+        Impact compares each card with the deck&apos;s typical card (0 = typical). Bars show the 95% margin of error — a card is only called weak or strong when the whole bar is on one side of zero.
       </p>
       {report.notice && <p className="warn">{report.notice}</p>}
 
@@ -185,15 +169,9 @@ function CardSection({ deck, quickStats, forgeStats }: { deck: SimDeck; quickSta
         <div className="callout">
           <strong>Cards to look at:</strong>{' '}
           {weak.slice(0, 8).map((r, i) => (
-            <span key={r.name}>{i > 0 && ', '}{r.name} <span className="muted small">({r.verdict === 'dead' ? `cast ${pct(r.castRate ?? 0, 0)} of the time` : `${r.impact!.toFixed(1)}`})</span></span>
+            <span key={r.name}>{i > 0 && ', '}{r.name} <span className="muted small">({r.impact!.toFixed(1)})</span></span>
           ))}
         </div>
-      )}
-
-      {blanks.length > 0 && (
-        <p className="muted small">
-          Not judged: {blanks.map((r) => r.name).join(', ')}. The quick engine can&apos;t read {blanks.length === 1 ? 'this card' : 'these cards'} and plays {blanks.length === 1 ? 'it' : 'them'} as blanks — use the Forge view for {blanks.length === 1 ? 'it' : 'them'}.
-        </p>
       )}
 
       <label className="muted small"><input type="checkbox" checked={hideLands} onChange={(e) => setHideLands(e.target.checked)} /> Hide lands</label>
@@ -203,26 +181,21 @@ function CardSection({ deck, quickStats, forgeStats }: { deck: SimDeck; quickSta
             <tr>
               {header('name', 'Card')}
               {header('cmc', 'MV')}
-              {header('seen', basis === 'early' ? 'Games early' : 'Games cast', basis === 'early' ? 'Games where the card was in the opening hand or the next 8 cards' : undefined)}
-              {header('impact', 'Impact', 'Finish-score difference in points, with 95% margin of error')}
-              {basis === 'early' && header('castRate', 'Cast when drawn', 'How often the card was cast in games where it was drawn')}
+              {header('seen', 'Games cast', 'Games where the deck cast (or, for lands, played) the card')}
+              {header('impact', 'Impact vs. deck', 'Finish-score difference vs. the deck’s typical card, with 95% margin of error')}
               <th>Verdict</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.name}>
-                <td>
-                  {r.name}{r.count > 1 ? ` ×${r.count}` : ''}
-                  {!r.card.modeled && basis === 'early' && <span className="tag warn-tag" title="The quick engine doesn't understand this card and plays it as a blank">blank</span>}
-                </td>
+                <td>{r.name}{r.count > 1 ? ` ×${r.count}` : ''}</td>
                 <td className="num">{r.card.isLand ? '' : r.card.cmc}</td>
                 <td className="num">{r.seen.toLocaleString()}</td>
                 <td className="impact-cell">
                   {r.impact === null ? <span className="muted">—</span> : <ImpactBar impact={r.impact} margin={r.margin!} max={maxAbs} />}
                 </td>
-                {basis === 'early' && <td className="num">{r.castRate === null ? '—' : pct(r.castRate, 0)}</td>}
-                <td>{blank(r) ? <span className="verdict v-unknown">Not judged (blank)</span> : <span className={`verdict v-${r.verdict}`}>{VERDICT_LABEL[r.verdict]}</span>}</td>
+                <td><span className={`verdict v-${r.verdict}`}>{VERDICT_LABEL[r.verdict]}</span></td>
               </tr>
             ))}
           </tbody>

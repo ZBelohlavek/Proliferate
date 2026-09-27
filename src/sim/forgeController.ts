@@ -24,6 +24,12 @@ export interface ForgeSettings {
   pairing: 'balanced' | 'random';
   stopAt: number | null;
   maxGames: number | null;
+  /** Games per Forge process before it restarts. */
+  gamesPerLaunch: number;
+  /** Forge AI personality: Default, Cautious, Reckless, Experimental, You, or Mixed (random per seat). */
+  aiProfile: string;
+  /** Settings for the "You" personality, learned in the Playstyle quiz. */
+  profileOverrides: Record<string, string> | null;
   workers: number;
   clockSeconds: number;
 }

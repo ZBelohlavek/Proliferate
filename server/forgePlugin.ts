@@ -67,6 +67,9 @@ export function forgePlugin(projectRoot: string): Plugin {
             decks: body.decks ?? [],
             podSize: sanitizePodSize(body.podSize), // 2–6, or 0 = mixed sizes
             pairing: body.pairing === 'random' ? 'random' : 'balanced',
+            gamesPerLaunch: clamp(body.gamesPerLaunch, 1, 5, 2),
+            aiProfile: ['Default', 'Cautious', 'Reckless', 'Experimental', 'You', 'Mixed'].includes(body.aiProfile) ? body.aiProfile : 'Default',
+            profileOverrides: body.profileOverrides && typeof body.profileOverrides === 'object' ? body.profileOverrides : null,
             stopAt: Number.isFinite(Number(body.stopAt)) && Number(body.stopAt) > 0 ? Number(body.stopAt) : null,
             maxGames: Number.isInteger(Number(body.maxGames)) && Number(body.maxGames) > 0 ? Number(body.maxGames) : null,
             workers: clamp(body.workers, 1, 32, 4),

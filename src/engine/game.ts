@@ -8,7 +8,6 @@
 // engine never reads oracle text.
 
 import { Rng } from './rng';
-import { argmax, utility, type Weights } from '../ai/playstyle';
 import type {
   CastFilter,
   Color,
@@ -86,14 +85,6 @@ export interface Player {
 export interface GameOptions {
   maxRounds?: number;
   log?: boolean;
-  /** Learned decision weights from the Playstyle quiz; every seat uses them. */
-  playstyle?: Weights | null;
-}
-
-/** A decision option described by features (see src/ai/playstyle.ts). */
-export interface Option<T> {
-  value: T;
-  x: number[];
 }
 
 export interface CastChoice {
@@ -124,14 +115,12 @@ export class Game {
   private readonly eliminations: Elimination[] = [];
   private readonly placements: number[];
   private triggerBudget = 0;
-  private readonly playstyle: Weights | null;
 
   constructor(decks: SimDeck[], seed: number, opts: GameOptions = {}) {
     if (decks.length < 2 || decks.length > 6) throw new Error(`A game needs 2–6 players, got ${decks.length}.`);
     this.rng = new Rng(seed);
     this.maxRounds = opts.maxRounds ?? 25;
     this.log = opts.log ? [] : null;
-    this.playstyle = opts.playstyle ?? null;
     this.placements = decks.map(() => 0);
     this.players = decks.map((deck, seat) => ({
       seat,
@@ -615,12 +604,6 @@ export class Game {
   private chooseSpell(p: Player, instantSpeed: boolean): CastChoice | null {
     const candidates = this.castCandidates(p, instantSpeed);
     if (!candidates.length) return null;
-    if (this.playstyle && !instantSpeed) {
-      // Learned playstyle: pick the best option by your weights, which may be to hold mana.
-      const options = this.castOptions(p, candidates);
-      const pick = options[argmax(this.playstyle.cast, options.map((o) => o.x))];
-      return pick.value;
-    }
     return candidates.reduce((a, b) => (b.score > a.score ? b : a));
   }
 
@@ -647,33 +630,6 @@ export class Game {
     for (const c of p.commandZone) consider(c, true);
     for (const c of p.hand) consider(c, false);
     return out;
-  }
-
-  /** Cast options as feature vectors, plus the option to hold mana (value null). */
-  castOptions(p: Player, candidates = this.castCandidates(p)): Option<CastChoice | null>[] {
-    const available = Math.max(1, this.availableMana(p));
-    const options: Option<CastChoice | null>[] = candidates.map((c) => {
-      const kinds = new Set(c.card.effects.map((e) => e.kind));
-      const ramp = ['mana', 'ramp', 'treasure', 'costReduction', 'extraLand'].some((k) => kinds.has(k as never)) ? 1 : 0;
-      return {
-        value: { card: c.card, fromCommandZone: c.fromCommandZone, x: c.x },
-        x: [
-          c.score / 20,
-          ramp,
-          kinds.has('draw') ? 1 : 0,
-          kinds.has('removal') ? 1 : 0,
-          kinds.has('wipe') ? 1 : 0,
-          c.card.isCreature ? 1 : 0,
-          c.fromCommandZone ? 1 : 0,
-          c.card.isCreature && c.card.power >= 5 ? 1 : 0,
-          Math.min(1, this.effectiveCost(p, c.card, c.fromCommandZone, c.x) / available),
-          ramp && this.round <= 4 ? 1 : 0,
-          0,
-        ],
-      };
-    });
-    options.push({ value: null, x: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] });
-    return options;
   }
 
   private reservedMana(p: Player): number {
@@ -1113,7 +1069,6 @@ export class Game {
 
     let best: Perm | null = null;
     let bestThreat = 0;
-    let bestUtility = -Infinity;
     const minimum = 3 + this.round * 0.2;
     for (const o of this.opponents(p)) {
       const leaderBonus = this.boardThreat(o, false) > 15 ? 1.2 : 1;
@@ -1127,16 +1082,7 @@ export class Game {
         let t = this.threat(perm) * leaderBonus;
         if (this.hasKw(perm, 'ward')) t *= 0.6;
         if (e.mode === 'bounce' && perm.token) t *= 1.3;
-        if (this.playstyle) {
-          // Your playstyle decides which target is scariest; the AI's minimum still applies.
-          if (t < minimum) continue;
-          const u = utility(this.playstyle.threat, this.threatFeatures(p, perm));
-          if (u > bestUtility) {
-            best = perm;
-            bestThreat = t;
-            bestUtility = u;
-          }
-        } else if (t > bestThreat) {
+        if (t > bestThreat) {
           best = perm;
           bestThreat = t;
         }
@@ -1368,7 +1314,7 @@ export class Game {
     );
   }
 
-  private canBlock(blocker: Perm, attacker: Perm): boolean {
+  canBlock(blocker: Perm, attacker: Perm): boolean {
     if (!blocker.card.isCreature || blocker.tapped) return false;
     if (this.hasKw(attacker, 'unblockable')) return false;
     if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
@@ -1380,11 +1326,11 @@ export class Game {
     return this.power(a) * (this.hasKw(a, 'double strike') ? 2 : 1);
   }
 
-  private kills(attacker: Perm, defender: Perm): boolean {
+  kills(attacker: Perm, defender: Perm): boolean {
     return this.hasKw(attacker, 'deathtouch') ? this.power(attacker) > 0 : this.hitDamage(attacker) >= this.toughness(defender) - defender.damage;
   }
 
-  private survives(creature: Perm, from: Perm): boolean {
+  survives(creature: Perm, from: Perm): boolean {
     if (this.hasKw(creature, 'indestructible')) return true;
     if (this.hasKw(creature, 'first strike') && !this.hasKw(from, 'first strike') && !this.hasKw(from, 'double strike') && this.kills(creature, from)) return true;
     return !this.kills(from, creature);
@@ -1393,19 +1339,6 @@ export class Game {
   private chooseDefender(p: Player, attackers: Perm[]): Player | null {
     const opps = this.opponents(p);
     if (!opps.length) return null;
-    if (this.playstyle) {
-      // Sample in proportion to exp(utility), keeping some unpredictability like the default AI.
-      const options = this.attackOptions(p, attackers);
-      const u = options.map((o) => utility(this.playstyle!.attack, o.x));
-      const max = Math.max(...u);
-      const weights = u.map((v) => Math.exp(v - max));
-      let r = this.rng.next() * weights.reduce((s, v) => s + v, 0);
-      for (let i = 0; i < options.length; i++) {
-        r -= weights[i];
-        if (r <= 0) return options[i].value;
-      }
-      return options[options.length - 1].value;
-    }
     let best: Player | null = null;
     let bestScore = -Infinity;
     for (const o of opps) {
@@ -1680,15 +1613,8 @@ export class Game {
   }
 
   // -------------------------------------------------------------------------
-  // Decision features (shared by the AI and the Playstyle quiz)
+  // Helpers used by the Playstyle quiz's board states
   // -------------------------------------------------------------------------
-
-  /** The opponent of `p` with the strongest board. */
-  leaderAmong(p: Player): Player | null {
-    let best: Player | null = null;
-    for (const o of this.opponents(p)) if (!best || this.boardThreat(o, false) > this.boardThreat(best, false)) best = o;
-    return best;
-  }
 
   /** The default AI's (noise-free) preference for attacking `o`. */
   private attackScore(o: Player, blockers: Perm[], unblockable: number, total: number): number {
@@ -1699,71 +1625,6 @@ export class Game {
     score += (40 - o.life) * 0.4;
     score -= blockers.reduce((s, b) => s + this.power(b), 0) * 0.3;
     return score;
-  }
-
-  /** Features for "how threatening is this permanent?" — order matches FEATURES.threat. */
-  threatFeatures(viewer: Player, perm: Perm): number[] {
-    const owner = this.players[perm.seat];
-    let ai = this.threat(perm) * (this.boardThreat(owner, false) > 15 ? 1.2 : 1);
-    if (this.hasKw(perm, 'ward')) ai *= 0.6;
-    const card = perm.card;
-    const evasive = this.hasKw(perm, 'flying') || this.hasKw(perm, 'unblockable') || this.hasKw(perm, 'menace');
-    const engine = card.effects.some((e) => e.when !== 'resolve' && e.kind !== 'mana' && e.kind !== 'equip');
-    return [
-      ai / 5,
-      card.isCreature ? this.power(perm) / 10 : 0,
-      card.isCreature && evasive ? 1 : 0,
-      perm.isCommander ? 1 : 0,
-      engine ? 1 : 0,
-      card.effects.some((e) => e.kind === 'mana') ? 1 : 0,
-      card.isCreature ? 1 : 0,
-      perm.token ? 1 : 0,
-      this.leaderAmong(viewer) === owner ? 1 : 0,
-      Math.max(0, 40 - owner.life) / 40,
-    ];
-  }
-
-  /** Opponents' non-land permanents as threat options. */
-  threatOptions(viewer: Player): Option<Perm>[] {
-    const out: Option<Perm>[] = [];
-    for (const o of this.opponents(viewer)) {
-      for (const perm of o.battlefield) if (!perm.landInfo) out.push({ value: perm, x: this.threatFeatures(viewer, perm) });
-    }
-    return out;
-  }
-
-  /** Features for "attack player o?" — order matches FEATURES.attack. */
-  attackFeatures(p: Player, o: Player, attackers: Perm[]): number[] {
-    const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped);
-    let unblockable = 0;
-    let total = 0;
-    for (const a of attackers) {
-      total += this.hitDamage(a);
-      if (!blockers.some((b) => this.canBlock(b, a))) unblockable += this.hitDamage(a);
-    }
-    let commanderDamage = 0;
-    for (const perm of p.battlefield) {
-      if (perm.isCommander && attackers.includes(perm)) {
-        commanderDamage = Math.max(commanderDamage, (o.commanderDamage.get(`${p.seat}:${perm.card.name}`) ?? 0) / 21);
-      }
-    }
-    let board = 0;
-    for (const perm of o.battlefield) if (perm.card.isCreature) board += this.power(perm);
-    const lastAttack = p.attackedBy.get(o.seat);
-    return [
-      this.attackScore(o, blockers, unblockable, total) / 10,
-      Math.max(0, 40 - o.life) / 40,
-      unblockable >= o.life ? 1 : 0,
-      board / 30,
-      blockers.reduce((s, b) => s + this.power(b), 0) / 20,
-      this.leaderAmong(p) === o ? 1 : 0,
-      commanderDamage,
-      lastAttack !== undefined && lastAttack >= this.round - 1 ? 1 : 0,
-    ];
-  }
-
-  attackOptions(p: Player, attackers = this.creaturesThatCanAttack(p)): Option<Player>[] {
-    return this.opponents(p).map((o) => ({ value: o, x: this.attackFeatures(p, o, attackers) }));
   }
 
   /** Public views for the quiz. */

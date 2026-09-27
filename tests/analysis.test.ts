@@ -40,7 +40,7 @@ describe('estimateBracket', () => {
 });
 
 describe('cardReport', () => {
-  it('finds a card that makes the deck lose when it shows up early', () => {
+  it('finds a card that makes the deck lose when it is cast', () => {
     const deck = stompyDeck('d');
     const stats = emptyStats();
     const game = (won: boolean, early: string[]): GameResult => ({
@@ -54,7 +54,7 @@ describe('cardReport', () => {
       const won = hasWurm ? i % 10 === 0 : i % 10 !== 1;
       addResult(stats, game(won, hasWurm ? ['Craw Wurm', 'Grizzly Bears'] : ['Grizzly Bears']));
     }
-    const report = cardReport(stats, deck, 'early');
+    const report = cardReport(stats, deck);
     const wurm = report.rows.find((r) => r.name === 'Craw Wurm')!;
     expect(wurm.verdict).toBe('weak');
     expect(wurm.impact!).toBeLessThan(-50);
