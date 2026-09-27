@@ -127,6 +127,7 @@ export class Game {
   private readonly playstyle: Weights | null;
 
   constructor(decks: SimDeck[], seed: number, opts: GameOptions = {}) {
+    if (decks.length < 2 || decks.length > 6) throw new Error(`A game needs 2–6 players, got ${decks.length}.`);
     this.rng = new Rng(seed);
     this.maxRounds = opts.maxRounds ?? 25;
     this.log = opts.log ? [] : null;

@@ -68,10 +68,10 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
         )}
 
         <div className="control-row">
-          <label>
-            Pod size
+          <label title="How many decks sit at each game. Selected decks rotate through the seats, so every deck plays about equally. Never more than 6.">
+            Players per game
             <select value={settings.podSize} onChange={(e) => set({ podSize: +e.target.value })} disabled={running}>
-              {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} players</option>)}
+              {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} players{n === 4 ? ' (standard)' : ''}</option>)}
               <option value={0}>Mixed (2–6 players)</option>
             </select>
           </label>
@@ -143,6 +143,11 @@ export function SimPanel({ decks, activeDecks, quick, forge, settings, onSetting
         {isForge && forgeStatus?.errors.map((e, i) => <p key={i} className="err small">{e}</p>)}
         {!enoughDecks && <p className="warn">Select at least two decks on the Decks tab.</p>}
         {lastError && <p className="err">{lastError}</p>}
+        {settings.podSize !== 0 && activeDecks.length > settings.podSize && (
+          <p className="muted small">
+            Every game seats {settings.podSize} of your {activeDecks.length} selected decks; they rotate so each deck plays about the same number of games.
+          </p>
+        )}
         {settings.podSize === 0 && enoughDecks && (
           <p className="muted small">Each game picks a random pod size from 2 to {Math.min(6, activeDecks.length)} players, so you can see how each deck does at every table size below.</p>
         )}

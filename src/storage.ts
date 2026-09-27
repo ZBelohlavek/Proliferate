@@ -3,6 +3,7 @@
 
 import type { SimDeck } from './engine/types';
 import { emptyStats, type Stats } from './sim/stats';
+import { DEFAULT_PLAYERS, sanitizePodSize } from './sim/pods';
 
 const KEYS = {
   decks: 'proliferate.decks.v1',
@@ -13,10 +14,17 @@ const KEYS = {
 };
 
 function read<T>(key: string, fallback: T): T {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(key);
+    raw = localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as T) : fallback;
   } catch {
+    // Unreadable data would otherwise be overwritten by the next save; keep a copy first.
+    try {
+      if (raw) localStorage.setItem(`${key}.backup-${Date.now()}`, raw);
+    } catch {
+      /* storage unavailable */
+    }
     return fallback;
   }
 }
@@ -55,7 +63,7 @@ export interface Settings {
 
 const DEFAULT_SETTINGS: Settings = {
   engine: 'quick',
-  podSize: 4,
+  podSize: DEFAULT_PLAYERS,
   workers: Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)),
   maxRounds: 25,
   // Forge's AI is multithreaded; beyond ~1 process per 4 threads games just slow each other down.
@@ -65,5 +73,8 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 // Merge with defaults so settings saved by older versions gain the new fields.
-export const loadSettings = (): Settings => ({ ...DEFAULT_SETTINGS, ...read<Partial<Settings>>(KEYS.settings, {}) });
+export const loadSettings = (): Settings => {
+  const s = { ...DEFAULT_SETTINGS, ...read<Partial<Settings>>(KEYS.settings, {}) };
+  return { ...s, podSize: sanitizePodSize(s.podSize) };
+};
 export const saveSettings = (s: Settings) => write(KEYS.settings, s);

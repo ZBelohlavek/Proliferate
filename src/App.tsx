@@ -66,8 +66,8 @@ export default function App() {
 
   const activeDecks = useMemo(() => decks.filter((d) => selected.includes(d.id)), [decks, selected]);
   const engine = settings.engine;
-  // 0 means mixed pod sizes (2–6), chosen per game.
-  const podSize = settings.podSize === 0 ? 0 : Math.min(settings.podSize, activeDecks.length);
+  // Players per game: 2–6, or 0 for mixed sizes. The workers cap it at 6 and at the number of decks.
+  const podSize = settings.podSize;
 
   const addDeck = (deck: SimDeck) => {
     setDecks((ds) => [...ds.filter((d) => d.id !== deck.id), deck]);
