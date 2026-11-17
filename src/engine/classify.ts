@@ -244,7 +244,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
       m = line.match(new RegExp(`deals? ${NUM} damage to (any target|target creature|target creature or planeswalker|target creature or player|target attacking|target tapped creature|up to one target creature)`));
       if (m) {
         const amount = num(m[1], 2);
-        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount }, note: `Deal ${amount === -1 ? 'X' : amount} damage to a creature` });
+        const anyTarget = m[2] === 'any target' || m[2] === 'target creature or player';
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : 'a creature'}` });
       } else if (/deals damage equal to its power to (another |any )?(target|up to one target)|fights (target|another target|up to one target) creature/.test(line)) {
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'fight', amount: 0 }, note: 'Fight / bite removal' });
       } else if (/(target player|target opponent|each opponent) sacrifices (a|an) (creature|attacking creature|nonland permanent)/.test(line)) {
@@ -555,6 +556,12 @@ export function classifyCard(raw: RawCard): SimCard {
       card.effects.push({ kind: 'treasure', n, when: 'resolve' });
       card.notes.push(`Treasure ×${n} (one-shot mana)`);
     }
+  }
+
+  // Equipment: remember the equip cost so the rules engine can charge it.
+  const equipCost = text.match(/^equip((?:\{[^}]+\})+)/m) ?? text.match(/^equip (?:[a-z ]+ )?((?:\{[^}]+\})+)/m);
+  if (equipCost) {
+    for (const e of card.effects) if (e.kind === 'equip' && !e.aura) e.cost = parseManaCost(equipCost[1]);
   }
 
   if (isCreature && card.cost.x > 0 && /enters with x \+1\/\+1 counters?/.test(text)) {

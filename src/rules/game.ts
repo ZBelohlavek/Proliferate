@@ -1,0 +1,1738 @@
+// The rules engine: one game of multiplayer Commander under the real turn
+// structure, with priority, the stack, targets, declared attackers and
+// blockers, state-based actions and the Commander rules.
+//
+// Rule numbers in comments refer to the Magic Comprehensive Rules.
+//
+// The engine is a generator. Whenever the rules give a player a choice it
+// yields a Decision and waits for the answer, so it never decides anything
+// itself: a person, a bot, or any mix can sit in the seats (see session.ts).
+//
+// What a card does comes from the Effects the classifier found in its oracle
+// text (src/engine/classify.ts). The engine supplies the rules around them.
+// Known simplifications are listed in the README.
+
+import { Rng } from '../engine/rng';
+import type {
+  CastFilter, Color, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, SimCard, SimDeck, Trigger,
+} from '../engine/types';
+import type {
+  Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
+} from './types';
+
+/** A piece of the game that may stop to ask players for decisions. */
+export type Flow<T> = Generator<Decision, T, Answer>;
+
+export interface GameOptions {
+  /** Rounds after which the game is called a draw. */
+  maxRounds?: number;
+  /** Keep a play-by-play log. */
+  log?: boolean;
+  /** Display name per seat. */
+  names?: string[];
+  /** Seat that takes the first turn. */
+  startSeat?: number;
+}
+
+interface ManaSource {
+  perm: Perm | null; // null = a Treasure token
+  colors: Mana[] | 'any';
+  amount: number;
+}
+
+/** A triggered ability waiting to be put on the stack (rule 603.3). */
+interface PendingTrigger {
+  controller: number;
+  card: SimCard;
+  sourceId: number | null;
+  effects: Effect[];
+}
+
+const PASS: Action = { type: 'pass' };
+const NONE: Perm[] = [];
+const NO_COST: ManaCost = { generic: 0, pips: [], x: 0, life: 0 };
+/** Equip cost assumed when a deck was imported before equip costs were recorded. */
+const DEFAULT_EQUIP: ManaCost = { generic: 2, pips: [], x: 0, life: 0 };
+/** Mana an opponent pays to target a permanent with ward (the classifier doesn't keep the exact ward cost). */
+const WARD_COST = 2;
+/** Library cards (after the opening hand) counted as "early" for card stats. */
+const EARLY_LIBRARY_CARDS = 8;
+const STARTING_LIFE = 40; // rule 903.7
+const COMMANDER_DAMAGE = 21; // rule 903.10a
+const MAX_HAND = 7;
+
+function* ask<T>(decision: Decision): Flow<T> {
+  return (yield decision) as T;
+}
+
+export class Game {
+  readonly players: PlayerState[];
+  readonly rng: Rng;
+  round = 0;
+  turnNumber = 0;
+  activeSeat = 0;
+  step: Step = 'untap';
+  /** The stack; the last item is on top. */
+  readonly stack: StackItem[] = [];
+  readonly log: string[] | null;
+  over = false;
+  winner: number | null = null;
+  readonly eliminations: Elimination[] = [];
+  readonly placements: number[];
+  private nextId = 1;
+  private readonly maxRounds: number;
+  private readonly startSeat: number;
+  private triggerBudget = 0;
+  private pending: PendingTrigger[] = [];
+  /** Commanders that just went to a graveyard, exile or hand (rule 903.9). */
+  private pendingCommander: { seat: number; card: SimCard; to: 'graveyard' | 'exile' | 'hand' }[] = [];
+  /** Attackers that dealt combat damage in the first-strike step (rule 510.4). */
+  private struckFirst = new Set<number>();
+  /** False while nothing is attached to anything, to skip the search for attachments. */
+  private anyAttached = false;
+
+  constructor(decks: SimDeck[], seed: number, opts: GameOptions = {}) {
+    if (decks.length < 2 || decks.length > 6) throw new Error(`A game needs 2–6 players, got ${decks.length}.`);
+    this.rng = new Rng(seed);
+    this.maxRounds = opts.maxRounds ?? 40;
+    this.log = opts.log ? [] : null;
+    this.startSeat = Math.max(0, Math.min(decks.length - 1, opts.startSeat ?? 0));
+    this.placements = decks.map(() => 0);
+    this.players = decks.map((deck, seat) => ({
+      seat,
+      deck,
+      name: opts.names?.[seat] ?? `${deck.commanders[0]?.name ?? deck.name} (P${seat + 1})`,
+      identity: deck.colorIdentity,
+      life: STARTING_LIFE,
+      library: [],
+      hand: [],
+      graveyard: [],
+      exile: [],
+      battlefield: [],
+      commandZone: [...deck.commanders],
+      commanderCasts: new Map(),
+      commanderDamage: new Map(),
+      treasures: 0,
+      alive: true,
+      drewFromEmpty: false,
+      landsPlayed: 0,
+      lastHitBy: null,
+      lastHitKind: 'combat',
+      commanderRound: null,
+      mulligans: 0,
+      earlyNames: new Set(),
+      drawnNames: new Set(),
+      castNames: new Set(),
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Top level
+  // -------------------------------------------------------------------------
+
+  *run(): Flow<GameResult> {
+    for (const p of this.inTurnOrder()) yield* this.openingHand(p);
+
+    while (!this.over && this.round < this.maxRounds) {
+      this.round++;
+      for (const p of this.inTurnOrder()) {
+        if (!p.alive) continue;
+        yield* this.turn(p);
+        if (this.over) break;
+      }
+    }
+
+    const alive = this.alivePlayers();
+    if (alive.length === 1) {
+      this.winner = alive[0].seat;
+      this.placements[this.winner] = 1;
+      this.say(`${alive[0].name} wins on round ${this.round}.`);
+    } else if (alive.length > 1) {
+      // Turn limit: survivors share the top places.
+      const shared = (1 + alive.length) / 2;
+      for (const p of alive) {
+        this.placements[p.seat] = shared;
+        this.eliminations.push({ seat: p.seat, round: this.round, reason: 'timeout', killer: null });
+      }
+      this.say(`Turn limit reached — draw between ${alive.map((p) => p.name).join(', ')}.`);
+    }
+    this.over = true;
+    return this.result();
+  }
+
+  result(): GameResult {
+    return {
+      seats: this.players.map((p) => p.deck.id),
+      winner: this.winner,
+      placements: this.placements,
+      rounds: this.round,
+      eliminations: this.eliminations,
+      commanderRound: this.players.map((p) => p.commanderRound),
+      mulligans: this.players.map((p) => p.mulligans),
+      cards: this.players.map((p) => ({ early: [...p.earlyNames], drawn: [...p.drawnNames], cast: [...p.castNames] })),
+    };
+  }
+
+  private inTurnOrder(): PlayerState[] {
+    const n = this.players.length;
+    return this.players.map((_, i) => this.players[(this.startSeat + i) % n]);
+  }
+
+  alivePlayers(): PlayerState[] {
+    return this.players.filter((p) => p.alive);
+  }
+
+  opponents(p: PlayerState): PlayerState[] {
+    return this.players.filter((o) => o.alive && o !== p);
+  }
+
+  /** The next living player after `seat` in turn order. */
+  nextAliveSeat(seat: number): number {
+    const n = this.players.length;
+    for (let i = 1; i <= n; i++) {
+      const q = this.players[(seat + i) % n];
+      if (q.alive) return q.seat;
+    }
+    return seat;
+  }
+
+  private say(msg: string) {
+    if (this.log) this.log.push(msg);
+  }
+
+  // -------------------------------------------------------------------------
+  // Setup and mulligans (rule 103.5)
+  // -------------------------------------------------------------------------
+
+  private *openingHand(p: PlayerState): Flow<void> {
+    const cards: SimCard[] = [];
+    for (const entry of p.deck.cards) for (let i = 0; i < entry.count; i++) cards.push(entry.card);
+    p.library = this.rng.shuffle(cards);
+    p.hand = p.library.splice(0, MAX_HAND);
+
+    // London mulligan; the first one is free in multiplayer (rule 103.5c).
+    const free = this.players.length > 2 ? 1 : 0;
+    while (MAX_HAND - Math.max(0, p.mulligans + 1 - free) > 0) {
+      const again = yield* ask<boolean>({
+        kind: 'confirm', seat: p.seat, reason: 'mulligan',
+        prompt: p.mulligans === 0 ? 'Keep this hand, or mulligan?' : `Keep, or mulligan again? (${p.mulligans} taken so far)`,
+      });
+      if (!again) break;
+      p.mulligans++;
+      p.library.push(...p.hand);
+      this.rng.shuffle(p.library);
+      p.hand = p.library.splice(0, MAX_HAND);
+    }
+    const toBottom = Math.min(p.hand.length, Math.max(0, p.mulligans - free));
+    if (toBottom > 0) {
+      const picks = yield* this.choose(p, 'bottom', `Put ${toBottom} card${toBottom > 1 ? 's' : ''} on the bottom of your library.`, p.hand.map((card) => ({ label: card.name, card })), toBottom, toBottom);
+      const cards2 = picks.map((i) => p.hand[i]);
+      for (const c of cards2) {
+        p.hand.splice(p.hand.indexOf(c), 1);
+        p.library.push(c);
+      }
+    }
+    for (const c of p.hand) p.drawnNames.add(c.name);
+    for (const c of [...p.hand, ...p.library.slice(0, EARLY_LIBRARY_CARDS)]) p.earlyNames.add(c.name);
+    this.say(`${p.name} keeps ${p.hand.length}${p.mulligans ? ` after ${p.mulligans} mulligan(s)` : ''}.`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Turn structure (rules 500–514)
+  // -------------------------------------------------------------------------
+
+  private stopped(p: PlayerState): boolean {
+    return this.over || !p.alive;
+  }
+
+  private *turn(p: PlayerState): Flow<void> {
+    this.activeSeat = p.seat;
+    this.turnNumber++;
+    this.triggerBudget = 300;
+    this.say(`— Round ${this.round}, ${p.name} (life ${p.life}) —`);
+
+    // Untap step (502). No player gets priority.
+    this.step = 'untap';
+    for (const perm of p.battlefield) {
+      perm.tapped = false;
+      perm.sick = false;
+    }
+    for (const q of this.players) {
+      for (const perm of q.battlefield) {
+        perm.usedThisTurn = [];
+        perm.activations = 0;
+      }
+    }
+    p.landsPlayed = 0;
+
+    // Upkeep step (503).
+    this.step = 'upkeep';
+    this.fire(p, 'upkeep');
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    // Draw step (504). Only in a two-player game does the first player skip it (rule 103.8).
+    this.step = 'draw';
+    if (!(this.turnNumber === 1 && this.players.length === 2)) this.draw(p, 1);
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    this.step = 'main1';
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    yield* this.combat(p);
+    this.endCombat();
+    if (this.stopped(p)) return;
+
+    this.step = 'main2';
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    this.step = 'end';
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    // Cleanup step (514): discard to hand size, then damage and "until end of turn" effects wear off.
+    this.step = 'cleanup';
+    if (p.hand.length > MAX_HAND) {
+      const n = p.hand.length - MAX_HAND;
+      const picks = yield* this.choose(p, 'discard', `Discard ${n} card${n > 1 ? 's' : ''} (hand size is ${MAX_HAND}).`, p.hand.map((card) => ({ label: card.name, card })), n, n);
+      const cards = picks.map((i) => p.hand[i]);
+      for (const c of cards) {
+        p.hand.splice(p.hand.indexOf(c), 1);
+        p.graveyard.push(c);
+      }
+      this.say(`${p.name} discards ${cards.map((c) => c.name).join(', ')}.`);
+    }
+    for (const q of this.players) {
+      for (const perm of q.battlefield) {
+        perm.damage = 0;
+        perm.deathtouched = false;
+        perm.tempP = 0;
+        perm.tempT = 0;
+        perm.tempKw = [];
+      }
+    }
+    yield* this.checkState();
+  }
+
+  draw(p: PlayerState, n: number) {
+    for (let i = 0; i < n; i++) {
+      const c = p.library.shift();
+      if (!c) {
+        // Rule 704.5b: loses the next time state-based actions are checked.
+        p.drewFromEmpty = true;
+        return;
+      }
+      p.hand.push(c);
+      p.drawnNames.add(c.name);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Priority (rule 117)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Players get priority in turn order, starting with the active player. When
+   * everyone passes in a row, the top of the stack resolves, or, if the stack
+   * is empty, the step ends (rule 117.4).
+   */
+  private *priority(): Flow<void> {
+    let passes = 0;
+    let seat = this.activeSeat;
+    for (let guard = 0; guard < 2000; guard++) {
+      // State-based actions, then waiting triggers go on the stack (rule 117.5).
+      yield* this.checkState();
+      if (this.over) return;
+      const p = this.players[seat];
+      if (!p.alive) {
+        // The active player left the game: finish what is on the stack, then end the turn.
+        if (seat === this.activeSeat && !this.stack.length) return;
+        seat = this.nextAliveSeat(seat);
+        continue;
+      }
+
+      const actions = this.legalActions(p);
+      if (actions.length > 1) {
+        const answer = yield* ask<PriorityAnswer | null>({ kind: 'priority', seat, actions });
+        const chosen = actions[answer?.action ?? 0] ?? PASS;
+        if (chosen.type !== 'pass') {
+          // A player who acts keeps priority (rule 117.3c). A cast that was taken back changes nothing.
+          if (yield* this.perform(p, chosen, answer?.x ?? 0)) passes = 0;
+          continue;
+        }
+      }
+
+      passes++;
+      if (passes >= this.alivePlayers().length) {
+        if (!this.stack.length) return;
+        yield* this.resolveTop();
+        passes = 0;
+        seat = this.activeSeat; // rule 117.3b
+      } else {
+        seat = this.nextAliveSeat(seat);
+      }
+    }
+  }
+
+  /** May this player cast sorcery-speed spells right now? (rule 307.1) */
+  sorcerySpeed(p: PlayerState): boolean {
+    return this.activeSeat === p.seat && this.stack.length === 0 && (this.step === 'main1' || this.step === 'main2');
+  }
+
+  /** Everything `p` may do with priority. The first entry is always "pass". */
+  legalActions(p: PlayerState): Action[] {
+    const actions: Action[] = [PASS];
+    const sorcery = this.sorcerySpeed(p);
+
+    if (sorcery && p.landsPlayed < 1) {
+      for (const card of new Set(p.hand)) {
+        if (card.isLand && card.land) actions.push({ type: 'land', card, back: false });
+        else if (card.backLand) actions.push({ type: 'land', card, back: true });
+      }
+    }
+
+    const mana = this.availableMana(p);
+    const consider = (card: SimCard, from: 'hand' | 'command') => {
+      if (card.isLand) return;
+      if (!sorcery && !isInstantSpeed(card)) return;
+      const fromCommand = from === 'command';
+      if (mana < this.effectiveCost(p, card, fromCommand)) return;
+      if (!this.canAfford(p, card, fromCommand, 0)) return;
+      if (!this.hasTargets(p, card)) return;
+      actions.push({ type: 'cast', card, from, maxX: this.maxX(p, card, fromCommand) });
+    };
+    for (const card of new Set(p.commandZone)) consider(card, 'command');
+    for (const card of new Set(p.hand)) consider(card, 'hand');
+
+    for (const perm of p.battlefield) {
+      for (const effect of perm.card.effects) {
+        if (this.canActivate(p, perm, effect, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect });
+      }
+    }
+    return actions;
+  }
+
+  private canActivate(p: PlayerState, perm: Perm, e: Effect, sorcery: boolean): boolean {
+    if (perm.activations >= 20) return false;
+    if (e.kind === 'equip') {
+      // Equip: sorcery speed, target creature you control (rule 702.6).
+      if (e.aura || !sorcery) return false;
+      if (!p.battlefield.some((q) => q.card.isCreature && q.id !== perm.attachedTo && q !== perm)) return false;
+      return this.planPayment(p, e.cost ?? DEFAULT_EQUIP, 0, 0) !== null;
+    }
+    if (e.when !== 'activated' || !e.activation) return false;
+    const act = e.activation;
+    if (act.tap && (perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')))) return false;
+    if (act.cost.life >= p.life && act.cost.life > 0) return false;
+    if (this.planPayment(p, act.cost, 0, 0, act.tap ? perm : undefined) === null) return false;
+    const candidates = this.targetCandidates(p, e, perm);
+    return candidates === null || candidates.length > 0;
+  }
+
+  /** Does every targeted part of this spell have something to target? (rule 601.2c) */
+  private hasTargets(p: PlayerState, card: SimCard): boolean {
+    if (card.isInstant || card.isSorcery) {
+      for (const e of card.effects) {
+        if (e.when !== 'resolve') continue;
+        const candidates = this.targetCandidates(p, e, null);
+        if (candidates !== null && candidates.length === 0) return false;
+      }
+      return true;
+    }
+    if (isAura(card)) return this.auraCandidates(p).length > 0;
+    return true;
+  }
+
+  private *perform(p: PlayerState, action: Action, x: number): Flow<boolean> {
+    switch (action.type) {
+      case 'land': {
+        const idx = p.hand.indexOf(action.card);
+        if (idx === -1) return false;
+        p.hand.splice(idx, 1);
+        const info = action.back ? action.card.backLand! : action.card.land!;
+        this.say(`${p.name} plays ${action.back ? action.card.backLand!.name : action.card.name}.`);
+        this.putLand(p, action.card, info);
+        p.landsPlayed++;
+        p.castNames.add(action.card.name);
+        return true;
+      }
+      case 'cast':
+        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)));
+      case 'activate':
+        return yield* this.activate(p, action.permId, action.effect);
+      default:
+        return false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Mana
+  // -------------------------------------------------------------------------
+
+  private manaSources(p: PlayerState, exclude?: Perm): ManaSource[] {
+    const out: ManaSource[] = [];
+    for (const perm of p.battlefield) {
+      if (perm.tapped || perm === exclude) continue;
+      if (perm.landInfo) {
+        out.push({ perm, colors: perm.landInfo.produces, amount: 1 });
+        continue;
+      }
+      if (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')) continue;
+      for (const e of perm.card.effects) {
+        if (e.kind === 'mana') out.push({ perm, colors: e.colors, amount: e.amount });
+      }
+    }
+    for (let i = 0; i < p.treasures; i++) out.push({ perm: null, colors: 'any', amount: 1 });
+    return out;
+  }
+
+  /** Total mana `p` could produce right now. */
+  availableMana(p: PlayerState): number {
+    let n = p.treasures;
+    for (const perm of p.battlefield) {
+      if (perm.tapped) continue;
+      if (perm.landInfo) n++;
+      else if (!(perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste'))) {
+        for (const e of perm.card.effects) if (e.kind === 'mana') n += e.amount;
+      }
+    }
+    return n;
+  }
+
+  colorsAvailable(p: PlayerState): Set<Mana> {
+    const set = new Set<Mana>();
+    for (const perm of p.battlefield) {
+      let produces: Mana[] | 'any' | undefined = perm.landInfo?.produces;
+      if (!produces) {
+        const mana = perm.card.effects.find((e) => e.kind === 'mana');
+        if (mana && mana.kind === 'mana') produces = mana.colors;
+      }
+      if (!produces) continue;
+      if (produces === 'any') p.identity.forEach((c) => set.add(c));
+      else produces.forEach((c) => set.add(c));
+    }
+    if (p.treasures) p.identity.forEach((c) => set.add(c));
+    return set;
+  }
+
+  landCount(p: PlayerState): number {
+    let n = 0;
+    for (const perm of p.battlefield) if (perm.landInfo) n++;
+    return n;
+  }
+
+  private costReduction(p: PlayerState, card: SimCard): number {
+    let n = 0;
+    for (const perm of p.battlefield) {
+      for (const e of perm.card.effects) {
+        if (e.kind === 'costReduction' && matchesFilter(card, e.filter)) n += e.amount;
+      }
+    }
+    return n;
+  }
+
+  /** Commander tax: {2} more for each earlier cast from the command zone (rule 903.8). */
+  commanderTax(p: PlayerState, card: SimCard, fromCommand: boolean): number {
+    return fromCommand ? 2 * (p.commanderCasts.get(card.name) ?? 0) : 0;
+  }
+
+  /** Total mana a spell would cost right now. */
+  effectiveCost(p: PlayerState, card: SimCard, fromCommand = false, x = 0): number {
+    const base = card.cost.generic + card.cost.x * x + this.commanderTax(p, card, fromCommand);
+    return Math.max(0, base - this.costReduction(p, card)) + card.cost.pips.length;
+  }
+
+  /**
+   * Work out which sources pay for a cost. Returns the sources and how many
+   * units each contributes, or null if it can't be paid. Greedy: pay the
+   * hardest colored pips first with the least flexible sources.
+   */
+  private planPayment(p: PlayerState, cost: ManaCost, extraGeneric: number, reduction: number, exclude?: Perm): Map<ManaSource, number> | null {
+    const sources = this.manaSources(p, exclude);
+    const remaining = sources.map((s) => s.amount);
+    const used = new Map<ManaSource, number>();
+    const can = (s: ManaSource, pip: Mana[]) => {
+      if (s.colors === 'any') return pip.some((m) => m === 'C' || p.identity.includes(m as Color) || p.identity.length === 0);
+      return pip.some((m) => (s.colors as Mana[]).includes(m));
+    };
+    const flex = (s: ManaSource) => (s.colors === 'any' ? 6 : s.colors.length) + (s.perm === null ? 10 : 0);
+    const take = (i: number) => {
+      remaining[i]--;
+      used.set(sources[i], (used.get(sources[i]) ?? 0) + 1);
+    };
+
+    const pips = cost.pips.length > 1
+      ? [...cost.pips].sort((a, b) => sources.filter((s) => can(s, a)).length - sources.filter((s) => can(s, b)).length)
+      : cost.pips;
+    for (const pip of pips) {
+      let best = -1;
+      for (let i = 0; i < sources.length; i++) {
+        if (remaining[i] <= 0 || !can(sources[i], pip)) continue;
+        if (best === -1 || flex(sources[i]) < flex(sources[best]) || (flex(sources[i]) === flex(sources[best]) && used.has(sources[i]) && !used.has(sources[best]))) best = i;
+      }
+      if (best === -1) return null;
+      take(best);
+    }
+
+    let generic = Math.max(0, cost.generic + extraGeneric - reduction);
+    while (generic > 0) {
+      let best = -1;
+      let bestScore = Infinity;
+      for (let i = 0; i < sources.length; i++) {
+        if (remaining[i] <= 0) continue;
+        // Prefer leftovers from sources already tapped, then sources that fit exactly, then least flexible.
+        let score = flex(sources[i]);
+        if (used.has(sources[i])) score -= 20;
+        if (remaining[i] > generic) score += 5;
+        if (score < bestScore) {
+          best = i;
+          bestScore = score;
+        }
+      }
+      if (best === -1) return null;
+      take(best);
+      generic--;
+    }
+    return used;
+  }
+
+  private commitPayment(p: PlayerState, plan: Map<ManaSource, number>) {
+    for (const [src, units] of plan) {
+      if (src.perm) src.perm.tapped = true;
+      else p.treasures -= units;
+    }
+  }
+
+  private spellPlan(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, extra: number) {
+    if (card.cost.life > 0 && card.cost.life >= p.life) return null;
+    return this.planPayment(p, card.cost, card.cost.x * x + this.commanderTax(p, card, fromCommand) + extra, this.costReduction(p, card));
+  }
+
+  canAfford(p: PlayerState, card: SimCard, fromCommand = false, x = 0, extra = 0): boolean {
+    return this.spellPlan(p, card, fromCommand, x, extra) !== null;
+  }
+
+  /** Largest X `p` could pay for this card right now. */
+  maxX(p: PlayerState, card: SimCard, fromCommand = false): number {
+    if (card.cost.x === 0) return 0;
+    let x = 0;
+    while (x < 30 && this.canAfford(p, card, fromCommand, x + 1)) x++;
+    return x;
+  }
+
+  // -------------------------------------------------------------------------
+  // Targets (rule 115)
+  // -------------------------------------------------------------------------
+
+  /** Every permanent on the battlefield. */
+  allPerms(): Perm[] {
+    const out: Perm[] = [];
+    for (const q of this.players) if (q.alive) for (const perm of q.battlefield) out.push(perm);
+    return out;
+  }
+
+  findPerm(id: number | null): Perm | null {
+    if (id === null) return null;
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) if (perm.id === id) return perm;
+    }
+    return null;
+  }
+
+  /** Hexproof stops opponents; shroud stops everyone (rules 702.11, 702.18). */
+  canTarget(by: PlayerState, perm: Perm): boolean {
+    if (this.hasKw(perm, 'shroud')) return false;
+    return !(perm.seat !== by.seat && this.hasKw(perm, 'hexproof'));
+  }
+
+  private wardCost(by: PlayerState, t: Target | null): number {
+    if (!t || t.kind !== 'perm') return 0;
+    const perm = this.findPerm(t.id);
+    return perm && perm.seat !== by.seat && this.hasKw(perm, 'ward') ? WARD_COST : 0;
+  }
+
+  /**
+   * What an effect could target if `p` used it now. null means the effect
+   * doesn't target; an empty list means it targets but nothing is legal.
+   */
+  targetCandidates(p: PlayerState, e: Effect, src: Perm | null): Target[] | null {
+    switch (e.kind) {
+      case 'removal': {
+        if (e.mode === 'edict') {
+          return this.opponents(p).filter((o) => o.battlefield.some((q) => q.card.isCreature)).map((o) => ({ kind: 'player', seat: o.seat }));
+        }
+        const out: Target[] = [];
+        for (const perm of this.allPerms()) {
+          if (perm === src || perm.card.isLand || !removalMatches(e.target, perm.card) || !this.canTarget(p, perm)) continue;
+          if ((e.mode === 'damage' || e.mode === 'fight') && !perm.card.isCreature) continue;
+          if (e.mode === 'fight' && perm.seat === p.seat) continue;
+          out.push({ kind: 'perm', id: perm.id });
+        }
+        if (e.mode === 'fight' && !(src?.card.isCreature || p.battlefield.some((q) => q.card.isCreature))) return [];
+        if (e.mode === 'damage' && e.anyTarget) for (const o of this.alivePlayers()) out.push({ kind: 'player', seat: o.seat });
+        return out;
+      }
+      case 'counter':
+        return this.stack.filter((s) => s.kind === 'spell' && counterMatches(e.target, s.card)).map((s) => ({ kind: 'stack', id: s.id }));
+      case 'pump': {
+        const out: Target[] = [];
+        for (const perm of this.allPerms()) if (perm.card.isCreature && this.canTarget(p, perm)) out.push({ kind: 'perm', id: perm.id });
+        return out;
+      }
+      case 'protect':
+        return p.battlefield.filter((q) => !q.card.isLand && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'damagePlayer':
+        return this.opponents(p).map((o) => ({ kind: 'player', seat: o.seat }));
+      default:
+        return null;
+    }
+  }
+
+  private auraCandidates(p: PlayerState): Target[] {
+    const out: Target[] = [];
+    for (const perm of this.allPerms()) if (perm.card.isCreature && this.canTarget(p, perm)) out.push({ kind: 'perm', id: perm.id });
+    return out;
+  }
+
+  private targetStillLegal(p: PlayerState, e: Effect | null, t: Target): boolean {
+    if (t.kind === 'player') return this.players[t.seat].alive;
+    if (t.kind === 'stack') return this.stack.some((s) => s.id === t.id);
+    const perm = this.findPerm(t.id);
+    if (!perm || !this.canTarget(p, perm)) return false;
+    if (e?.kind === 'removal' && e.mode !== 'edict' && !removalMatches(e.target, perm.card)) return false;
+    return true;
+  }
+
+  describeTarget(t: Target): string {
+    if (t.kind === 'player') return this.players[t.seat].name;
+    if (t.kind === 'stack') return this.stack.find((s) => s.id === t.id)?.label ?? 'a spell';
+    const perm = this.findPerm(t.id);
+    return perm ? `${perm.card.name} (${this.players[perm.seat].name})` : 'a permanent';
+  }
+
+  // -------------------------------------------------------------------------
+  // Casting spells (rule 601) and activating abilities (rule 602)
+  // -------------------------------------------------------------------------
+
+  /** Returns false if the cast was taken back before anything was paid. */
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number): Flow<boolean> {
+    const zone = fromCommand ? p.commandZone : p.hand;
+    if (!zone.includes(card)) return false;
+    const permanent = !card.isInstant && !card.isSorcery;
+    const effects = permanent ? [] : card.effects.filter((e) => e.when === 'resolve');
+
+    // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
+    let ward = 0;
+    const affordable = (t: Target) => this.canAfford(p, card, fromCommand, x, ward + this.wardCost(p, t));
+    let attachTo: Target | null = null;
+    if (permanent && isAura(card)) {
+      const candidates = this.auraCandidates(p).filter(affordable);
+      if (!candidates.length) return false;
+      attachTo = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: `Enchant which creature with ${card.name}?`, card, effect: null, candidates, cancellable: true });
+      if (!attachTo || !candidates.some((c) => sameTarget(c, attachTo!))) return false;
+      ward += this.wardCost(p, attachTo);
+    }
+    const targets: (Target | null)[] = [];
+    for (const e of effects) {
+      const all = this.targetCandidates(p, e, null);
+      if (all === null) {
+        targets.push(null);
+        continue;
+      }
+      const candidates = all.filter(affordable);
+      if (!candidates.length) return false;
+      const t = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(card, e), card, effect: e, candidates, cancellable: true });
+      if (!t || !candidates.some((c) => sameTarget(c, t))) return false;
+      ward += this.wardCost(p, t);
+      targets.push(t);
+    }
+
+    const plan = this.spellPlan(p, card, fromCommand, x, ward);
+    if (!plan) return false;
+    this.commitPayment(p, plan);
+    p.life -= card.cost.life;
+
+    zone.splice(zone.indexOf(card), 1);
+    if (fromCommand) {
+      p.commanderCasts.set(card.name, (p.commanderCasts.get(card.name) ?? 0) + 1);
+      if (p.commanderRound === null) p.commanderRound = this.round;
+    } else {
+      p.castNames.add(card.name);
+    }
+    const item: StackItem = {
+      id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
+      isCommander: p.deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
+    };
+    this.stack.push(item);
+    const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
+    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+
+    // "Whenever you cast a spell" triggers (they go on the stack above the spell).
+    for (const perm of p.battlefield) {
+      const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(card, e.castFilter ?? 'any') && card.cmc >= (e.minCmc ?? 0));
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+    }
+    return true;
+  }
+
+  private *activate(p: PlayerState, permId: number, e: Effect): Flow<boolean> {
+    const perm = p.battlefield.find((q) => q.id === permId);
+    if (!perm || !this.canActivate(p, perm, e, this.sorcerySpeed(p))) return false;
+
+    if (e.kind === 'equip') {
+      const candidates: Target[] = p.battlefield.filter((q) => q.card.isCreature && q.id !== perm.attachedTo && q !== perm).map((q) => ({ kind: 'perm', id: q.id }));
+      const t = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: `Equip ${perm.card.name} to which creature?`, card: perm.card, effect: e, candidates, cancellable: true });
+      if (!t || !candidates.some((c) => sameTarget(c, t))) return false;
+      const plan = this.planPayment(p, e.cost ?? DEFAULT_EQUIP, 0, 0);
+      if (!plan) return false;
+      this.commitPayment(p, plan);
+      perm.activations++;
+      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [], targets: [], x: 0, isCommander: false, sourceId: perm.id, attachTo: t, label: `Equip ${perm.card.name}` });
+      this.say(`${p.name} equips ${perm.card.name} to ${this.describeTarget(t)}.`);
+      return true;
+    }
+
+    const act = e.activation!;
+    let target: Target | null = null;
+    const all = this.targetCandidates(p, e, perm);
+    if (all !== null) {
+      const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), 0, act.tap ? perm : undefined) !== null);
+      if (!candidates.length) return false;
+      target = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(perm.card, e), card: perm.card, effect: e, candidates, cancellable: true });
+      if (!target || !candidates.some((c) => sameTarget(c, target!))) return false;
+    }
+    const plan = this.planPayment(p, act.cost, this.wardCost(p, target), 0, act.tap ? perm : undefined);
+    if (!plan) return false;
+    this.commitPayment(p, plan);
+    p.life -= act.cost.life;
+    if (act.tap) perm.tapped = true;
+    perm.activations++;
+    this.say(`${p.name} activates ${perm.card.name}${target ? ` targeting ${this.describeTarget(target)}` : ''}.`);
+    if (act.sacrifice) this.removePerm(perm, 'graveyard');
+    this.stack.push({
+      id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e], targets: [target], x: 0,
+      isCommander: false, sourceId: act.sacrifice ? null : perm.id, attachTo: null, label: `${perm.card.name} ability`,
+    });
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Triggered abilities (rule 603)
+  // -------------------------------------------------------------------------
+
+  /** Note that an ability triggered. It goes on the stack the next time a player would get priority. */
+  private trigger(controller: PlayerState, card: SimCard, sourceId: number | null, effects: Effect[]) {
+    if (!controller.alive || !effects.length) return;
+    const src = this.findPerm(sourceId);
+    const kept: Effect[] = [];
+    for (const e of effects) {
+      if (this.triggerBudget-- <= 0) return;
+      // "If" conditions the classifier couldn't read hold about half the time.
+      if (e.chance !== undefined && !this.rng.chance(e.chance)) continue;
+      if (e.oncePerTurn && src) {
+        if (src.usedThisTurn.includes(e)) continue;
+        src.usedThisTurn.push(e);
+      }
+      kept.push(e);
+    }
+    if (kept.length) this.pending.push({ controller: controller.seat, card, sourceId, effects: kept });
+  }
+
+  /** Abilities of `p`'s permanents that trigger on a simple event. */
+  private fire(p: PlayerState, when: Trigger) {
+    for (const perm of p.battlefield) {
+      const hits = perm.card.effects.filter((e) => e.when === when);
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+    }
+  }
+
+  private creatureEntered(p: PlayerState, entering: Perm) {
+    for (const perm of p.battlefield) {
+      if (perm === entering) continue;
+      const hits = perm.card.effects.filter((e) => e.when === 'creatureEnters');
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+    }
+  }
+
+  /** Put waiting triggers on the stack in turn order from the active player (rule 603.3b). */
+  private *flushTriggers(): Flow<void> {
+    if (!this.pending.length) return;
+    const n = this.players.length;
+    const order = (seat: number) => (seat - this.activeSeat + n) % n;
+    const waiting = this.pending.sort((a, b) => order(a.controller) - order(b.controller));
+    this.pending = [];
+    for (const t of waiting) {
+      const p = this.players[t.controller];
+      if (!p.alive) continue;
+      const src = this.findPerm(t.sourceId);
+      const effects: Effect[] = [];
+      const targets: (Target | null)[] = [];
+      for (const e of t.effects) {
+        const all = this.targetCandidates(p, e, src);
+        if (all === null) {
+          effects.push(e);
+          targets.push(null);
+          continue;
+        }
+        const candidates = all.filter((c) => this.wardCost(p, c) === 0 || this.planPayment(p, NO_COST, WARD_COST, 0) !== null);
+        // No legal target: that part of the ability is removed (rule 603.3d).
+        if (!candidates.length) continue;
+        const pick = candidates.length === 1
+          ? candidates[0]
+          : yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(t.card, e), card: t.card, effect: e, candidates, cancellable: false });
+        const chosen = pick && candidates.some((c) => sameTarget(c, pick)) ? pick : candidates[0];
+        if (this.wardCost(p, chosen)) {
+          const plan = this.planPayment(p, NO_COST, WARD_COST, 0);
+          if (plan) this.commitPayment(p, plan);
+        }
+        effects.push(e);
+        targets.push(chosen);
+      }
+      if (!effects.length) continue;
+      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: t.card, effects, targets, x: 0, isCommander: false, sourceId: t.sourceId, attachTo: null, label: `${t.card.name} trigger` });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Resolving spells and abilities (rule 608)
+  // -------------------------------------------------------------------------
+
+  private *resolveTop(): Flow<void> {
+    const item = this.stack.pop();
+    if (!item) return;
+    const p = this.players[item.controller];
+    if (!p.alive) return;
+
+    // A spell or ability whose targets are all illegal doesn't resolve (rule 608.2b).
+    const legal = item.targets.map((t, i) => (t ? this.targetStillLegal(p, item.effects[i], t) : true));
+    const attachLegal = item.attachTo ? this.targetStillLegal(p, null, item.attachTo) : true;
+    const targeted = item.targets.some((t) => t !== null) || item.attachTo !== null;
+    const anyLegal = item.targets.some((t, i) => t !== null && legal[i]) || (item.attachTo !== null && attachLegal);
+    if (targeted && !anyLegal) {
+      this.say(`${item.label} has no legal target and doesn't resolve.`);
+      if (item.kind === 'spell') this.toGraveyard(p, item.card, item.isCommander);
+      return;
+    }
+
+    if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
+      this.enter(p, item.card, item.isCommander, item.x, item.attachTo);
+      return;
+    }
+
+    const src = this.findPerm(item.sourceId);
+    if (item.kind === 'ability' && item.attachTo && src) {
+      const host = this.findPerm(item.attachTo.kind === 'perm' ? item.attachTo.id : null);
+      if (host && host.seat === src.seat) {
+        src.attachedTo = host.id;
+        this.anyAttached = true;
+      }
+    }
+    for (let i = 0; i < item.effects.length; i++) {
+      if (!legal[i] || !p.alive) continue;
+      yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i]);
+    }
+    if (item.kind === 'spell') this.toGraveyard(p, item.card, item.isCommander);
+  }
+
+  private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
+    p.graveyard.push(card);
+    if (isCommander) this.pendingCommander.push({ seat: p.seat, card, to: 'graveyard' });
+  }
+
+  private makePerm(p: PlayerState, card: SimCard, token: boolean): Perm {
+    return {
+      id: this.nextId++, card, seat: p.seat, tapped: false, sick: true, token, isCommander: false,
+      counters: 0, damage: 0, deathtouched: false, tempP: 0, tempT: 0, tempKw: [],
+      attachedTo: null, activations: 0, usedThisTurn: [], attacking: null, blocked: false, blocking: null,
+    };
+  }
+
+  /** Put a permanent card onto the battlefield and note its enters triggers. */
+  private enter(p: PlayerState, card: SimCard, isCommander: boolean, x: number, attachTo: Target | null) {
+    const perm = this.makePerm(p, card, false);
+    perm.isCommander = isCommander;
+    if (isAura(card)) {
+      const host = attachTo && attachTo.kind === 'perm' ? this.findPerm(attachTo.id) : null;
+      // An Aura with nothing legal to enchant goes to the graveyard instead (rule 608.3b).
+      if (!host || !this.canTarget(p, host)) {
+        this.toGraveyard(p, card, isCommander);
+        return;
+      }
+      perm.attachedTo = host.id;
+      this.anyAttached = true;
+    }
+    if (card.entersWithX) perm.counters = x;
+    p.battlefield.push(perm);
+    const etb = card.effects.filter((e) => e.when === 'resolve');
+    if (etb.length) this.trigger(p, card, perm.id, etb);
+    if (card.isCreature) this.creatureEntered(p, perm);
+  }
+
+  /**
+   * Put a permanent straight onto the battlefield, without casting it and
+   * without triggers. For building board states (tests, puzzles), not used in play.
+   */
+  put(seat: number, card: SimCard, opts: { sick?: boolean; tapped?: boolean; counters?: number; commander?: boolean } = {}): Perm {
+    const p = this.players[seat];
+    const perm = this.makePerm(p, card, false);
+    if (card.isLand && card.land) perm.landInfo = card.land;
+    perm.sick = opts.sick ?? false;
+    perm.tapped = opts.tapped ?? false;
+    perm.counters = opts.counters ?? 0;
+    perm.isCommander = opts.commander ?? false;
+    p.battlefield.push(perm);
+    return perm;
+  }
+
+  private putLand(p: PlayerState, card: SimCard, info: LandInfo, forceTapped = false) {
+    const perm = this.makePerm(p, card, false);
+    perm.landInfo = info;
+    perm.tapped = forceTapped || info.tapped;
+    perm.sick = false;
+    p.battlefield.push(perm);
+    this.fire(p, 'landfall');
+  }
+
+  private *choose(p: PlayerState, reason: ChooseReason, prompt: string, options: ChoiceOption[], min: number, max: number): Flow<number[]> {
+    max = Math.min(max, options.length);
+    min = Math.min(min, max);
+    if (max <= 0) return [];
+    if (min === options.length) return options.map((_, i) => i);
+    const answer = yield* ask<number[] | null>({ kind: 'choose', seat: p.seat, reason, prompt, options, min, max });
+    const picks = [...new Set((Array.isArray(answer) ? answer : []).filter((i) => Number.isInteger(i) && i >= 0 && i < options.length))].slice(0, max);
+    // Fill up from the front if too few were picked.
+    for (let i = 0; picks.length < min && i < options.length; i++) if (!picks.includes(i)) picks.push(i);
+    return picks;
+  }
+
+  private *resolveEffect(p: PlayerState, e: Effect, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    const n = (v: number) => (v === -1 ? x : v);
+
+    switch (e.kind) {
+      case 'ramp': {
+        let found = 0;
+        for (let i = 0; i < e.lands + e.toHand; i++) {
+          const names = [...new Set(p.library.filter((c) => c.isBasic && c.land).map((c) => c.name))];
+          if (!names.length) break;
+          const toBattlefield = i < e.lands;
+          const pick = names.length === 1 ? [0] : yield* this.choose(p, 'ramp', `Search for a basic land${toBattlefield ? ' to put onto the battlefield' : ' for your hand'}.`, names.map((name) => ({ label: name, card: p.library.find((c) => c.name === name) })), 1, 1);
+          const land = p.library.find((c) => c.isBasic && c.land && c.name === names[pick[0] ?? 0])!;
+          p.library.splice(p.library.indexOf(land), 1);
+          if (toBattlefield) this.putLand(p, land, land.land!, e.tapped);
+          else p.hand.push(land);
+          found++;
+        }
+        this.rng.shuffle(p.library);
+        if (found) this.say(`${p.name} searches for ${found} basic land${found > 1 ? 's' : ''}.`);
+        break;
+      }
+      case 'treasure':
+        p.treasures += e.n;
+        this.say(`${p.name} makes ${e.n} Treasure${e.n > 1 ? 's' : ''}.`);
+        break;
+      case 'extraLand': {
+        const lands = p.hand.filter((c) => c.isLand && c.land);
+        if (!lands.length) break;
+        const pick = yield* this.choose(p, 'extraLand', 'Put a land from your hand onto the battlefield?', lands.map((card) => ({ label: card.name, card })), 0, 1);
+        if (!pick.length) break;
+        const land = lands[pick[0]];
+        p.hand.splice(p.hand.indexOf(land), 1);
+        this.say(`${p.name} puts ${land.name} onto the battlefield.`);
+        this.putLand(p, land, land.land!);
+        break;
+      }
+      case 'draw': {
+        const count = e.n === -1 ? Math.max(x, 1) : e.n;
+        this.draw(p, count);
+        this.say(`${p.name} draws ${count} card${count > 1 ? 's' : ''}.`);
+        break;
+      }
+      case 'removal':
+        yield* this.resolveRemoval(p, e, src, x, target);
+        break;
+      case 'wipe': {
+        const amount = n(e.amount);
+        this.say(`${p.name} wipes the board (${e.mode} ${e.target === 'creatures' ? 'creatures' : 'nonland permanents'}${e.oneSided ? ', opponents only' : ''}).`);
+        for (const q of this.alivePlayers()) {
+          if (e.oneSided && q === p) continue;
+          for (const perm of [...q.battlefield]) {
+            if (perm.card.isLand) continue;
+            if (e.target === 'creatures' && !perm.card.isCreature) continue;
+            switch (e.mode) {
+              case 'exile': this.removePerm(perm, 'exile'); break;
+              case 'bounce': this.removePerm(perm, 'hand'); break;
+              case 'damage': if (perm.card.isCreature) perm.damage += amount; break;
+              default: this.destroy(perm);
+            }
+          }
+        }
+        break;
+      }
+      case 'counter': {
+        if (!target || target.kind !== 'stack') break;
+        const idx = this.stack.findIndex((s) => s.id === target.id);
+        if (idx === -1) break;
+        const [hit] = this.stack.splice(idx, 1);
+        this.say(`${hit.label} is countered.`);
+        if (hit.kind === 'spell') this.toGraveyard(this.players[hit.controller], hit.card, hit.isCommander);
+        break;
+      }
+      case 'tokens': {
+        const count = Math.min(e.n === -1 ? x : e.n, 20);
+        for (let i = 0; i < count; i++) {
+          const token = this.makePerm(p, tokenCard(e.power, e.toughness, e.keywords), true);
+          p.battlefield.push(token);
+          this.creatureEntered(p, token);
+        }
+        if (count > 0) this.say(`${p.name} makes ${count} ${e.power}/${e.toughness} token${count > 1 ? 's' : ''}.`);
+        break;
+      }
+      case 'overrun':
+        for (const perm of p.battlefield) {
+          if (!perm.card.isCreature) continue;
+          perm.tempP += n(e.p);
+          perm.tempT += n(e.t);
+          if (e.trample) perm.tempKw.push('trample');
+        }
+        this.say(`${p.name}'s creatures get +${n(e.p)}/+${n(e.t)}${e.trample ? ' and trample' : ''} until end of turn.`);
+        break;
+      case 'pump': {
+        const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (!perm) break;
+        perm.tempP += n(e.p);
+        perm.tempT += n(e.t);
+        if (e.protect) perm.tempKw.push('indestructible', 'hexproof');
+        this.say(`${perm.card.name} gets +${n(e.p)}/+${n(e.t)} until end of turn.`);
+        break;
+      }
+      case 'protect': {
+        const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (!perm) break;
+        perm.tempKw.push('indestructible', 'hexproof');
+        this.say(`${perm.card.name} is protected until end of turn.`);
+        break;
+      }
+      case 'drain': {
+        const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        let total = 0;
+        for (const o of this.opponents(p)) {
+          this.loseLife(o, amount, p, 'noncombat');
+          total += amount;
+        }
+        p.life += e.gain === -1 ? total : e.gain;
+        this.say(`${p.name} drains each opponent for ${amount}.`);
+        break;
+      }
+      case 'damagePlayer': {
+        const victim = target?.kind === 'player' ? this.players[target.seat] : null;
+        if (!victim?.alive) break;
+        const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        this.loseLife(victim, amount, p, 'noncombat');
+        this.say(`${p.name} hits ${victim.name} for ${amount} (life ${victim.life}).`);
+        break;
+      }
+      case 'gainLife':
+        p.life += e.n === -1 ? Math.max(x, 1) : e.n;
+        break;
+      case 'tutor': {
+        if (!p.library.length) break;
+        const cards = [...new Set(p.library)].sort((a, b) => a.name.localeCompare(b.name));
+        const pick = yield* this.choose(p, 'tutor', 'Search your library for a card to put into your hand.', cards.map((card) => ({ label: card.name, card })), 1, 1);
+        const card = cards[pick[0] ?? 0];
+        p.library.splice(p.library.indexOf(card), 1);
+        p.hand.push(card);
+        this.rng.shuffle(p.library);
+        this.say(`${p.name} searches their library for a card.`);
+        break;
+      }
+      case 'recursion': {
+        const creatures = p.graveyard.filter((c) => c.isCreature);
+        if (!creatures.length) break;
+        const picks = yield* this.choose(p, 'recursion', `Return up to ${e.n} creature card${e.n > 1 ? 's' : ''} from your graveyard to ${e.toBattlefield ? 'the battlefield' : 'your hand'}.`, creatures.map((card) => ({ label: card.name, card })), 1, e.n);
+        for (const card of picks.map((i) => creatures[i])) {
+          p.graveyard.splice(p.graveyard.indexOf(card), 1);
+          if (e.toBattlefield) {
+            this.say(`${p.name} returns ${card.name} to the battlefield.`);
+            this.enter(p, card, p.deck.commanders.includes(card), 0, null);
+          } else {
+            this.say(`${p.name} returns ${card.name} to their hand.`);
+            p.hand.push(card);
+          }
+        }
+        break;
+      }
+      case 'counters': {
+        const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        const creatures = p.battlefield.filter((q) => q.card.isCreature);
+        if (e.all) {
+          for (const perm of creatures) perm.counters += amount;
+        } else if (src && src.card.isCreature && p.battlefield.includes(src)) {
+          src.counters += amount;
+        } else if (creatures.length) {
+          const pick = creatures.length === 1 ? [0] : yield* this.choose(p, 'counters', `Put ${amount} +1/+1 counter${amount > 1 ? 's' : ''} on which creature?`, creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+          creatures[pick[0] ?? 0].counters += amount;
+        }
+        break;
+      }
+      // Static effects (mana, anthems, cost reduction, attachments) do nothing on resolution.
+      default:
+        break;
+    }
+  }
+
+  private *resolveRemoval(p: PlayerState, e: Extract<Effect, { kind: 'removal' }>, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    if (!target) return;
+    const amount = e.amount === -1 ? x : e.amount;
+
+    if (target.kind === 'player') {
+      const victim = this.players[target.seat];
+      if (!victim.alive) return;
+      if (e.mode === 'edict') {
+        // The player sacrificing chooses what to sacrifice (rule 701.21).
+        const creatures = victim.battlefield.filter((q) => q.card.isCreature);
+        if (!creatures.length) return;
+        const pick = yield* this.choose(victim, 'sacrifice', 'Sacrifice a creature.', creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+        const gone = creatures[pick[0] ?? 0];
+        this.say(`${victim.name} sacrifices ${gone.card.name}.`);
+        this.removePerm(gone, 'graveyard');
+      } else {
+        this.loseLife(victim, amount, p, 'noncombat');
+        this.say(`${p.name} deals ${amount} damage to ${victim.name} (life ${victim.life}).`);
+      }
+      return;
+    }
+    if (target.kind !== 'perm') return;
+    const perm = this.findPerm(target.id);
+    if (!perm) return;
+    const owner = this.players[perm.seat];
+    switch (e.mode) {
+      case 'destroy':
+        this.say(`${perm.card.name} (${owner.name}) is destroyed.`);
+        this.destroy(perm);
+        break;
+      case 'exile':
+        this.say(`${perm.card.name} (${owner.name}) is exiled.`);
+        this.removePerm(perm, 'exile');
+        break;
+      case 'bounce':
+        this.say(`${perm.card.name} returns to ${owner.name}'s hand.`);
+        this.removePerm(perm, 'hand');
+        break;
+      case 'damage':
+        perm.damage += amount;
+        this.say(`${perm.card.name} (${owner.name}) takes ${amount} damage.`);
+        break;
+      case 'fight': {
+        let fighter = src && src.card.isCreature && p.battlefield.includes(src) ? src : null;
+        if (!fighter) {
+          const mine = p.battlefield.filter((q) => q.card.isCreature);
+          if (!mine.length) return;
+          const pick = mine.length === 1 ? [0] : yield* this.choose(p, 'fighter', `Which of your creatures deals damage to ${perm.card.name}?`, mine.map((q) => ({ label: `${q.card.name} (${this.power(q)}/${this.toughness(q)})`, card: q.card, permId: q.id })), 1, 1);
+          fighter = mine[pick[0] ?? 0];
+        }
+        const dealt = this.power(fighter);
+        perm.damage += dealt;
+        if (dealt > 0 && this.hasKw(fighter, 'deathtouch')) perm.deathtouched = true;
+        this.say(`${fighter.card.name} deals ${dealt} damage to ${perm.card.name} (${owner.name}).`);
+        break;
+      }
+    }
+  }
+
+  loseLife(p: PlayerState, amount: number, source: PlayerState | null, kind: LossReason) {
+    if (amount <= 0) return;
+    p.life -= amount;
+    if (source && source !== p) {
+      p.lastHitBy = source.seat;
+      p.lastHitKind = kind;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Permanents: characteristics, leaving the battlefield
+  // -------------------------------------------------------------------------
+
+  private anthemBonus(seat: number): { p: number; t: number } {
+    let p = 0;
+    let t = 0;
+    for (const perm of this.players[seat].battlefield) {
+      for (const e of perm.card.effects) {
+        if (e.kind === 'anthem') {
+          p += e.p;
+          t += e.t;
+        }
+      }
+    }
+    return { p, t };
+  }
+
+  /** Equipment and Auras attached to `perm`. */
+  attachments(perm: Perm): Perm[] {
+    if (!this.anyAttached) return NONE;
+    const out: Perm[] = [];
+    for (const q of this.players) for (const other of q.battlefield) if (other.attachedTo === perm.id) out.push(other);
+    return out;
+  }
+
+  power(perm: Perm): number {
+    let p = perm.card.power + perm.counters + perm.tempP + this.anthemBonus(perm.seat).p;
+    for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') p += e.p;
+    return Math.max(0, p);
+  }
+
+  toughness(perm: Perm): number {
+    let t = perm.card.toughness + perm.counters + perm.tempT + this.anthemBonus(perm.seat).t;
+    for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') t += e.t;
+    return t;
+  }
+
+  hasKw(perm: Perm, kw: string): boolean {
+    if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw)) return true;
+    if (!perm.card.isCreature) return false;
+    for (const eq of this.attachments(perm)) {
+      for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
+    }
+    return false;
+  }
+
+  /** Destroy a permanent. Indestructible permanents stay (rule 702.12). */
+  private destroy(perm: Perm) {
+    if (this.hasKw(perm, 'indestructible')) return;
+    this.removePerm(perm, 'graveyard');
+  }
+
+  private removePerm(perm: Perm, to: 'graveyard' | 'exile' | 'hand') {
+    const owner = this.players[perm.seat];
+    const idx = owner.battlefield.indexOf(perm);
+    if (idx === -1) return;
+    owner.battlefield.splice(idx, 1);
+
+    // Tokens cease to exist once they leave the battlefield (rule 704.5d).
+    if (!perm.token) {
+      if (to === 'graveyard') owner.graveyard.push(perm.card);
+      else if (to === 'exile') owner.exile.push(perm.card);
+      else owner.hand.push(perm.card);
+      if (perm.isCommander) this.pendingCommander.push({ seat: owner.seat, card: perm.card, to });
+    }
+
+    if (perm.card.isCreature && to === 'graveyard' && owner.alive) {
+      const own = perm.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'self');
+      if (own.length) this.trigger(owner, perm.card, null, own);
+      for (const q of owner.battlefield) {
+        const hits = q.card.effects.filter((e) => e.when === 'creatureDies' && e.scope !== 'self');
+        if (hits.length) this.trigger(owner, q.card, q.id, hits);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // State-based actions (rule 704)
+  // -------------------------------------------------------------------------
+
+  /** Check state-based actions until nothing changes, then put waiting triggers on the stack. */
+  private *checkState(): Flow<void> {
+    for (let i = 0; i < 100; i++) {
+      let changed = this.stateBasedActions();
+      // A commander that went to a graveyard or exile may go to the command zone
+      // instead (rule 903.9a); one headed for its owner's hand may too (903.9b).
+      while (this.pendingCommander.length) {
+        const c = this.pendingCommander.shift()!;
+        const owner = this.players[c.seat];
+        const zone = c.to === 'graveyard' ? owner.graveyard : c.to === 'exile' ? owner.exile : owner.hand;
+        if (!owner.alive || !zone.includes(c.card)) continue;
+        const move = yield* ask<boolean>({ kind: 'confirm', seat: c.seat, reason: 'commandZone', prompt: `Return ${c.card.name} to the command zone? (Otherwise it stays in your ${c.to}.)`, card: c.card, to: c.to });
+        if (move) {
+          zone.splice(zone.indexOf(c.card), 1);
+          owner.commandZone.push(c.card);
+          this.say(`${c.card.name} returns to ${owner.name}'s command zone.`);
+          changed = true;
+        }
+      }
+      if (this.over || !changed) break;
+    }
+    if (!this.over) yield* this.flushTriggers();
+  }
+
+  private stateBasedActions(): boolean {
+    let changed = false;
+
+    // Players who lose (704.5a–c, 903.10a). They all leave at the same time.
+    const dying: { p: PlayerState; reason: LossReason }[] = [];
+    for (const p of this.players) {
+      if (!p.alive) continue;
+      let reason: LossReason | null = null;
+      if (p.life <= 0) reason = p.lastHitKind;
+      for (const dmg of p.commanderDamage.values()) if (dmg >= COMMANDER_DAMAGE) reason = 'commander';
+      if (p.drewFromEmpty) reason = 'decked';
+      if (reason) dying.push({ p, reason });
+    }
+    if (dying.length) {
+      this.eliminate(dying);
+      changed = true;
+      if (this.over) return true;
+    }
+
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of [...q.battlefield]) {
+        if (perm.card.isCreature) {
+          // 704.5f: toughness 0 or less. 704.5g/h: lethal or deathtouch damage destroys.
+          const toughness = this.toughness(perm);
+          if (toughness <= 0) {
+            this.say(`${perm.card.name} (${q.name}) dies.`);
+            this.removePerm(perm, 'graveyard');
+            changed = true;
+          } else if ((perm.damage >= toughness || perm.deathtouched) && !this.hasKw(perm, 'indestructible')) {
+            this.say(`${perm.card.name} (${q.name}) dies.`);
+            this.removePerm(perm, 'graveyard');
+            changed = true;
+          } else {
+            perm.deathtouched = false;
+          }
+        }
+        if (perm.attachedTo !== null && !this.findPerm(perm.attachedTo)) {
+          perm.attachedTo = null;
+          // 704.5m: an Aura attached to nothing goes to the graveyard. Equipment just falls off (704.5n).
+          if (isAura(perm.card) && q.battlefield.includes(perm)) {
+            this.removePerm(perm, 'graveyard');
+            changed = true;
+          }
+        }
+      }
+
+      // 704.5j: the legend rule. Keep the first of each name.
+      const seen = new Set<string>();
+      for (const perm of [...q.battlefield]) {
+        if (!perm.card.isLegendary) continue;
+        if (seen.has(perm.card.name)) {
+          this.say(`${perm.card.name} (${q.name}) is put into the graveyard (legend rule).`);
+          this.removePerm(perm, 'graveyard');
+          changed = true;
+        } else {
+          seen.add(perm.card.name);
+        }
+      }
+    }
+    return changed;
+  }
+
+  private eliminate(dying: { p: PlayerState; reason: LossReason }[]) {
+    const aliveBefore = this.alivePlayers().length;
+    for (const { p, reason } of dying) {
+      p.alive = false;
+      // Everyone still in the game finished ahead; players who lose together share the place.
+      this.placements[p.seat] = aliveBefore - dying.length + 1;
+      const killer = reason === 'decked' ? null : p.lastHitBy;
+      this.eliminations.push({ seat: p.seat, round: this.round, reason, killer });
+      this.say(`${p.name} is eliminated (${reason}${killer !== null ? ` by ${this.players[killer].name}` : ''}).`);
+      // Everything a player owns leaves the game with them (rule 800.4a).
+      p.battlefield = [];
+      for (let i = this.stack.length - 1; i >= 0; i--) if (this.stack[i].controller === p.seat) this.stack.splice(i, 1);
+      this.pending = this.pending.filter((t) => t.controller !== p.seat);
+      for (const perm of this.allPerms()) if (perm.attacking === p.seat) perm.attacking = null;
+    }
+    if (this.alivePlayers().length <= 1) this.over = true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Combat (rules 506–511)
+  // -------------------------------------------------------------------------
+
+  /** Creatures `p` could declare as attackers (rule 508.1a). */
+  attackCandidates(p: PlayerState): Perm[] {
+    return p.battlefield.filter((perm) => perm.card.isCreature && !perm.tapped && (!perm.sick || this.hasKw(perm, 'haste')) && !this.hasKw(perm, 'defender'));
+  }
+
+  /** Could `blocker` legally block `attacker`? (rule 509.1b) */
+  canBlock(blocker: Perm, attacker: Perm): boolean {
+    if (!blocker.card.isCreature || blocker.tapped) return false;
+    if (this.hasKw(attacker, 'unblockable')) return false;
+    if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
+    return true;
+  }
+
+  /** Creatures currently blocking `attacker`. */
+  blockersOf(attacker: Perm): Perm[] {
+    const out: Perm[] = [];
+    for (const perm of this.allPerms()) if (perm.blocking === attacker.id) out.push(perm);
+    return out;
+  }
+
+  attackers(): Perm[] {
+    return this.players[this.activeSeat].battlefield.filter((perm) => perm.attacking !== null);
+  }
+
+  private *combat(p: PlayerState): Flow<void> {
+    this.step = 'beginCombat';
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    // Declare attackers (508). Each creature may attack a different opponent (rule 802.2a).
+    this.step = 'declareAttackers';
+    const candidates = this.attackCandidates(p);
+    const defenders = this.opponents(p).map((o) => o.seat);
+    if (!candidates.length || !defenders.length) return;
+    const declared = yield* ask<AttackDeclaration[] | null>({ kind: 'attackers', seat: p.seat, candidates: candidates.map((c) => c.id), defenders });
+    const attacking: Perm[] = [];
+    for (const d of Array.isArray(declared) ? declared : []) {
+      const perm = candidates.find((c) => c.id === d?.attacker);
+      if (!perm || perm.attacking !== null || !defenders.includes(d.defender)) continue;
+      perm.attacking = d.defender;
+      if (!this.hasKw(perm, 'vigilance')) perm.tapped = true;
+      attacking.push(perm);
+    }
+    // No attackers: skip straight to the end of combat (rule 508.8).
+    if (!attacking.length) return;
+    for (const seat of defenders) {
+      const group = attacking.filter((a) => a.attacking === seat);
+      if (group.length) this.say(`${p.name} attacks ${this.players[seat].name} with ${group.map((a) => `${a.card.name} ${this.power(a)}/${this.toughness(a)}`).join(', ')}.`);
+    }
+    for (const a of attacking) {
+      const own = a.card.effects.filter((e) => e.when === 'attack' && e.scope === 'self');
+      if (own.length) this.trigger(p, a.card, a.id, own);
+      for (const eq of this.attachments(a)) {
+        const hits = eq.card.effects.filter((e) => e.when === 'attack' && e.scope === 'self');
+        if (hits.length) this.trigger(p, eq.card, eq.id, hits);
+      }
+    }
+    for (const perm of p.battlefield) {
+      const once = perm.card.effects.filter((e) => e.when === 'attack' && e.scope === 'oneOrMore');
+      if (once.length) this.trigger(p, perm.card, perm.id, once);
+      const each = perm.card.effects.filter((e) => e.when === 'attack' && e.scope === 'any');
+      if (each.length) for (let i = 0; i < attacking.length; i++) this.trigger(p, perm.card, perm.id, each);
+    }
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    // Declare blockers (509), each defending player in turn order.
+    this.step = 'declareBlockers';
+    const n = this.players.length;
+    for (let i = 1; i < n; i++) {
+      const d = this.players[(p.seat + i) % n];
+      if (!d.alive) continue;
+      const incoming = this.attackers().filter((a) => a.attacking === d.seat);
+      const able = d.battlefield.filter((b) => b.card.isCreature && !b.tapped && incoming.some((a) => this.canBlock(b, a)));
+      if (!incoming.length || !able.length) continue;
+      const blocks = yield* ask<BlockDeclaration[] | null>({ kind: 'blockers', seat: d.seat, attackers: incoming.map((a) => a.id), candidates: able.map((b) => b.id) });
+      const byAttacker = new Map<Perm, Perm[]>();
+      for (const b of Array.isArray(blocks) ? blocks : []) {
+        const blocker = able.find((c) => c.id === b?.blocker);
+        const attacker = incoming.find((a) => a.id === b?.attacker);
+        if (!blocker || !attacker || blocker.blocking !== null || !this.canBlock(blocker, attacker)) continue;
+        blocker.blocking = attacker.id;
+        byAttacker.set(attacker, [...(byAttacker.get(attacker) ?? []), blocker]);
+      }
+      for (const [attacker, blockers] of byAttacker) {
+        // Menace: can't be blocked except by two or more creatures (rule 702.111b).
+        if (blockers.length < 2 && this.hasKw(attacker, 'menace')) {
+          for (const b of blockers) b.blocking = null;
+          byAttacker.delete(attacker);
+          continue;
+        }
+        attacker.blocked = true;
+      }
+      if (byAttacker.size) this.say(`${d.name} blocks: ${[...byAttacker].map(([a, bs]) => `${bs.map((b) => b.card.name).join(' + ')} blocks ${a.card.name}`).join(', ')}.`);
+    }
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    // Combat damage (510). First and double strikers deal damage in a step of their own (510.4).
+    this.step = 'combatDamage';
+    this.struckFirst.clear();
+    const fighting = [...this.allPerms()].filter((c) => c.attacking !== null || c.blocking !== null);
+    if (fighting.some((c) => this.hasKw(c, 'first strike') || this.hasKw(c, 'double strike'))) {
+      this.dealCombatDamage(p, true);
+      yield* this.priority();
+      if (this.stopped(p)) return;
+    }
+    this.dealCombatDamage(p, false);
+    yield* this.priority();
+    if (this.stopped(p)) return;
+
+    this.step = 'endCombat';
+    yield* this.priority();
+  }
+
+  private endCombat() {
+    for (const q of this.players) {
+      for (const perm of q.battlefield) {
+        perm.attacking = null;
+        perm.blocked = false;
+        perm.blocking = null;
+      }
+    }
+  }
+
+  /** Assign and deal one step of combat damage. All of it is dealt at once (rule 510.2). */
+  private dealCombatDamage(p: PlayerState, firstStrikeStep: boolean) {
+    const strikes = (c: Perm) => {
+      const first = this.hasKw(c, 'first strike');
+      const double = this.hasKw(c, 'double strike');
+      if (firstStrikeStep) return first || double;
+      return double || !this.struckFirst.has(c.id);
+    };
+    const toPerm: { from: Perm; to: Perm; amount: number }[] = [];
+    const toPlayer: { from: Perm; to: PlayerState; amount: number }[] = [];
+
+    for (const a of this.attackers()) {
+      if (!strikes(a)) continue;
+      const power = this.power(a);
+      if (power <= 0) continue;
+      const defender = this.players[a.attacking!];
+      if (!a.blocked) {
+        if (defender.alive) toPlayer.push({ from: a, to: defender, amount: power });
+        continue;
+      }
+      const blockers = this.blockersOf(a);
+      const trample = this.hasKw(a, 'trample');
+      if (!blockers.length) {
+        // Blocked, but the blockers are gone: no damage unless it has trample (rule 702.19e).
+        if (trample && defender.alive) toPlayer.push({ from: a, to: defender, amount: power });
+        continue;
+      }
+      // Lethal damage to each blocker in turn; trample sends the rest to the player (702.19b).
+      const deathtouch = this.hasKw(a, 'deathtouch');
+      let left = power;
+      for (const b of blockers) {
+        const lethal = deathtouch ? 1 : Math.max(1, this.toughness(b) - b.damage);
+        const dealt = Math.min(left, lethal);
+        if (dealt > 0) toPerm.push({ from: a, to: b, amount: dealt });
+        left -= dealt;
+      }
+      if (left > 0) {
+        if (trample && defender.alive) toPlayer.push({ from: a, to: defender, amount: left });
+        else toPerm.push({ from: a, to: blockers[0], amount: left });
+      }
+    }
+    for (const b of this.allPerms()) {
+      if (b.blocking === null || !strikes(b)) continue;
+      const a = this.findPerm(b.blocking);
+      const power = this.power(b);
+      if (a && a.attacking !== null && power > 0) toPerm.push({ from: b, to: a, amount: power });
+    }
+    if (firstStrikeStep) for (const c of this.allPerms()) if ((c.attacking !== null || c.blocking !== null) && strikes(c)) this.struckFirst.add(c.id);
+
+    const hitPlayer = new Set<Perm>();
+    const before = new Map<PlayerState, number>();
+    for (const d of toPerm) {
+      d.to.damage += d.amount;
+      if (this.hasKw(d.from, 'deathtouch')) d.to.deathtouched = true;
+      if (this.hasKw(d.from, 'lifelink')) this.players[d.from.seat].life += d.amount;
+    }
+    for (const d of toPlayer) {
+      if (!before.has(d.to)) before.set(d.to, d.to.life);
+      this.loseLife(d.to, d.amount, p, 'combat');
+      if (this.hasKw(d.from, 'lifelink')) p.life += d.amount;
+      if (d.from.isCommander) {
+        const key = `${d.from.seat}:${d.from.card.name}`;
+        d.to.commanderDamage.set(key, (d.to.commanderDamage.get(key) ?? 0) + d.amount);
+      }
+      hitPlayer.add(d.from);
+    }
+    for (const [d, life] of before) this.say(`${d.name} takes ${life - d.life} (life ${d.life}).`);
+
+    // "Deals combat damage to a player" triggers.
+    for (const a of hitPlayer) {
+      const own = a.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
+      if (own.length) this.trigger(p, a.card, a.id, own);
+      for (const eq of this.attachments(a)) {
+        const hits = eq.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
+        if (hits.length) this.trigger(p, eq.card, eq.id, hits);
+      }
+    }
+    if (hitPlayer.size) {
+      for (const perm of p.battlefield) {
+        const once = perm.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'oneOrMore');
+        if (once.length) this.trigger(p, perm.card, perm.id, once);
+        const each = perm.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'any');
+        if (each.length) for (let i = 0; i < hitPlayer.size; i++) this.trigger(p, perm.card, perm.id, each);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+export function isInstantSpeed(card: SimCard): boolean {
+  return card.isInstant || card.keywords.includes('flash');
+}
+
+export function isAura(card: SimCard): boolean {
+  return card.effects.some((e) => e.kind === 'equip' && e.aura);
+}
+
+export function sameTarget(a: Target, b: Target): boolean {
+  if (a.kind === 'player') return b.kind === 'player' && a.seat === b.seat;
+  return a.kind === b.kind && a.id === (b as { id: number }).id;
+}
+
+export function matchesFilter(card: SimCard, filter: CastFilter): boolean {
+  switch (filter) {
+    case 'any': return true;
+    case 'noncreature': return !card.isCreature;
+    case 'creature': return card.isCreature;
+    case 'instantSorcery': return card.isInstant || card.isSorcery;
+    case 'artifact': return card.isArtifact;
+    case 'enchantment': return card.isEnchantment;
+  }
+}
+
+export function counterMatches(target: 'any' | 'noncreature' | 'creature', card: SimCard): boolean {
+  if (target === 'any') return true;
+  return target === 'creature' ? card.isCreature : !card.isCreature;
+}
+
+export function removalMatches(target: string, card: SimCard): boolean {
+  switch (target) {
+    case 'creature': return card.isCreature;
+    case 'permanent': return true;
+    case 'noncreature': return !card.isCreature;
+    case 'artifactEnchantment': return card.isArtifact || card.isEnchantment;
+    case 'planeswalker': return card.isPlaneswalker;
+    default: return false;
+  }
+}
+
+function targetPrompt(card: SimCard, e: Effect): string {
+  switch (e.kind) {
+    case 'removal':
+      if (e.mode === 'edict') return `${card.name}: which opponent sacrifices a creature?`;
+      if (e.mode === 'damage') return `${card.name}: deal damage to which target?`;
+      if (e.mode === 'fight') return `${card.name}: which creature takes the damage?`;
+      return `${card.name}: ${e.mode} which ${e.target === 'artifactEnchantment' ? 'artifact or enchantment' : e.target}?`;
+    case 'counter': return `${card.name}: counter which spell?`;
+    case 'pump': return `${card.name}: which creature gets the bonus?`;
+    case 'protect': return `${card.name}: protect which permanent?`;
+    case 'damagePlayer': return `${card.name}: which opponent?`;
+    default: return `${card.name}: choose a target.`;
+  }
+}
+
+const tokenCache = new Map<string, SimCard>();
+
+function tokenCard(power: number, toughness: number, keywords: string[]): SimCard {
+  const key = `${power}/${toughness}/${keywords.join(',')}`;
+  let card = tokenCache.get(key);
+  if (!card) {
+    card = {
+      name: `${power}/${toughness} token`,
+      cost: { generic: 0, pips: [], x: 0, life: 0 },
+      cmc: 0,
+      typeLine: 'Token Creature',
+      isLand: false, isCreature: true, isArtifact: false, isEnchantment: false, isPlaneswalker: false,
+      isInstant: false, isSorcery: false, isLegendary: false, isBasic: false,
+      power, toughness, keywords, effects: [],
+      value: power + toughness * 0.5,
+      modeled: true,
+      notes: [],
+    };
+    tokenCache.set(key, card);
+  }
+  return card;
+}

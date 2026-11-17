@@ -64,14 +64,16 @@ export type EffectBody =
   | { kind: 'treasure'; n: number }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number }
+  /** anyTarget: damage that can also be aimed at a player ("any target"). */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland'; mode: RemovalMode; amount: number; oneSided: boolean }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   | { kind: 'anthem'; p: number; t: number }
   | { kind: 'overrun'; p: number; t: number; trample: boolean }
   | { kind: 'pump'; p: number; t: number; protect: boolean }
-  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean }
+  /** cost: the equip cost of an Equipment, when the text gives one. */
+  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost }
   | { kind: 'protect' }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   | { kind: 'drain'; n: number; gain: number }
