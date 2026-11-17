@@ -53,11 +53,15 @@ The engine never decides anything. It is a generator that yields a **decision** 
 
 **The bot** (`bot.ts`) answers every decision from the public board and its own hand: mulligans, land choice, what to cast and when to hold mana, removal and counterspell targets, combat tricks, attacks split across opponents, blocks and chump blocks.
 
-**What a card does** comes from the classifier (`src/engine/classify.ts`), which matches oracle text against patterns for common Commander effects: ramp, card draw, removal, wipes, counterspells, tokens, anthems, pump spells, Auras and Equipment, drain, tutors, recursion and triggers on casting, attacking, dealing damage, entering and dying. Hover a card at the table to see how it plays. Known gaps:
+**What a card does** comes from the classifier (`src/engine/classify.ts`), which matches oracle text against patterns for common Commander effects: ramp, rituals and Treasure, card draw, removal, wipes, counterspells, tokens, anthems, pump spells, Auras and Equipment, drain, tutors, reanimation, cloning, taking control, extra turns, sacrifice outlets, and rule-changing permanents (token and counter doublers, attack taxes, Rule of Law, Rest in Peace, Panharmonicon, extra land drops). Triggers are read for casting, attacking, dealing damage, entering, dying, sacrificing, landfall, your upkeep and end step, and for opponents casting spells or drawing cards. Hover a card at the table to see how it plays.
 
-- Text the classifier doesn't recognise does nothing; those cards are marked **no effect**.
-- Mana is paid automatically, and mana doesn't float between spells.
-- Planeswalkers can't be attacked and use only their first plus ability; no control-changing, copying, alternative costs, replacement effects or -1/-1 counters.
+On a sample of 167 widely played Commander cards (`tests/staples.ts`) all but four are read. Decks are classified when they are imported, so re-import a deck to pick up improvements to the classifier. Known gaps:
+
+- Text the classifier doesn't recognise does nothing; a card with no recognised text is marked **no effect**. A card can also be read in part, for example a creature that keeps its body and one of its two abilities.
+- Mana is paid automatically, and mana doesn't float between spells. Ritual mana is kept as Treasures.
+- Planeswalkers can't be attacked and use only their first plus ability.
+- Tribal wording ("whenever a Dragon you control attacks") counts every creature you control. A stolen creature stays stolen even if the Aura that took it leaves. An attack tax is paid automatically when the attacker can afford it.
+- No alternative costs, cast-from-exile or copy-a-spell effects, redirecting targets, untap restrictions, experience counters or -1/-1 counters.
 - "If" conditions it can't read are treated as true about half the time; ward costs {2}.
 
 That makes the built-in simulator a quick estimate. Forge remains the reference for final numbers.

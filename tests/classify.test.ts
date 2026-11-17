@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parseManaCost } from '../src/engine/classify';
 import type { EffectKind, SimCard } from '../src/engine/types';
 import { card } from './helpers';
+import { staples } from './staples';
 
 const kinds = (c: SimCard): EffectKind[] => c.effects.map((e) => e.kind);
 
@@ -85,7 +86,64 @@ describe('classifyCard', () => {
   });
 
   it('flags cards it cannot understand', () => {
-    const propaganda = card({ name: 'Propaganda', manaCost: '{2}{U}', cmc: 3, types: ['Enchantment'], text: "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you." });
-    expect(propaganda.modeled).toBe(false);
+    const orb = card({ name: 'Winter Orb', manaCost: '{2}', cmc: 2, types: ['Artifact'], text: "As long as this artifact is untapped, players can't untap more than one land during their untap steps." });
+    expect(orb.modeled).toBe(false);
+  });
+});
+
+describe('coverage of widely played Commander cards', () => {
+  const cards = staples();
+  const byName = (name: string) => cards.find((c) => c.name === name)!;
+  const kinds = (name: string) => byName(name).effects.map((e) => e.kind);
+
+  it('understands nearly all of the sample', () => {
+    const blank = cards.filter((c) => !c.modeled).map((c) => c.name);
+    expect(cards.length).toBeGreaterThan(160);
+    expect(blank.sort()).toEqual(['Deflecting Swat', "Grafdigger's Cage", 'Isochron Scepter', 'Winter Orb']);
+  });
+
+  it('reads cards that used to slip past on wording', () => {
+    expect(byName('Craterhoof Behemoth').effects).toContainEqual(expect.objectContaining({ kind: 'overrun', scale: 'creatures', trample: true, when: 'resolve' }));
+    expect(byName('Blood Artist').effects).toContainEqual(expect.objectContaining({ kind: 'damagePlayer', when: 'creatureDies', scope: 'all' }));
+    expect(byName('Zulaport Cutthroat').effects).toContainEqual(expect.objectContaining({ kind: 'drain', when: 'creatureDies', scope: 'any' }));
+    expect(byName('Skullclamp').effects).toContainEqual(expect.objectContaining({ kind: 'draw', n: 2, when: 'creatureDies', scope: 'attached' }));
+    expect(byName('Skullclamp').effects).toContainEqual(expect.objectContaining({ kind: 'equip', p: 1, t: -1 }));
+    expect(kinds('Reanimate')).toEqual(['recursion']);
+    expect(kinds('Animate Dead')).toEqual(['recursion']);
+    expect(byName('Sun Titan').effects.filter((e) => e.kind === 'recursion').map((e) => e.when).sort()).toEqual(['attack', 'resolve']);
+    expect(byName('Swan Song').effects).toContainEqual(expect.objectContaining({ kind: 'counter', target: 'noncreature' }));
+    expect(byName('Dark Ritual').effects).toContainEqual(expect.objectContaining({ kind: 'treasure', n: 3 }));
+    expect(byName('Exploration').effects).toContainEqual(expect.objectContaining({ kind: 'extraLand', when: 'static' }));
+    expect(kinds('Dockside Extortionist')).toEqual(['treasure']);
+    expect(byName('Overwhelming Stampede').effects).toContainEqual(expect.objectContaining({ kind: 'overrun', scale: 'power' }));
+  });
+
+  it('no longer misreads Finale of Devastation or Approach of the Second Sun', () => {
+    expect(byName('Finale of Devastation').effects).toEqual([expect.objectContaining({ kind: 'tutor', creatureToBattlefield: true, xLimit: true })]);
+    expect(kinds('Approach of the Second Sun')).toEqual(['approach']);
+  });
+
+  it('reads commander abilities', () => {
+    expect(byName('Korvold, Fae-Cursed King').effects.filter((e) => e.when === 'sacrifice').map((e) => e.kind).sort()).toEqual(['counters', 'draw']);
+    expect(byName('Kaalia of the Vast').effects).toContainEqual(expect.objectContaining({ kind: 'cheat', when: 'attack' }));
+    expect(byName("Yuriko, the Tiger's Shadow").effects.filter((e) => e.when === 'combatDamage').map((e) => e.kind).sort()).toEqual(['drain', 'draw']);
+    expect(byName('Meren of Clan Nel Toth').effects).toContainEqual(expect.objectContaining({ kind: 'recursion', when: 'upkeep' }));
+    expect(byName('Miirym, Sentinel Wyrm').effects).toContainEqual(expect.objectContaining({ kind: 'tokens', when: 'creatureEnters', nontoken: true }));
+    expect(byName("Atraxa, Praetors' Voice").effects).toContainEqual(expect.objectContaining({ kind: 'counters', proliferate: true }));
+  });
+
+  it('reads rule-changing permanents and opponent triggers', () => {
+    expect(kinds('Doubling Season')).toEqual(['doubler', 'doubler']);
+    expect(byName('Propaganda').effects).toContainEqual(expect.objectContaining({ kind: 'attackTax', amount: 2 }));
+    expect(kinds('Rule of Law')).toEqual(['spellLimit']);
+    expect(kinds('Panharmonicon')).toEqual(['etbDoubler']);
+    expect(kinds('Rest in Peace').sort()).toEqual(['exileGraveyards', 'graveyardHate']);
+    expect(byName('Rhystic Study').effects).toContainEqual(expect.objectContaining({ kind: 'draw', when: 'opponentCast', chance: 0.6 }));
+    expect(byName('Smothering Tithe').effects).toContainEqual(expect.objectContaining({ kind: 'treasure', when: 'opponentDraw' }));
+    expect(byName('Consecrated Sphinx').effects).toContainEqual(expect.objectContaining({ kind: 'draw', n: 2, when: 'opponentDraw' }));
+    expect(kinds('Clone')).toEqual(['clone']);
+    expect(byName('Control Magic').effects).toContainEqual(expect.objectContaining({ kind: 'equip', aura: true, steal: true }));
+    expect(kinds('Bribery')).toEqual(['steal']);
+    expect(kinds('Time Warp')).toEqual(['extraTurn']);
   });
 });

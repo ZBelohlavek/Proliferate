@@ -31,11 +31,15 @@ export type Trigger =
   | 'creatureEnters' // a creature enters under your control
   | 'creatureDies' // a creature you control dies
   | 'landfall' // a land enters under your control
+  | 'opponentCast' // an opponent casts a spell (see castFilter)
+  | 'opponentDraw' // an opponent draws a card
+  | 'sacrifice' // you sacrifice a permanent
   | 'activated' // activated ability, paid for with spare mana
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
-export type TriggerScope = 'self' | 'any' | 'oneOrMore';
+/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. */
+export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all';
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment';
 
@@ -51,10 +55,12 @@ export type Effect = EffectBody & {
   minCmc?: number;
   /** Conditional ("if ...") triggers: probability the condition holds. */
   chance?: number;
+  /** Creature-enters triggers that only watch nontoken creatures. */
+  nontoken?: boolean;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
-  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean };
+  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean };
 };
 
 export type EffectBody =
@@ -70,18 +76,45 @@ export type EffectBody =
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   | { kind: 'anthem'; p: number; t: number }
-  | { kind: 'overrun'; p: number; t: number; trample: boolean }
+  /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
+  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power' }
   | { kind: 'pump'; p: number; t: number; protect: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
-  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost }
-  | { kind: 'protect' }
+  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
+  /** all: every permanent you control. player: you can't lose life either, until your next turn. */
+  | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   | { kind: 'drain'; n: number; gain: number }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
-  | { kind: 'tutor' }
+  /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
+  | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
   | { kind: 'recursion'; n: number; toBattlefield: boolean }
-  | { kind: 'counters'; n: number; all: boolean };
+  /** proliferate: only creatures that already have a counter. */
+  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
+  /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
+  | { kind: 'doubler'; tokens: boolean; counters: boolean }
+  /** Enters-the-battlefield abilities of your permanents trigger twice. */
+  | { kind: 'etbDoubler' }
+  /** Creatures can't attack you unless their controller pays this much for each. */
+  | { kind: 'attackTax'; amount: number }
+  /** Each player can't cast more than one spell each turn. */
+  | { kind: 'spellLimit' }
+  /** Opponents can't cast their commanders from the command zone. */
+  | { kind: 'commandLock' }
+  /** Cards that would go to a graveyard are exiled instead. */
+  | { kind: 'graveyardHate' }
+  /** Exile graveyards: every opponent's, or everyone's. */
+  | { kind: 'exileGraveyards'; all: boolean }
+  /** Enters as a copy of a creature on the battlefield. */
+  | { kind: 'clone' }
+  /** Take a creature: one on the battlefield, or the best in an opponent's library. */
+  | { kind: 'steal'; from: 'battlefield' | 'library' }
+  /** Put a creature card from your hand onto the battlefield. */
+  | { kind: 'cheat' }
+  | { kind: 'extraTurn' }
+  /** Approach of the Second Sun: gain 7 the first time, win the second. */
+  | { kind: 'approach' };
 
 export type EffectKind = EffectBody['kind'];
 

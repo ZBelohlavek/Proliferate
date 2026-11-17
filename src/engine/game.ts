@@ -908,14 +908,17 @@ export class Game {
         if (count) this.say(`${this.name(p)} makes ${count} ${e.power}/${e.toughness} token${count > 1 ? 's' : ''}.`);
         break;
       }
-      case 'overrun':
+      case 'overrun': {
+        // "+X/+X": X is roughly the size of the team.
+        const team = p.battlefield.filter((q) => q.card.isCreature).length;
         for (const perm of p.battlefield) {
           if (!perm.card.isCreature) continue;
-          perm.tempP += e.p;
-          perm.tempT += e.t;
+          perm.tempP += e.p === -1 ? team : e.p;
+          perm.tempT += e.t === -1 ? team : e.t;
           if (e.trample) perm.tempKw.push('trample');
         }
         break;
+      }
       case 'drain': {
         const amount = n(e.n);
         let total = 0;

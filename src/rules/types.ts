@@ -41,8 +41,12 @@ export const STEP_NAMES: Record<Step, string> = {
 export interface Perm {
   id: number;
   card: SimCard;
-  /** Seat of the controller (the engine doesn't model control changing, so also the owner). */
+  /** Seat of the controller. */
   seat: number;
+  /** Seat of the owner, when someone else controls it (Control Magic, Bribery). */
+  owner?: number;
+  /** The card this permanent really is, while it is a copy of another (Clone). */
+  printed?: SimCard;
   tapped: boolean;
   /** Summoning sick: came under its controller's control this turn (rule 302.6). */
   sick: boolean;
@@ -94,6 +98,10 @@ export interface PlayerState {
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
+  /** Spells cast this turn (Rule of Law). */
+  spellsThisTurn: number;
+  /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
+  shielded: boolean;
   lastHitBy: number | null;
   lastHitKind: LossReason;
   commanderRound: number | null;
@@ -151,7 +159,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

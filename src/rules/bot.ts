@@ -182,6 +182,11 @@ export class Bot implements Agent {
       const counter = casts.find((a) => a.card.effects.some((e) => e.kind === 'counter' && counterMatches(e.target, top.card)));
       if (counter && this.wantsToCounter(g, p, top)) return counter;
     }
+    // A board wipe that would cost us a real board: protect all of it if we can.
+    if (top.controller !== p.seat && top.effects.some((e) => e.kind === 'wipe') && boardThreat(g, p, true) > 6) {
+      const shield = casts.find((a) => isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' && f.all));
+      if (shield) return shield;
+    }
     // Is one of our better permanents about to be removed?
     for (let i = 0; i < top.effects.length; i++) {
       const e = top.effects[i];
@@ -317,7 +322,12 @@ export class Bot implements Agent {
     }
     if (spell && card.effects.some((e) => e.kind === 'damagePlayer' && e.when === 'resolve') && !removal) score = Math.max(score, 30);
     if (kinds.has('recursion') && !p.graveyard.some((c) => c.isCreature) && !card.isCreature) return null;
+    const stealAura = card.effects.some((e) => e.kind === 'equip' && e.steal);
+    if (stealAura) return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && g.canTarget(p, q) && threat(g, q) >= 4)) ? 75 : null;
     if (isAura(card) && !p.battlefield.some((q) => q.card.isCreature)) return null;
+    if (kinds.has('cheat') && spell && !p.hand.some((c) => c.isCreature)) return null;
+    if (kinds.has('exileGraveyards') && spell && kinds.size === 1) return g.opponents(p).some((o) => o.graveyard.length >= 6) ? 15 : null;
+    if (kinds.has('extraTurn') || kinds.has('approach') || kinds.has('steal') || kinds.has('cheat')) score = Math.max(score, 55 + card.value);
     if (spell && kinds.has('counters') && !p.battlefield.some((q) => q.card.isCreature)) return null;
 
     if (!spell) score = Math.max(score, 50 + card.value);
@@ -341,6 +351,14 @@ export class Bot implements Agent {
       const perm = g.findPerm(a.permId);
       if (!perm || (!a.effect.activation?.tap && perm.activations >= 3)) return false;
       const e = a.effect;
+      // Paying life: only while comfortably healthy.
+      if ((e.activation?.cost.life ?? 0) > 0 && p.life < 20) return false;
+      if (e.activation?.sacCreature) {
+        // Sacrifice outlets: only feed them tokens and small creatures, and only for something worth having.
+        if (e.kind === 'treasure') return false;
+        const fodder = p.battlefield.filter((q) => q.card.isCreature && q !== perm && !q.isCommander && (q.token || q.card.value < 2.5));
+        if (!fodder.length || perm.activations >= 2) return false;
+      }
       switch (e.kind) {
         case 'draw': return p.library.length > 8;
         case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': return true;
@@ -349,6 +367,8 @@ export class Bot implements Agent {
           return !!t && t.score >= 3 + g.round * 0.2;
         }
         case 'recursion': return p.graveyard.some((c) => c.isCreature);
+        case 'exileGraveyards': return g.opponents(p).some((o) => o.graveyard.length >= 8);
+        case 'cheat': return p.hand.some((c) => c.isCreature);
         default: return false;
       }
     });
@@ -405,6 +425,10 @@ export class Bot implements Agent {
     const bestOf = (list: Perm[], score: (q: Perm) => number) => (list.length ? list.reduce((a, b) => (score(b) > score(a) ? b : a)) : null);
 
     // Aura spells and Equipment: our best creature.
+    if (e === null && d.card.effects.some((f) => f.kind === 'equip' && f.steal)) {
+      const theirs = perms.filter((q) => q.seat !== p.seat);
+      return asTarget(bestOf(theirs.length ? theirs : perms, (q) => threat(g, q))) ?? d.candidates[0];
+    }
     if (e === null || e.kind === 'equip') {
       const pool = mine.length ? mine : perms;
       return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0))) ?? d.candidates[0];
@@ -427,6 +451,13 @@ export class Bot implements Agent {
         return asTarget(this.trickTarget(g, p, d.card)) ?? asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'protect':
         return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'steal': {
+        if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q))) ?? d.candidates[0];
+        // The library with the best creature in it.
+        const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
+        const best = (seat: number) => Math.max(0, ...g.players[seat].library.filter((c) => c.isCreature).map((c) => c.value));
+        return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (best(b) > best(a) ? b : a)) } : d.candidates[0];
+      }
       case 'damagePlayer': {
         const amount = e.n === -1 ? 3 : e.n;
         const seat = this.playerToBurn(g, p, d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : [])), amount);
@@ -717,6 +748,17 @@ export class Bot implements Agent {
       case 'counters':
       case 'fighter':
         return top((i) => (perm(i) ? g.power(perm(i)!) : 0), 1);
+      case 'clone':
+        // The scariest creature, but not a legend we already control (the copy would die to the legend rule).
+        return top((i) => {
+          const q = perm(i);
+          if (!q) return 0;
+          return threat(g, q) - (q.card.isLegendary && q.seat === p.seat ? 100 : 0);
+        }, 1);
+      case 'cheat':
+      case 'take':
+        return top((i) => card(i).value + card(i).cmc, 1);
     }
+    return top(() => 0, d.min);
   }
 }

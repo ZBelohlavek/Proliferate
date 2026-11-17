@@ -5,6 +5,7 @@ import { playGame, Session } from '../src/rules/session';
 import type { Action, Answer, Decision, Perm } from '../src/rules/types';
 import { addResult, emptyStats } from '../src/sim/stats';
 import { creature, forest, spell, stompyDeck, toolboxDeck } from './helpers';
+import { stapleDecks } from './staples';
 
 // ---------------------------------------------------------------------------
 // A tiny harness: every seat passes and declines everything unless a handler
@@ -522,6 +523,190 @@ describe('rules engine: Commander rules and state-based actions', () => {
     // The next turn belongs to seat 2, skipping the eliminated player.
     expect(t.game.activeSeat).toBe(c.seat);
     expect(a.alive && c.alive).toBe(true);
+  });
+});
+
+describe('rules engine: abilities added for wider card coverage', () => {
+  const cast = (name: string, pick?: (d: Extract<Decision, { kind: 'target' }>) => Answer): Handler => {
+    const once = castOnce(name);
+    return (g, d) => (d.kind === 'target' && pick ? pick(d) : once(g, d));
+  };
+
+  it('token doublers double the tokens you make', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 2);
+    t.game.put(0, spell('Parallel Lives', '{3}{G}', 4, 'Enchantment', 'If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.'));
+    a.hand.push(spell('Dragon Fodder', '{1}{G}', 2, 'Sorcery', 'Create two 1/1 red Goblin creature tokens.'));
+    t.handlers[0] = castOnce('Dragon Fodder');
+    t.finishTurn();
+    expect(a.battlefield.filter((q) => q.token)).toHaveLength(4);
+  });
+
+  it('an attack tax must be paid for each attacker', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    t.game.put(1, spell('Propaganda', '{2}{G}', 3, 'Enchantment', "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you."));
+    t.game.put(0, bears());
+    t.game.put(0, bears());
+    t.lands(0, 2);
+    t.handlers[0] = attackAll(1);
+    t.finishTurn();
+    // Two lands pay for one of the two attackers.
+    expect(b.life).toBe(38);
+  });
+
+  it('Control Magic takes a creature, and it goes to its owner\'s graveyard when it dies', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 4);
+    t.lands(1, 2);
+    const victim = t.game.put(1, bears());
+    a.hand.push(spell('Control Magic', '{2}{G}{G}', 4, 'Enchantment', 'Enchant creature\nYou control enchanted creature.', { subTypes: ['Aura'] }));
+    t.handlers[0] = cast('Control Magic', () => ({ kind: 'perm', id: victim.id }));
+    t.until((g) => a.battlefield.includes(victim) && g.stack.length === 0);
+    expect(b.battlefield).not.toContain(victim);
+    b.hand.push(spell('Murder', '{1}{G}', 2, 'Instant', 'Destroy target creature.'));
+    t.handlers[1] = cast('Murder', () => ({ kind: 'perm', id: victim.id }));
+    t.finishTurn();
+    expect(b.graveyard.map((c) => c.name)).toContain('Grizzly Bears');
+    expect(a.graveyard.map((c) => c.name)).toEqual(['Control Magic']);
+  });
+
+  it('Clone enters as a copy of a creature', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 4);
+    t.game.put(1, vanilla('Air Elemental', 4, 4, ['Flying']));
+    a.hand.push(creature('Clone', '{3}{G}', 4, 0, 0, { text: 'You may have Clone enter as a copy of any creature on the battlefield.' }));
+    t.handlers[0] = castOnce('Clone');
+    t.finishTurn();
+    const copy = a.battlefield.find((q) => q.card.isCreature)!;
+    expect(copy.card.name).toBe('Air Elemental');
+    expect(t.game.power(copy)).toBe(4);
+    expect(t.game.hasKw(copy, 'flying')).toBe(true);
+  });
+
+  it('an extra-turn spell gives its caster the next turn', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 5);
+    a.hand.push(spell('Time Warp', '{3}{G}{G}', 5, 'Sorcery', 'Target player takes an extra turn after this one.'));
+    t.handlers[0] = castOnce('Time Warp');
+    const turn = t.game.turnNumber;
+    t.finishTurn();
+    expect(t.game.turnNumber).toBe(turn + 1);
+    expect(t.game.activeSeat).toBe(0);
+  });
+
+  it('"whenever an opponent casts a spell" triggers for the other players only', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.log!.length = 0;
+    t.lands(0, 2);
+    t.game.put(1, spell('Study', '{2}{G}', 3, 'Enchantment', 'Whenever an opponent casts a spell, draw a card.'));
+    a.hand.push(bears());
+    t.handlers[0] = castOnce('Grizzly Bears');
+    t.finishTurn();
+    const draws = t.game.log!.filter((line) => / draws 1 card\.$/.test(line));
+    expect(draws).toEqual([`${b.name} draws 1 card.`]);
+  });
+
+  it('a sacrifice outlet sacrifices a creature as a cost, and death triggers see it', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.put(0, spell('Goblin Bombardment', '{1}{G}', 2, 'Enchantment', 'Sacrifice a creature: Goblin Bombardment deals 1 damage to any target.'));
+    t.game.put(0, creature('Blood Artist', '{1}{G}', 2, 0, 1, { text: 'Whenever Blood Artist or another creature dies, target player loses 1 life and you gain 1 life.' }));
+    const fodder = t.game.put(0, bears());
+    let used = false;
+    t.handlers[0] = (_g, d) => {
+      if (d.kind === 'priority' && !used) {
+        const i = d.actions.findIndex((x) => x.type === 'activate');
+        if (i !== -1) {
+          used = true;
+          return { action: i };
+        }
+      }
+      if (d.kind === 'target') return { kind: 'player', seat: 1 };
+      if (d.kind === 'choose' && d.reason === 'sacrifice') return [d.options.findIndex((o) => o.permId === fodder.id)];
+      return undefined;
+    };
+    t.finishTurn();
+    expect(a.graveyard.map((c) => c.name)).toContain('Grizzly Bears');
+    // 1 from the Bombardment, 1 from Blood Artist.
+    expect(b.life).toBe(38);
+    expect(a.life).toBe(41);
+  });
+
+  it('Craterhoof counts your creatures when its ability resolves', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 8);
+    t.game.put(0, bears());
+    a.hand.push(creature('Craterhoof Behemoth', '{5}{G}{G}{G}', 8, 5, 5, { keywords: ['Haste'], text: 'Haste\nWhen Craterhoof Behemoth enters, creatures you control gain trample and get +X/+X until end of turn, where X is the number of creatures you control.' }));
+    t.handlers[0] = castOnce('Craterhoof Behemoth');
+    t.finishTurn();
+    // The bear and the Behemoth itself: +2/+2.
+    expect(t.game.log!.join('\n')).toMatch(/creatures get \+2\/\+2 and trample until end of turn/);
+  });
+
+  it('Rule of Law stops a second spell in the same turn', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 4);
+    t.game.put(1, spell('Rule of Law', '{2}{G}', 3, 'Enchantment', "Each player can't cast more than one spell each turn."));
+    a.hand.push(bears(), creature('Runeclaw Bear', '{1}{G}', 2, 2, 2));
+    const castOn: number[] = [];
+    t.handlers[0] = (g, d) => {
+      if (d.kind !== 'priority') return undefined;
+      const i = find(d.actions, 'cast');
+      if (i === -1) return undefined;
+      castOn.push(g.turnNumber);
+      return { action: i };
+    };
+    t.until(() => a.battlefield.filter((q) => q.card.isCreature).length === 2);
+    // Both were affordable at once, but the second had to wait for a later turn.
+    expect(castOn).toHaveLength(2);
+    expect(castOn[1]).toBeGreaterThan(castOn[0]);
+  });
+
+  it('Approach of the Second Sun wins the second time it resolves', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 14);
+    const approach = () => spell('Approach of the Second Sun', '{6}{G}', 7, 'Sorcery', "If this spell was cast from your hand and you've cast another spell named Approach of the Second Sun this game, you win the game. Otherwise, put Approach of the Second Sun into its owner's library seventh from the top and you gain 7 life.");
+    a.hand.push(approach(), approach());
+    t.handlers[0] = (_g, d) => {
+      if (d.kind !== 'priority') return undefined;
+      const i = find(d.actions, 'cast', 'Approach of the Second Sun');
+      return i === -1 ? undefined : { action: i };
+    };
+    t.until((g) => g.over);
+    expect(t.game.winner).toBe(0);
+    expect(b.alive).toBe(false);
+  });
+
+  it('plays whole games with decks of real staples and never loses a card', () => {
+    const decks = stapleDecks();
+    const total = decks.reduce((n, d) => n + d.commanders.length + d.cards.reduce((m, c) => m + c.count, 0), 0);
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
+      const game = new Game(decks, seed);
+      const bots = playersOf(game, seed);
+      const flow = game.run();
+      let next = flow.next();
+      let checks = 0;
+      while (!next.done) {
+        if (next.value.kind === 'priority' && game.stack.length === 0 && game.players.every((p) => p.alive)) {
+          let count = 0;
+          for (const p of game.players) count += p.library.length + p.hand.length + p.graveyard.length + p.exile.length + p.commandZone.length + p.battlefield.filter((q) => !q.token).length;
+          expect(count).toBe(total);
+          checks++;
+        }
+        next = flow.next(bots[next.value.seat].decide(game, next.value));
+      }
+      expect(checks).toBeGreaterThan(20);
+      expect(game.over).toBe(true);
+    }
   });
 });
 
