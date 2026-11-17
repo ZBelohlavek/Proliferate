@@ -143,6 +143,8 @@ export interface StackItem {
   attachTo: Target | null;
   /** Short description for the table and the log. */
   label: string;
+  /** Cast with flashback: exiled when it leaves the stack. */
+  flashback?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +157,9 @@ export type Action =
   /** Play a land from hand. `back` plays the land side of a modal double-faced card. */
   | { type: 'land'; card: SimCard; back: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command'; maxX: number }
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard'; maxX: number }
+  /** Cycling: pay the cost and discard the card to draw one. */
+  | { type: 'cycle'; card: SimCard }
   /** Activate an ability of a permanent (`effect` is one of its card's effects). */
   | { type: 'activate'; permId: number; effect: Effect };
 

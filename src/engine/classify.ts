@@ -756,6 +756,17 @@ export function classifyCard(raw: RawCard): SimCard {
     card.freeWithCommander = true;
     card.notes.push('Free while you control a commander');
   }
+  const cycling = text.match(/^((?:basic )?[a-z]*)cycling ((?:\{[^}]+\})+)/m);
+  if (cycling) {
+    card.cycling = { cost: parseManaCost(cycling[2]) };
+    if (cycling[1]) card.cycling.land = true;
+    card.notes.push(cycling[1] ? `${cycling[1][0].toUpperCase()}${cycling[1].slice(1)}cycling ${cycling[2].toUpperCase()}: discard to search for a land` : `Cycling ${cycling[2].toUpperCase()}: discard to draw a card`);
+  }
+  const flashback = !isPermanent && text.match(/^flashback ((?:\{[^}]+\})+)/m);
+  if (flashback) {
+    card.flashback = parseManaCost(flashback[1]);
+    card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
+  }
   const extra = text.match(/^as an additional cost to cast ~, (sacrifice (?:a|an) (creature|artifact or creature|artifact)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/m);
   if (extra) {
     if (/or discard/.test(extra[1])) card.extraCost = { sacrifice: 'artifact', discard: 1, either: true };
@@ -821,7 +832,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
-  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate /.test(line)) return true;
+  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (/^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;

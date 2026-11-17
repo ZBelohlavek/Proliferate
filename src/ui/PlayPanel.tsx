@@ -183,7 +183,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const choose = (indexes: number[]) => {
     if (!indexes.length) return;
     const only = actions[indexes[0]];
-    if (indexes.length === 1 && !(only.type === 'cast' && only.maxX > 0)) answer({ action: indexes[0] });
+    if (indexes.length === 1 && only.type !== 'cycle' && !(only.type === 'cast' && only.maxX > 0)) answer({ action: indexes[0] });
     else {
       setMenu(indexes);
       setX(only.type === 'cast' ? only.maxX : 0);
@@ -242,7 +242,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
 
   const cardState = (card: SimCard, from: 'hand' | 'command'): { cls: string; onClick?: () => void } => {
     if (d?.kind !== 'priority') return { cls: '' };
-    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && a.from === from) || (a.type === 'land' && a.card === card && from === 'hand'));
+    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && a.from === from) || (a.type === 'land' && a.card === card && from === 'hand') || (a.type === 'cycle' && a.card === card && from === 'hand'));
     return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
   };
 
@@ -420,6 +420,9 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
                 ? <>Your <strong>{STEP_NAMES[g.step].toLowerCase()}</strong>. Click a highlighted card to play it.</>
                 : <>{shortName(g.players[g.activeSeat])}&apos;s <strong>{STEP_NAMES[g.step].toLowerCase()}</strong>. You can act now, or continue.</>}
           </span>
+          {d.actions.map((a, i) => (a.type === 'cast' && a.from === 'graveyard'
+            ? <button key={i} onClick={() => (a.maxX > 0 ? setMenu([i]) : answer({ action: i }))}>{actionLabel(g, a)}</button>
+            : null))}
           <button className="primary" onClick={() => answer({ action: 0 })}>{pass}</button>
         </div>
       );
@@ -557,7 +560,8 @@ function actionLabel(g: Game, a: Action): string {
   switch (a.type) {
     case 'pass': return 'Pass';
     case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}`;
-    case 'cast': return `Cast ${a.card.name} ${costText(a.card)}`;
+    case 'cast': return a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : `Cast ${a.card.name} ${costText(a.card)}`;
+    case 'cycle': return `Cycle ${a.card.name} ${costText({ cost: a.card.cycling!.cost } as SimCard)}`;
     case 'activate': {
       const name = g.findPerm(a.permId)?.card.name ?? 'ability';
       return a.effect.kind === 'equip' ? `Equip ${name} ${costText({ cost: a.effect.cost ?? { generic: 2, pips: [], x: 0, life: 0 } } as SimCard)}` : `${name}: ${effectLabel(a.effect)}`;

@@ -171,6 +171,10 @@ export interface SimCard {
   noUntap?: boolean;
   /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */
   freeWithCommander?: boolean;
+  /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
+  cycling?: { cost: ManaCost; land?: boolean };
+  /** Flashback: may be cast from the graveyard for this cost, then exiled. */
+  flashback?: ManaCost;
   /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
   extraCost?: { sacrifice?: 'creature' | 'artifact' | 'artifactOrCreature'; discard?: number; either?: boolean };
   /** A nonland permanent that enters tapped. */

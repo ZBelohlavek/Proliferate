@@ -868,4 +868,49 @@ describe('playing against bots', () => {
     expect(a.graveyard.map((c) => c.name)).toContain('Test Walker');
     expect(t.game.log!.join('\n')).toContain('runs out of loyalty');
   });
+  it('cycling discards the card to draw another, at instant speed', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 2);
+    const top = a.library[0];
+    const cycler = spell('Slow Giant', '{5}{G}{G}', 7, 'Creature', 'Cycling {2}', { power: '7', toughness: '7' });
+    expect(cycler.cycling?.cost.generic).toBe(2);
+    expect(cycler.unread ?? []).toEqual([]);
+    a.hand.push(cycler);
+    let done = false;
+    t.handlers[0] = (_g, d) => {
+      if (done || d.kind !== 'priority') return undefined;
+      const i = find(d.actions, 'cycle', 'Slow Giant');
+      if (i === -1) return undefined;
+      done = true;
+      return { action: i };
+    };
+    t.until(() => done && a.graveyard.length === 1);
+    expect(a.graveyard[0]).toBe(cycler);
+    expect(a.hand).toContain(top);
+    expect(a.battlefield.filter((q) => q.tapped)).toHaveLength(2);
+  });
+
+  it('flashback casts a spell from the graveyard and then exiles it', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 3);
+    const think = spell('Think Again', '{G}', 1, 'Sorcery', 'Draw two cards.\nFlashback {2}{G}');
+    expect(think.flashback?.generic).toBe(2);
+    a.graveyard.push(think);
+    let done = false;
+    t.handlers[0] = (_g, d) => {
+      if (done || d.kind !== 'priority') return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'cast' && x.from === 'graveyard');
+      if (i === -1) return undefined;
+      done = true;
+      return { action: i };
+    };
+    t.until(() => a.exile.length === 1);
+    expect(a.exile[0]).toBe(think);
+    expect(a.graveyard).toHaveLength(0);
+    expect(a.hand).toHaveLength(2);
+    expect(a.battlefield.filter((q) => q.tapped)).toHaveLength(3);
+    expect(t.game.log!.join('\n')).toContain('with flashback');
+  });
 });

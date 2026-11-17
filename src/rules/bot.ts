@@ -160,7 +160,7 @@ export class Bot implements Agent {
       if (equip) return pick(equip);
       const spell = this.chooseSpell(g, p, casts, false);
       if (spell) return pick(spell.action, spell.x);
-      if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions));
+      if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       return pick(undefined);
     }
 
@@ -171,9 +171,21 @@ export class Bot implements Agent {
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
       const spell = this.chooseSpell(g, p, casts, true);
       if (spell) return pick(spell.action, spell.x);
-      return pick(this.chooseAbility(g, p, actions));
+      return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
     }
     return pick(undefined);
+  }
+
+  /** Cycle cards that are no use where the game stands: land searches when short of lands, spells too dear to cast soon, spare lands late. */
+  private chooseCycle(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const lands = g.landCount(p);
+    return actions.find((a) => {
+      if (a.type !== 'cycle') return false;
+      const card = a.card;
+      if (card.cycling?.land) return lands < 5 || card.cmc > lands + 1;
+      if (card.isLand) return lands >= 6;
+      return card.cmc > lands + 2 || (card.effects.length === 0 && !card.isCreature);
+    });
   }
 
   /** Counter an opponent's spell, or protect a permanent it targets. */

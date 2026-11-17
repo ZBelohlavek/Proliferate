@@ -463,17 +463,32 @@ export class Game {
     // Rule of Law: one spell a turn. Drannith Magistrate: no casting from the command zone.
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
-    const consider = (card: SimCard, from: 'hand' | 'command') => {
+    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard') => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return;
       if (!sorcery && !isInstantSpeed(card)) return;
       const fromCommand = from === 'command';
-      if (mana < this.effectiveCost(p, card, fromCommand)) return;
-      if (!this.canAfford(p, card, fromCommand, 0)) return;
+      const priced = from === 'graveyard' ? this.flashCard(card) : card;
+      if (mana < this.effectiveCost(p, priced, fromCommand)) return;
+      if (!this.canAfford(p, priced, fromCommand, 0)) return;
       if (!this.hasTargets(p, card)) return;
-      actions.push({ type: 'cast', card, from, maxX: this.maxX(p, card, fromCommand) });
+      actions.push({ type: 'cast', card, from, maxX: this.maxX(p, priced, fromCommand) });
     };
     for (const card of new Set(p.commandZone)) consider(card, 'command');
     for (const card of new Set(p.hand)) consider(card, 'hand');
+    const seen = new Set<SimCard>();
+    for (const card of p.graveyard) {
+      if (card.flashback && !seen.has(card)) {
+        seen.add(card);
+        consider(card, 'graveyard');
+      }
+    }
+    // Cycling works at any time you have priority (rule 702.29).
+    for (const card of p.hand) {
+      if (card.cycling && !seen.has(card) && this.planPayment(p, card.cycling.cost, 0, 0) !== null) {
+        seen.add(card);
+        actions.push({ type: 'cycle', card });
+      }
+    }
 
     for (const perm of p.battlefield) {
       for (const effect of perm.card.effects) {
@@ -536,7 +551,28 @@ export class Game {
         return true;
       }
       case 'cast':
-        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)));
+        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from === 'graveyard');
+      case 'cycle': {
+        const card = action.card;
+        const plan = card.cycling ? this.planPayment(p, card.cycling.cost, 0, 0) : null;
+        const idx = p.hand.indexOf(card);
+        if (!plan || idx === -1) return false;
+        this.commitPayment(p, plan);
+        p.life -= card.cycling!.cost.life;
+        p.hand.splice(idx, 1);
+        this.toGraveyard(p, card, false);
+        const land = card.cycling!.land ? p.library.findIndex((c) => c.isLand) : -1;
+        if (land !== -1) {
+          const [found] = p.library.splice(land, 1);
+          p.hand.push(found);
+          this.rng.shuffle(p.library);
+          this.say(`${p.name} cycles ${card.name} and finds ${found.name}.`);
+        } else {
+          this.say(`${p.name} cycles ${card.name}.`);
+          this.draw(p, 1);
+        }
+        return true;
+      }
       case 'activate':
         return yield* this.activate(p, action.permId, action.effect);
       default:
@@ -841,15 +877,27 @@ export class Game {
   // -------------------------------------------------------------------------
 
   /** Returns false if the cast was taken back before anything was paid. */
-  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number): Flow<boolean> {
-    const zone = fromCommand ? p.commandZone : p.hand;
-    if (!zone.includes(card)) return false;
+  /** The same card priced at its flashback cost, for the cost and payment helpers. */
+  private flashCards = new WeakMap<SimCard, SimCard>();
+  private flashCard(card: SimCard): SimCard {
+    let priced = this.flashCards.get(card);
+    if (!priced) {
+      priced = { ...card, cost: card.flashback ?? card.cost };
+      this.flashCards.set(card, priced);
+    }
+    return priced;
+  }
+
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, flashback = false): Flow<boolean> {
+    const zone = fromCommand ? p.commandZone : flashback ? p.graveyard : p.hand;
+    if (!zone.includes(card) || (flashback && !card.flashback)) return false;
+    const priced = flashback ? this.flashCard(card) : card;
     const permanent = !card.isInstant && !card.isSorcery;
     const effects = permanent ? [] : card.effects.filter((e) => e.when === 'resolve');
 
     // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
     let ward = 0;
-    const affordable = (t: Target) => this.canAfford(p, card, fromCommand, x, ward + this.wardCost(p, t));
+    const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t));
     let attachTo: Target | null = null;
     if (permanent && isAura(card)) {
       const candidates = this.auraCandidates(p).filter(affordable);
@@ -873,7 +921,7 @@ export class Game {
       targets.push(t);
     }
 
-    const plan = this.spellPlan(p, card, fromCommand, x, ward);
+    const plan = this.spellPlan(p, priced, fromCommand, x, ward);
     if (!plan) return false;
     if (card.extraCost) {
       // Additional costs are paid as the spell is cast (rule 601.2h): sacrifice if possible, else discard.
@@ -895,7 +943,7 @@ export class Game {
       }
     }
     this.commitPayment(p, plan);
-    p.life -= card.cost.life + (card.xFromLife ? x : 0);
+    p.life -= priced.cost.life + (card.xFromLife ? x : 0);
 
     zone.splice(zone.indexOf(card), 1);
     if (fromCommand) {
@@ -909,9 +957,10 @@ export class Game {
       id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
       isCommander: p.deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
     };
+    if (flashback) item.flashback = true;
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
-    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
 
     // "Whenever you cast a spell" triggers (they go on the stack above the spell).
     for (const perm of p.battlefield) {
@@ -1090,7 +1139,7 @@ export class Game {
     const anyLegal = item.targets.some((t, i) => t !== null && legal[i]) || (item.attachTo !== null && attachLegal);
     if (targeted && !anyLegal) {
       this.say(`${item.label} has no legal target and doesn't resolve.`);
-      if (item.kind === 'spell') this.toGraveyard(p, item.card, item.isCommander);
+      if (item.kind === 'spell') this.leaveStack(p, item);
       return;
     }
 
@@ -1113,9 +1162,15 @@ export class Game {
     }
     if (item.kind === 'spell') {
       if (this.tuckSpell) p.library.splice(Math.min(6, p.library.length), 0, item.card);
-      else this.toGraveyard(p, item.card, item.isCommander);
+      else this.leaveStack(p, item);
       this.tuckSpell = false;
     }
+  }
+
+  /** Where a spell goes after it resolves or is countered: exile if it was cast with flashback (rule 702.34). */
+  private leaveStack(p: PlayerState, item: StackItem) {
+    if (item.flashback) p.exile.push(item.card);
+    else this.toGraveyard(p, item.card, item.isCommander);
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
@@ -1311,7 +1366,7 @@ export class Game {
         if (idx === -1) break;
         const [hit] = this.stack.splice(idx, 1);
         this.say(`${hit.label} is countered.`);
-        if (hit.kind === 'spell') this.toGraveyard(this.players[hit.controller], hit.card, hit.isCommander);
+        if (hit.kind === 'spell') this.leaveStack(this.players[hit.controller], hit);
         break;
       }
       case 'tokens': {
