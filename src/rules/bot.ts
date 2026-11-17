@@ -278,7 +278,7 @@ export class Bot implements Agent {
     let best: { action: CastAction; x: number } | undefined;
     let bestScore = -Infinity;
     for (const a of casts) {
-      const card = a.card;
+      const card = g.castCard(a.card, a.from);
       const fromCommand = a.from === 'command';
       let x = a.maxX;
       if (card.xFromLife) {

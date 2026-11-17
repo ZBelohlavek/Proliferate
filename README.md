@@ -61,7 +61,8 @@ On a sample of 167 widely played Commander cards (`tests/staples.ts`) all but fo
 - Mana is paid automatically, and mana doesn't float between spells. Ritual mana is kept as Treasures.
 - Planeswalkers use one loyalty ability a turn and leave at zero loyalty, but they can't be attacked or damaged, and ultimates that make emblems aren't read.
 - Tribal wording ("whenever a Dragon you control attacks") counts every creature you control. A stolen creature stays stolen even if the Aura that took it leaves. An attack tax is paid automatically when the attacker can afford it.
-- Not yet read: cycling, flashback, overload, storm, crew, ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, goad, cast-from-exile and copy effects, redirecting targets, and power and toughness that count something.
+- Cycling, flashback, overload and storm are played by their rules. Power and toughness that count something are read for the common counts (cards in hand, graveyards, artifacts, creatures or lands you control); a count of one creature type counts every creature.
+- Not yet read: crew, ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, goad, the Ring, energy, cast-from-exile and copy effects, alternative costs such as exiling a card from hand, and redirecting targets.
 - "If" conditions it can't read are treated as true about half the time; ward costs {2}.
 
 That makes the built-in simulator a quick estimate. Forge remains the reference for final numbers.

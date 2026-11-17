@@ -463,18 +463,21 @@ export class Game {
     // Rule of Law: one spell a turn. Drannith Magistrate: no casting from the command zone.
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
-    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard') => {
+    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload') => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return;
       if (!sorcery && !isInstantSpeed(card)) return;
       const fromCommand = from === 'command';
-      const priced = from === 'graveyard' ? this.flashCard(card) : card;
+      const priced = this.castCard(card, from);
       if (mana < this.effectiveCost(p, priced, fromCommand)) return;
       if (!this.canAfford(p, priced, fromCommand, 0)) return;
-      if (!this.hasTargets(p, card)) return;
+      if (from !== 'overload' && !this.hasTargets(p, card)) return;
       actions.push({ type: 'cast', card, from, maxX: this.maxX(p, priced, fromCommand) });
     };
     for (const card of new Set(p.commandZone)) consider(card, 'command');
-    for (const card of new Set(p.hand)) consider(card, 'hand');
+    for (const card of new Set(p.hand)) {
+      consider(card, 'hand');
+      if (card.overload) consider(card, 'overload');
+    }
     const seen = new Set<SimCard>();
     for (const card of p.graveyard) {
       if (card.flashback && !seen.has(card)) {
@@ -551,7 +554,7 @@ export class Game {
         return true;
       }
       case 'cast':
-        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from === 'graveyard');
+        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from);
       case 'cycle': {
         const card = action.card;
         const plan = card.cycling ? this.planPayment(p, card.cycling.cost, 0, 0) : null;
@@ -878,22 +881,29 @@ export class Game {
 
   /** Returns false if the cast was taken back before anything was paid. */
   /** The same card priced at its flashback cost, for the cost and payment helpers. */
-  private flashCards = new WeakMap<SimCard, SimCard>();
-  private flashCard(card: SimCard): SimCard {
-    let priced = this.flashCards.get(card);
-    if (!priced) {
-      priced = { ...card, cost: card.flashback ?? card.cost };
-      this.flashCards.set(card, priced);
+  private altCards = new Map<string, WeakMap<SimCard, SimCard>>();
+  /** The card as it is cast: priced at its flashback cost, or with its overload cost and effects. */
+  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload'): SimCard {
+    if (from !== 'graveyard' && from !== 'overload') return card;
+    let cache = this.altCards.get(from);
+    if (!cache) this.altCards.set(from, (cache = new WeakMap()));
+    let alt = cache.get(card);
+    if (!alt) {
+      alt = from === 'graveyard'
+        ? { ...card, cost: card.flashback ?? card.cost }
+        : { ...card, cost: card.overload?.cost ?? card.cost, effects: card.overload?.effects ?? card.effects };
+      cache.set(card, alt);
     }
-    return priced;
+    return alt;
   }
 
-  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, flashback = false): Flow<boolean> {
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' = 'hand'): Flow<boolean> {
+    const flashback = from === 'graveyard';
     const zone = fromCommand ? p.commandZone : flashback ? p.graveyard : p.hand;
-    if (!zone.includes(card) || (flashback && !card.flashback)) return false;
-    const priced = flashback ? this.flashCard(card) : card;
+    if (!zone.includes(card) || (flashback && !card.flashback) || (from === 'overload' && !card.overload)) return false;
+    const priced = this.castCard(card, from);
     const permanent = !card.isInstant && !card.isSorcery;
-    const effects = permanent ? [] : card.effects.filter((e) => e.when === 'resolve');
+    const effects = permanent ? [] : priced.effects.filter((e) => e.when === 'resolve');
 
     // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
     let ward = 0;
@@ -960,7 +970,16 @@ export class Game {
     if (flashback) item.flashback = true;
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
-    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : from === 'overload' ? ' with overload' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+
+    // Storm: a copy for each spell cast before this one this turn (rule 702.40).
+    if (card.storm) {
+      const before = this.players.reduce((sum, q) => sum + q.spellsThisTurn, 0) - 1;
+      for (let i = 0; i < Math.min(before, 20); i++) {
+        this.stack.push({ ...item, id: this.nextId++, kind: 'ability', isCommander: false, label: `${card.name} (storm copy)` });
+      }
+      if (before > 0) this.say(`Storm copies ${card.name} ${before} time${before === 1 ? '' : 's'}.`);
+    }
 
     // "Whenever you cast a spell" triggers (they go on the stack above the spell).
     for (const perm of p.battlefield) {
@@ -1350,6 +1369,7 @@ export class Game {
           for (const perm of [...q.battlefield]) {
             if (perm.card.isLand) continue;
             if (e.target === 'creatures' && !perm.card.isCreature) continue;
+            if (e.target === 'artifacts' && !perm.card.isArtifact) continue;
             switch (e.mode) {
               case 'exile': this.removePerm(perm, 'exile'); break;
               case 'bounce': this.removePerm(perm, 'hand'); break;
@@ -1722,13 +1742,30 @@ export class Game {
   }
 
   power(perm: Perm): number {
-    let p = perm.card.power + perm.counters + perm.tempP + this.anthemBonus(perm.seat).p;
+    let p = perm.card.power + perm.counters + perm.tempP + this.anthemBonus(perm.seat).p + this.scaled(perm);
     for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') p += e.p;
     return Math.max(0, p);
   }
 
+  /** "Power equal to the number of ...": what that number is right now. */
+  private scaled(perm: Perm): number {
+    const s = perm.card.scales;
+    if (!s) return 0;
+    const p = this.players[perm.seat];
+    switch (s.by) {
+      case 'hand': return p.hand.length;
+      case 'graveyard': return p.graveyard.length;
+      case 'oppGraveyards': return this.opponents(p).reduce((n, o) => n + o.graveyard.length, 0);
+      case 'allGraveyardCreatures': return this.players.reduce((n, q) => n + q.graveyard.filter((c) => c.isCreature).length, 0);
+      case 'spellsInGraveyard': return p.graveyard.filter((c) => c.isInstant || c.isSorcery).length;
+      case 'artifacts': return p.battlefield.filter((q) => q.card.isArtifact).length;
+      case 'lands': return this.landCount(p);
+      default: return p.battlefield.filter((q) => q.card.isCreature).length;
+    }
+  }
+
   toughness(perm: Perm): number {
-    let t = perm.card.toughness + perm.counters + perm.tempT + this.anthemBonus(perm.seat).t;
+    let t = perm.card.toughness + perm.counters + perm.tempT + this.anthemBonus(perm.seat).t + (perm.card.scales?.toughness ? this.scaled(perm) : 0);
     for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') t += e.t;
     return t;
   }

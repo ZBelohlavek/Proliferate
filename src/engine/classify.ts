@@ -254,8 +254,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount, oneSided: true }, note: `One-sided sweeper ${amount}` });
   } else if (/return all (nonland permanents|creatures)( [^.]*)? to their owners'? hands/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'bounce', amount: 0, oneSided: /you don't control|opponents control/.test(line) }, note: 'Mass bounce' });
-  } else if ((m = line.match(/all creatures get -(\d+|x)\/-(\d+|x)/))) {
-    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[2], 2), oneSided: false }, note: 'Shrink sweeper' });
+  } else if ((m = line.match(/(all creatures|each other creature|each creature|creatures your opponents control|creatures you don't control) gets? -(\d+|x)\/-(\d+|x)/))) {
+    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[3], 2), oneSided: /opponents|don't/.test(m[1]) }, note: 'Shrink sweeper' });
+  } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on each creature( target player controls| your opponents control| you don't control)?`)))) {
+    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[1], 1), oneSided: !!m[2] }, note: 'Shrink sweeper (-1/-1 counters)' });
   } else if (/each player sacrifices all (colored )?(permanents|nonland permanents)/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'nonland', mode: 'destroy', amount: 0, oneSided: false }, note: 'Mass sacrifice (permanents)' });
   } else if (/each (player|opponent) sacrifices (all|each) creatures?/.test(line)) {
@@ -264,7 +266,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
 
   // --- Spot removal --------------------------------------------------------
   if (!out.some((f) => f.body.kind === 'wipe')) {
-    m = line.match(/(destroy|exile) (up to one )?(another |other )?(target [^.,;]*)/);
+    m = line.replace(/(non\w+), (non\w+)/, '$1 $2').match(/(destroy|exile) (up to (?:one|two|three) )?(another |other )?(target [^.,;]*)/);
     if (m && !/from (a|your|target player's|an opponent's) graveyard|target card|cards? in/.test(m[4]) && !/you control(?! and)/.test(m[4])) {
       const target = removalTargetOf(m[4]);
       if (target) out.push({ body: { kind: 'removal', target, mode: m[1] as 'destroy' | 'exile', amount: 0 }, note: `Removal: ${m[1]} ${target}` });
@@ -287,11 +289,14 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : 'a creature'}` });
       } else if (/deals damage equal to its power to (another |any )?(target|up to one target)|fights (target|another target|up to one target) creature/.test(line)) {
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'fight', amount: 0 }, note: 'Fight / bite removal' });
-      } else if ((m = line.match(/(target player|target opponent|each opponent|each player|each other player) sacrifices (a|an) (creature|attacking creature|nonland permanent)/))) {
+      } else if ((m = line.match(/(target player|target opponent|each opponent|each player|each other player) sacrifices (a|an|two|three) (?:nontoken )?(creatures?|attacking creature|nonland permanent)/))) {
         const each = /each (opponent|other)/.test(m[1]) ? 'opponents' as const : m[1] === 'each player' ? 'all' as const : undefined;
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'edict', amount: 0, ...(each ? { each } : {}) }, note: each === 'all' ? 'Each player sacrifices a creature' : each ? 'Each opponent sacrifices a creature' : 'Edict' });
       } else if ((m = line.match(/target creature( an opponent controls| you don't control)? gets -(\d+|x)\/-(\d+|x)/))) {
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount: num(m[3], 3) }, note: 'Shrink removal' });
+      } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on (up to one )?target creature`)))) {
+        const amount = num(m[1], 1);
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount }, note: `Shrink removal (${amount === -1 ? 'X' : amount} -1/-1 counters)` });
       }
     }
   }
@@ -324,6 +329,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'treasure', n }, note: `Treasure ×${n} (one-shot mana)` });
   }
 
+  if ((m = line.match(/\bincubate (\d+)/))) {
+    const n = parseInt(m[1], 10);
+    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [] }, note: `Incubate ${n} (≈ a ${n}/${n} Phyrexian token)` });
+  }
   if ((m = line.match(/\bamass (?:\w+ )?(\d+)/))) {
     const n = parseInt(m[1], 10);
     out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [] }, note: `Amass ${n} (≈ a ${n}/${n} Army token)` });
@@ -676,7 +685,7 @@ export function classifyCard(raw: RawCard): SimCard {
       // Mana abilities on nonland permanents (rocks and dorks).
       const manaMatch = ctx.when === 'activated' ? sentence.match(/^(?:for each [^,]*, )?add (.*)$/) : null;
       // Rituals: mana from an instant or sorcery is kept as that many Treasures.
-      const ritual = !isPermanent && ctx.when === 'resolve' ? sentence.match(/^add (.*)$/) : null;
+      const ritual = (!isPermanent || /^when ~ enters/.test(line)) && ctx.when === 'resolve' ? sentence.match(/^add (.*)$/) : null;
       if (ritual) {
         const p = parseProduced(ritual[1]);
         const n = /for each/.test(sentence) ? 3 : p?.amount ?? 0;
@@ -767,6 +776,33 @@ export function classifyCard(raw: RawCard): SimCard {
     card.flashback = parseManaCost(flashback[1]);
     card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
   }
+  const overload = !isPermanent && text.match(/^overload ((?:\{[^}]+\})+)/m);
+  if (overload) {
+    const effects = card.effects.filter((e) => e.when === 'resolve').map((e): Effect => {
+      if (e.kind === 'removal' && e.mode !== 'edict' && e.mode !== 'fight') {
+        const target = e.target === 'creature' ? 'creatures' as const : e.target === 'artifactEnchantment' && /target artifact you don't control/.test(text) ? 'artifacts' as const : 'nonland' as const;
+        return { kind: 'wipe', target, mode: e.mode, amount: e.amount, oneSided: true, when: 'resolve' };
+      }
+      if (e.kind === 'pump') return { kind: 'overrun', p: e.p, t: e.t, trample: false, ...(e.grant ? { grant: e.grant } : {}), when: 'resolve' };
+      return e;
+    });
+    card.overload = { cost: parseManaCost(overload[1]), effects };
+    card.notes.push(`Overload ${overload[1].toUpperCase()}: hits everything instead of one target`);
+  }
+  if (!isPermanent && /^storm\b/m.test(text)) {
+    card.storm = true;
+    card.notes.push('Storm: copied for each spell cast before it this turn');
+  }
+  const cda = isCreature && text.match(/^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (?:your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|artifacts you control|creatures you control|lands you control|(?:islands|swamps|forests|mountains|plains) you control|[a-z, /]+ you control)/m);
+  if (cda) {
+    const what = cda[2];
+    const by = what === 'cards in your hand' ? 'hand' : what === 'cards in your graveyard' ? 'graveyard' : /creature cards in all/.test(what) ? 'allGraveyardCreatures' : /graveyards?$/.test(what) ? 'oppGraveyards' : /instant and sorcery/.test(what) ? 'spellsInGraveyard' : /artifacts/.test(what) ? 'artifacts' : /lands|islands|swamps|forests|mountains|plains/.test(what) ? 'lands' : 'creatures';
+    card.scales = { by, toughness: /toughness/.test(cda[1]) };
+    // The printed "*" is the count itself ("1+*" keeps its 1).
+    if (/\*/.test(String(raw.power ?? ''))) card.power = parseInt(String(raw.power), 10) || 0;
+    if (/\*/.test(String(raw.toughness ?? ''))) card.toughness = card.scales.toughness ? parseInt(String(raw.toughness), 10) || 0 : card.toughness;
+    card.notes.push(`Power${card.scales.toughness ? ' and toughness' : ''} equal to the number of ${what}`);
+  }
   const extra = text.match(/^as an additional cost to cast ~, (sacrifice (?:a|an) (creature|artifact or creature|artifact)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/m);
   if (extra) {
     if (/or discard/.test(extra[1])) card.extraCost = { sacrifice: 'artifact', discard: 1, either: true };
@@ -815,7 +851,7 @@ export function classifyCard(raw: RawCard): SimCard {
   if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
-  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX)) || card.effects.length > 0;
+  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   card.value = cardValue(card);
@@ -832,7 +868,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
-  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+/.test(line)) return true;
+  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (/^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;

@@ -913,4 +913,60 @@ describe('playing against bots', () => {
     expect(a.battlefield.filter((q) => q.tapped)).toHaveLength(3);
     expect(t.game.log!.join('\n')).toContain('with flashback');
   });
+  it('overload hits every opposing permanent instead of one target', () => {
+    const t = new Table(3);
+    const [a, b, c] = t.game.players;
+    t.lands(0, 7);
+    const rift = spell('Tidal Rift', '{1}{G}', 2, 'Instant', "Return target nonland permanent you don't control to its owner's hand.\nOverload {6}{G}");
+    expect(rift.overload?.effects[0]).toMatchObject({ kind: 'wipe', mode: 'bounce', oneSided: true });
+    a.hand.push(rift);
+    const mine = t.game.put(0, bears());
+    t.game.put(1, bears());
+    t.game.put(2, bears());
+    let done = false;
+    t.handlers[0] = (_g, d) => {
+      if (done || d.kind !== 'priority') return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'cast' && x.from === 'overload');
+      if (i === -1) return undefined;
+      done = true;
+      return { action: i };
+    };
+    t.until(() => a.graveyard.length === 1);
+    expect(b.battlefield).toHaveLength(0);
+    expect(c.battlefield).toHaveLength(0);
+    expect(a.battlefield).toContain(mine);
+    expect(a.battlefield.filter((q) => q.tapped)).toHaveLength(7);
+  });
+
+  it('storm copies the spell for each spell cast before it this turn', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 3);
+    a.hand.push(spell('Spark', '{G}', 1, 'Instant', 'You gain 1 life.'), spell('Spark Two', '{G}', 1, 'Instant', 'You gain 1 life.'), spell('Brain Gale', '{G}', 1, 'Sorcery', 'Target opponent mills two cards.\nStorm'));
+    const order = ['Spark', 'Spark Two', 'Brain Gale'];
+    t.handlers[0] = (g, d) => {
+      if (d.kind === 'target') return { kind: 'player', seat: 1 };
+      if (d.kind !== 'priority' || g.stack.length || !order.length) return undefined;
+      const i = find(d.actions, 'cast', order[0]);
+      if (i === -1) return undefined;
+      order.shift();
+      return { action: i };
+    };
+    t.until(() => b.graveyard.length >= 6);
+    expect(b.graveyard).toHaveLength(6);
+    expect(t.game.log!.join('\n')).toContain('Storm copies Brain Gale 2 times');
+  });
+
+  it('power and toughness that count something follow the count', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const crawler = creature('Mind Crawler', '{G}', 1, 0, 0, { power: '*', toughness: '*', text: "~'s power and toughness are each equal to the number of cards in your hand." });
+    expect(crawler.scales).toEqual({ by: 'hand', toughness: true });
+    a.hand.push(bears(), bears(), bears());
+    const perm = t.game.put(0, crawler);
+    expect(t.game.power(perm)).toBe(3);
+    expect(t.game.toughness(perm)).toBe(3);
+    a.hand.pop();
+    expect(t.game.power(perm)).toBe(2);
+  });
 });

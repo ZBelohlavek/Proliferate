@@ -242,7 +242,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
 
   const cardState = (card: SimCard, from: 'hand' | 'command'): { cls: string; onClick?: () => void } => {
     if (d?.kind !== 'priority') return { cls: '' };
-    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && a.from === from) || (a.type === 'land' && a.card === card && from === 'hand') || (a.type === 'cycle' && a.card === card && from === 'hand'));
+    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && (a.from === from || (a.from === 'overload' && from === 'hand'))) || (a.type === 'land' && a.card === card && from === 'hand') || (a.type === 'cycle' && a.card === card && from === 'hand'));
     return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
   };
 
@@ -560,7 +560,7 @@ function actionLabel(g: Game, a: Action): string {
   switch (a.type) {
     case 'pass': return 'Pass';
     case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}`;
-    case 'cast': return a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : `Cast ${a.card.name} ${costText(a.card)}`;
+    case 'cast': return a.from === 'overload' ? `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}` : a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : `Cast ${a.card.name} ${costText(a.card)}`;
     case 'cycle': return `Cycle ${a.card.name} ${costText({ cost: a.card.cycling!.cost } as SimCard)}`;
     case 'activate': {
       const name = g.findPerm(a.permId)?.card.name ?? 'ability';

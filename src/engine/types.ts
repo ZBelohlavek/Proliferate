@@ -79,7 +79,7 @@ export type EffectBody =
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all' }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland'; mode: RemovalMode; amount: number; oneSided: boolean }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   /** keywords: "creatures you control have lifelink". */
@@ -173,6 +173,12 @@ export interface SimCard {
   freeWithCommander?: boolean;
   /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
   cycling?: { cost: ManaCost; land?: boolean };
+  /** Overload: for this cost the spell hits everything it could target instead of one target. */
+  overload?: { cost: ManaCost; effects: Effect[] };
+  /** Storm: copied for each spell cast before it this turn. */
+  storm?: boolean;
+  /** Power (and toughness, if `toughness`) equal to a count, e.g. cards in your hand. */
+  scales?: { by: 'hand' | 'graveyard' | 'oppGraveyards' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'; toughness: boolean };
   /** Flashback: may be cast from the graveyard for this cost, then exiled. */
   flashback?: ManaCost;
   /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
