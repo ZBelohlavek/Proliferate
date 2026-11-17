@@ -34,6 +34,9 @@ export type Trigger =
   | 'opponentCast' // an opponent casts a spell (see castFilter)
   | 'opponentDraw' // an opponent draws a card
   | 'sacrifice' // you sacrifice a permanent
+  | 'draw' // you draw a card
+  | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
+  | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
   | 'static'; // always on while the permanent is on the battlefield
 
@@ -71,14 +74,17 @@ export type EffectBody =
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean }
+  /** each: an edict that hits every opponent, or every player, instead of one target. */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all' }
   | { kind: 'wipe'; target: 'creatures' | 'nonland'; mode: RemovalMode; amount: number; oneSided: boolean }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
-  | { kind: 'anthem'; p: number; t: number }
+  /** keywords: "creatures you control have lifelink". */
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[] }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
-  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power' }
-  | { kind: 'pump'; p: number; t: number; protect: boolean }
+  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
+  /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[] }
   /** cost: the equip cost of an Equipment, when the text gives one. */
   | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
@@ -89,7 +95,8 @@ export type EffectBody =
   | { kind: 'gainLife'; n: number }
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
-  | { kind: 'recursion'; n: number; toBattlefield: boolean }
+  /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean }
   /** proliferate: only creatures that already have a counter. */
   | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
@@ -113,6 +120,17 @@ export type EffectBody =
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
+  /** Look at the top n cards and keep or bin each. Surveil puts the rest in the graveyard, scry on the bottom. */
+  | { kind: 'scry'; n: number; surveil: boolean }
+  /** Put cards from the top of a library into the graveyard. n: -1 = X, -2 = half the library. */
+  | { kind: 'mill'; n: number; who: 'target' | 'opponents' | 'all' | 'you' }
+  | { kind: 'discard'; n: number; who: 'target' | 'opponents' }
+  /** You have no maximum hand size. */
+  | { kind: 'noMaxHand' }
+  /** Laboratory Maniac: drawing from an empty library wins the game instead. */
+  | { kind: 'winOnEmptyDraw' }
+  /** You become the monarch: draw a card at each of your end steps until someone takes it by combat damage. */
+  | { kind: 'monarch' }
   /** Approach of the Second Sun: gain 7 the first time, win the second. */
   | { kind: 'approach' };
 
@@ -144,6 +162,18 @@ export interface SimCard {
   land?: LandInfo;
   /** X-cost creature that enters with X +1/+1 counters (Hangarback Walker, Stonecoil Serpent). */
   entersWithX?: boolean;
+  /** Doesn't untap during its controller's untap step (Basalt Monolith, Mana Vault). */
+  noUntap?: boolean;
+  /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */
+  freeWithCommander?: boolean;
+  /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
+  extraCost?: { sacrifice?: 'creature' | 'artifact' | 'artifactOrCreature'; discard?: number; either?: boolean };
+  /** A nonland permanent that enters tapped. */
+  entersTapped?: boolean;
+  /** X is paid in life instead of mana (Toxic Deluge). */
+  xFromLife?: boolean;
+  /** Costs {amount} less for each of something (affinity, improvise, convoke, "for each creature on the battlefield"). */
+  discount?: { per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'; amount: number };
   /** Modal double-faced card whose back is a land. */
   backLand?: LandInfo & { name: string };
   /** Rough "how good is this card" score used by the AI. */
@@ -152,6 +182,8 @@ export interface SimCard {
   modeled: boolean;
   /** Human-readable interpretation, shown on the deck page. */
   notes: string[];
+  /** Lines of rules text the classifier found nothing in (lower case, card name as ~). */
+  unread?: string[];
   imageUrl?: string;
 }
 

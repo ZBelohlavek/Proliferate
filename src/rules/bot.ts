@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { counterMatches, isAura, isInstantSpeed, removalMatches, type Game } from './game';
+import { counterMatches, isAura, isInstantSpeed, recursionMatches, removalMatches, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -268,7 +268,13 @@ export class Bot implements Agent {
     for (const a of casts) {
       const card = a.card;
       const fromCommand = a.from === 'command';
-      const x = a.maxX;
+      let x = a.maxX;
+      if (card.xFromLife) {
+        // Pay only as much life as the biggest opposing creature needs, and never go low.
+        const need = Math.max(0, ...g.opponents(p).flatMap((o) => o.battlefield.filter((q) => q.card.isCreature).map((q) => g.toughness(q))));
+        x = Math.min(x, need);
+        if (x <= 0 || p.life - x < 10) continue;
+      }
       if (card.cost.x > 0 && x < (card.isCreature ? 2 : 3)) continue;
       let score = this.castScore(g, p, card, fromCommand, x, instantWindow);
       if (score === null) continue;
@@ -321,7 +327,8 @@ export class Bot implements Agent {
       else if (spell) return null;
     }
     if (spell && card.effects.some((e) => e.kind === 'damagePlayer' && e.when === 'resolve') && !removal) score = Math.max(score, 30);
-    if (kinds.has('recursion') && !p.graveyard.some((c) => c.isCreature) && !card.isCreature) return null;
+    const regrow = card.effects.find((e): e is Extract<Effect, { kind: 'recursion' }> => e.kind === 'recursion' && e.when === 'resolve');
+    if (regrow && !p.graveyard.some((c) => recursionMatches(regrow.what, c)) && !card.isCreature) return null;
     const stealAura = card.effects.some((e) => e.kind === 'equip' && e.steal);
     if (stealAura) return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && g.canTarget(p, q) && threat(g, q) >= 4)) ? 75 : null;
     if (isAura(card) && !p.battlefield.some((q) => q.card.isCreature)) return null;
@@ -332,6 +339,7 @@ export class Bot implements Agent {
 
     if (!spell) score = Math.max(score, 50 + card.value);
     if (kinds.has('draw')) score = Math.max(score, 45 + card.value);
+    if (kinds.has('mill') || kinds.has('discard') || kinds.has('scry')) score = Math.max(score, 25 + card.value);
     if (kinds.has('tutor') || kinds.has('recursion') || kinds.has('tokens') || kinds.has('drain') || kinds.has('damagePlayer') || kinds.has('counters')) {
       score = Math.max(score, 40 + card.value);
     }
@@ -361,12 +369,15 @@ export class Bot implements Agent {
       }
       switch (e.kind) {
         case 'draw': return p.library.length > 8;
-        case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': return true;
+        case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': case 'discard': case 'scry': return true;
+        case 'mill': return e.who !== 'you';
+        // "Can't be blocked this turn": before combat, with something worth sending in.
+        case 'pump': return !!e.grant?.includes('unblockable') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3);
         case 'removal': {
           const t = this.removalTarget(g, p, e, 0, g.targetCandidates(p, e, perm) ?? []);
           return !!t && t.score >= 3 + g.round * 0.2;
         }
-        case 'recursion': return p.graveyard.some((c) => c.isCreature);
+        case 'recursion': return !e.toTop && p.graveyard.some((c) => recursionMatches(e.what, c));
         case 'exileGraveyards': return g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'cheat': return p.hand.some((c) => c.isCreature);
         default: return false;
@@ -457,6 +468,14 @@ export class Bot implements Agent {
         const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
         const best = (seat: number) => Math.max(0, ...g.players[seat].library.filter((c) => c.isCreature).map((c) => c.value));
         return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (best(b) > best(a) ? b : a)) } : d.candidates[0];
+      }
+      case 'mill':
+      case 'discard': {
+        // Whoever is closest to running out, or holds the most cards.
+        const seats = d.candidates.flatMap((t) => (t.kind === 'player' && t.seat !== p.seat ? [t.seat] : []));
+        if (!seats.length) return d.candidates[0];
+        const score = (seat: number) => (e.kind === 'mill' ? -g.players[seat].library.length : g.players[seat].hand.length);
+        return { kind: 'player', seat: seats.reduce((a, c) => (score(c) > score(a) ? c : a)) };
       }
       case 'damagePlayer': {
         const amount = e.n === -1 ? 3 : e.n;
@@ -755,6 +774,17 @@ export class Bot implements Agent {
           if (!q) return 0;
           return threat(g, q) - (q.card.isLegendary && q.seat === p.seat ? 100 : 0);
         }, 1);
+      case 'scry': {
+        // Send away lands when flooded, expensive spells when short of lands.
+        const lands = g.landCount(p);
+        const landsInHand = p.hand.filter((c) => c.isLand).length;
+        return indexes.filter((i) => {
+          const c = card(i);
+          if (c.isLand) return lands + landsInHand >= 6;
+          if (!c.modeled) return true;
+          return c.cmc > lands + 3;
+        });
+      }
       case 'cheat':
       case 'take':
         return top((i) => card(i).value + card(i).cmc, 1);

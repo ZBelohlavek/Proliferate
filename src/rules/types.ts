@@ -98,6 +98,8 @@ export interface PlayerState {
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
+  /** Poison counters; ten lose the game (rule 704.5c). */
+  poison: number;
   /** Spells cast this turn (Rule of Law). */
   spellsThisTurn: number;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
@@ -159,7 +161,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

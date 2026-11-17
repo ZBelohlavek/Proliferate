@@ -613,6 +613,8 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
             <span title={`Graveyard: ${p.graveyard.map((c) => c.name).join(', ') || 'empty'}`}>🪦 {p.graveyard.length}</span>
             {p.exile.length > 0 && <span title={`Exile: ${p.exile.map((c) => c.name).join(', ')}`}>⛔ {p.exile.length}</span>}
             {p.treasures > 0 && <span title="Treasure tokens">💰 {p.treasures}</span>}
+            {p.poison > 0 && <span title="Poison counters: ten lose the game">☠ {p.poison}</span>}
+            {g.monarch === p.seat && <span title="The monarch draws a card at each of their end steps">👑</span>}
             {damage.length > 0 && <span>Commander damage: {damage.join(', ')}</span>}
           </div>
           <div className="land-row small">

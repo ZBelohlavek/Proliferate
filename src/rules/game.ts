@@ -97,6 +97,8 @@ export class Game {
   private approachCasts = new Map<number, number>();
   /** Set while a spell resolves that goes back into its owner's library instead of the graveyard. */
   private tuckSpell = false;
+  /** Seat of the monarch, if any (rule 724). */
+  monarch: number | null = null;
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
 
@@ -126,6 +128,7 @@ export class Game {
       drewFromEmpty: false,
       landsPlayed: 0,
       spellsThisTurn: 0,
+      poison: 0,
       shielded: false,
       lastHitBy: null,
       lastHitKind: 'combat',
@@ -274,7 +277,7 @@ export class Game {
     // Untap step (502). No player gets priority.
     this.step = 'untap';
     for (const perm of p.battlefield) {
-      perm.tapped = false;
+      if (!perm.card.noUntap) perm.tapped = false;
       perm.sick = false;
     }
     for (const q of this.players) {
@@ -312,12 +315,16 @@ export class Game {
     if (this.stopped(p)) return;
 
     this.step = 'end';
+    if (this.monarch === p.seat) {
+      this.say(`${p.name} draws a card as the monarch.`);
+      this.draw(p, 1);
+    }
     yield* this.priority();
     if (this.stopped(p)) return;
 
     // Cleanup step (514): discard to hand size, then damage and "until end of turn" effects wear off.
     this.step = 'cleanup';
-    if (p.hand.length > MAX_HAND) {
+    if (p.hand.length > MAX_HAND && this.statics(p, 'noMaxHand') === 0) {
       const n = p.hand.length - MAX_HAND;
       const picks = yield* this.choose(p, 'discard', `Discard ${n} card${n > 1 ? 's' : ''} (hand size is ${MAX_HAND}).`, p.hand.map((card) => ({ label: card.name, card })), n, n);
       const cards = picks.map((i) => p.hand[i]);
@@ -344,13 +351,23 @@ export class Game {
     for (let i = 0; i < n; i++) {
       const c = p.library.shift();
       if (!c) {
+        if (this.statics(p, 'winOnEmptyDraw') > 0) {
+          this.say(`${p.name} would draw from an empty library and wins the game instead.`);
+          for (const o of this.opponents(p)) {
+            o.shielded = false;
+            this.loseLife(o, Math.max(o.life, 1), p, 'noncombat');
+          }
+          return;
+        }
         // Rule 704.5b: loses the next time state-based actions are checked.
         p.drewFromEmpty = true;
         return;
       }
       p.hand.push(c);
       p.drawnNames.add(c.name);
-      if (quiet || this.turnNumber === 0) continue;
+      if (this.turnNumber === 0) continue;
+      if (this.kindsInGame.has('when:draw')) this.fire(p, 'draw');
+      if (quiet) continue;
       for (const o of this.players) {
         if (o === p || !o.alive) continue;
         for (const perm of o.battlefield) {
@@ -582,6 +599,17 @@ export class Game {
         if (e.kind === 'costReduction' && matchesFilter(card, e.filter)) n += e.amount;
       }
     }
+    // Affinity, improvise, convoke, delve and "costs {1} less for each ...".
+    const d = card.discount;
+    if (d) {
+      let count = 0;
+      if (d.per === 'artifacts') count = p.battlefield.filter((q) => q.card.isArtifact).length;
+      else if (d.per === 'creatures') count = p.battlefield.filter((q) => q.card.isCreature).length;
+      else if (d.per === 'allCreatures') count = this.allPerms().filter((q) => q.card.isCreature).length;
+      else if (d.per === 'graveyardCreatures') count = p.graveyard.filter((c) => c.isCreature).length;
+      else count = p.graveyard.length;
+      n += count * d.amount;
+    }
     return n;
   }
 
@@ -591,7 +619,26 @@ export class Game {
   }
 
   /** Total mana a spell would cost right now. */
+  /** Fierce Guardianship and friends cost nothing while their controller's commander is on the battlefield. */
+  private isFree(p: PlayerState, card: SimCard): boolean {
+    return !!card.freeWithCommander && p.battlefield.some((q) => q.isCommander);
+  }
+
+  /** Can `p` pay this spell's additional cost (a sacrifice and/or a discard)? */
+  private canPayExtra(p: PlayerState, card: SimCard): boolean {
+    const c = card.extraCost;
+    if (!c) return true;
+    const sac = c.sacrifice ? this.sacrificeChoices(p, c.sacrifice).length > 0 : true;
+    const disc = c.discard ? p.hand.filter((h) => h !== card).length >= c.discard : true;
+    return c.either ? (!!c.sacrifice && sac) || (!!c.discard && disc) : sac && disc;
+  }
+
+  private sacrificeChoices(p: PlayerState, what: 'creature' | 'artifact' | 'artifactOrCreature'): Perm[] {
+    return p.battlefield.filter((q) => (what !== 'artifact' && q.card.isCreature) || (what !== 'creature' && q.card.isArtifact));
+  }
+
   effectiveCost(p: PlayerState, card: SimCard, fromCommand = false, x = 0): number {
+    if (this.isFree(p, card)) return 0;
     const base = card.cost.generic + card.cost.x * x + this.commanderTax(p, card, fromCommand);
     return Math.max(0, base - this.costReduction(p, card)) + card.cost.pips.length;
   }
@@ -662,6 +709,8 @@ export class Game {
 
   private spellPlan(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, extra: number) {
     if (card.cost.life > 0 && card.cost.life >= p.life) return null;
+    if (!this.canPayExtra(p, card)) return null;
+    if (this.isFree(p, card)) return this.planPayment(p, NO_COST, extra, 0);
     return this.planPayment(p, card.cost, card.cost.x * x + this.commanderTax(p, card, fromCommand) + extra, this.costReduction(p, card));
   }
 
@@ -671,6 +720,8 @@ export class Game {
 
   /** Largest X `p` could pay for this card right now. */
   maxX(p: PlayerState, card: SimCard, fromCommand = false): number {
+    // Toxic Deluge: X is paid in life.
+    if (card.xFromLife) return Math.max(0, Math.min(p.life - 1, 15));
     if (card.cost.x === 0) return 0;
     let x = 0;
     while (x < 30 && this.canAfford(p, card, fromCommand, x + 1)) x++;
@@ -716,6 +767,7 @@ export class Game {
   targetCandidates(p: PlayerState, e: Effect, src: Perm | null): Target[] | null {
     switch (e.kind) {
       case 'removal': {
+        if (e.each) return null;
         if (e.mode === 'edict') {
           return this.opponents(p).filter((o) => o.battlefield.some((q) => q.card.isCreature)).map((o) => ({ kind: 'player', seat: o.seat }));
         }
@@ -731,7 +783,7 @@ export class Game {
         return out;
       }
       case 'counter':
-        return this.stack.filter((s) => s.kind === 'spell' && counterMatches(e.target, s.card)).map((s) => ({ kind: 'stack', id: s.id }));
+        return this.stack.filter((s) => s.kind === 'spell' && counterMatches(e.target, s.card) && !s.card.keywords.includes('uncounterable')).map((s) => ({ kind: 'stack', id: s.id }));
       case 'pump': {
         const out: Target[] = [];
         for (const perm of this.allPerms()) if (perm.card.isCreature && this.canTarget(p, perm)) out.push({ kind: 'perm', id: perm.id });
@@ -742,6 +794,10 @@ export class Game {
         return p.battlefield.filter((q) => !q.card.isLand && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'damagePlayer':
         return this.opponents(p).map((o) => ({ kind: 'player', seat: o.seat }));
+      case 'mill':
+      case 'discard':
+        if (e.who !== 'target') return null;
+        return this.alivePlayers().filter((o) => e.kind === 'mill' || (o !== p && o.hand.length > 0)).map((o) => ({ kind: 'player', seat: o.seat }));
       case 'steal':
         if (e.from === 'library') return this.opponents(p).filter((o) => o.library.some((c) => c.isCreature)).map((o) => ({ kind: 'player', seat: o.seat }));
         return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
@@ -811,8 +867,27 @@ export class Game {
 
     const plan = this.spellPlan(p, card, fromCommand, x, ward);
     if (!plan) return false;
+    if (card.extraCost) {
+      // Additional costs are paid as the spell is cast (rule 601.2h): sacrifice if possible, else discard.
+      const c = card.extraCost;
+      const fodder = c.sacrifice ? this.sacrificeChoices(p, c.sacrifice) : [];
+      if (c.sacrifice && fodder.length && !(c.either && !fodder.some((q) => q.token || q.card.value < 2) && p.hand.length > 1)) {
+        const pick = fodder.length === 1 ? [0] : yield* this.choose(p, 'sacrifice', `Sacrifice which permanent to cast ${card.name}?`, fodder.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+        const gone = fodder[pick[0] ?? 0];
+        this.say(`${p.name} sacrifices ${gone.card.name} to cast ${card.name}.`);
+        this.removePerm(gone, 'graveyard');
+        this.sacrificed(p);
+      } else if (c.discard) {
+        const options = p.hand.filter((h) => h !== card);
+        const picks = yield* this.choose(p, 'discard', `Discard ${c.discard} card${c.discard > 1 ? 's' : ''} to cast ${card.name}.`, options.map((h) => ({ label: h.name, card: h })), c.discard, c.discard);
+        for (const h of picks.map((i) => options[i])) {
+          p.hand.splice(p.hand.indexOf(h), 1);
+          this.toGraveyard(p, h, false);
+        }
+      }
+    }
     this.commitPayment(p, plan);
-    p.life -= card.cost.life;
+    p.life -= card.cost.life + (card.xFromLife ? x : 0);
 
     zone.splice(zone.indexOf(card), 1);
     if (fromCommand) {
@@ -1047,7 +1122,10 @@ export class Game {
   }
 
   private makePerm(p: PlayerState, card: SimCard, token: boolean): Perm {
-    for (const e of card.effects) this.kindsInGame.add(e.kind);
+    for (const e of card.effects) {
+      this.kindsInGame.add(e.kind);
+      this.kindsInGame.add(`when:${e.when}`);
+    }
     return {
       id: this.nextId++, card, seat: p.seat, tapped: false, sick: true, token, isCommander: false,
       counters: 0, damage: 0, deathtouched: false, tempP: 0, tempT: 0, tempKw: [],
@@ -1085,6 +1163,7 @@ export class Game {
       if (host.seat !== p.seat && card.effects.some((e) => e.kind === 'equip' && e.steal)) this.takeControl(host, p);
     }
     if (card.entersWithX) perm.counters = x;
+    if (card.entersTapped) perm.tapped = true;
     p.battlefield.push(perm);
     // Panharmonicon: enters abilities trigger an additional time.
     const times = 1 + (card.isCreature || card.isArtifact ? this.statics(p, 'etbDoubler') : 0);
@@ -1092,6 +1171,13 @@ export class Game {
     for (let i = 0; i < times; i++) {
       if (etb.length) this.trigger(p, card, perm.id, etb);
       if (card.isCreature) this.creatureEntered(p, perm);
+    }
+    if ((card.isArtifact || card.isEnchantment) && this.kindsInGame.has('when:permEnters')) {
+      for (const other of p.battlefield) {
+        if (other === perm) continue;
+        const hits = other.card.effects.filter((e) => e.when === 'permEnters' && matchesFilter(card, e.castFilter ?? 'any'));
+        if (hits.length) this.trigger(p, other.card, other.id, hits);
+      }
     }
   }
 
@@ -1117,6 +1203,8 @@ export class Game {
     perm.tapped = forceTapped || info.tapped;
     perm.sick = false;
     p.battlefield.push(perm);
+    const etb = card.effects.filter((e) => e.when === 'resolve');
+    if (etb.length) this.trigger(p, card, perm.id, etb);
     this.fire(p, 'landfall');
   }
 
@@ -1224,8 +1312,9 @@ export class Game {
           perm.tempP += bp;
           perm.tempT += bt;
           if (e.trample) perm.tempKw.push('trample');
+          if (e.grant) perm.tempKw.push(...e.grant);
         }
-        this.say(`${p.name}'s creatures get +${bp}/+${bt}${e.trample ? ' and trample' : ''} until end of turn.`);
+        this.say(e.grant && !bp && !bt ? `${p.name}'s creatures gain ${e.grant.join(', ')} until end of turn.` : `${p.name}'s creatures get +${bp}/+${bt}${e.trample ? ' and trample' : ''} until end of turn.`);
         break;
       }
       case 'pump': {
@@ -1234,7 +1323,8 @@ export class Game {
         perm.tempP += n(e.p);
         perm.tempT += n(e.t);
         if (e.protect) perm.tempKw.push('indestructible', 'hexproof');
-        this.say(`${perm.card.name} gets +${n(e.p)}/+${n(e.t)} until end of turn.`);
+        if (e.grant) perm.tempKw.push(...e.grant);
+        this.say(e.grant && !e.p && !e.t ? `${perm.card.name} gains ${e.grant.join(', ')} until end of turn.` : `${perm.card.name} gets +${n(e.p)}/+${n(e.t)} until end of turn.`);
         break;
       }
       case 'protect': {
@@ -1257,7 +1347,7 @@ export class Game {
           this.loseLife(o, amount, p, 'noncombat');
           total += amount;
         }
-        p.life += e.gain === -1 ? total : e.gain;
+        this.gainLife(p, e.gain === -1 ? total : e.gain);
         this.say(`${p.name} drains each opponent for ${amount}.`);
         break;
       }
@@ -1270,7 +1360,7 @@ export class Game {
         break;
       }
       case 'gainLife':
-        p.life += e.n === -1 ? Math.max(x, 1) : e.n;
+        this.gainLife(p, e.n === -1 ? Math.max(x, 1) : e.n);
         break;
       case 'tutor': {
         if (!p.library.length) break;
@@ -1295,12 +1385,16 @@ export class Game {
         break;
       }
       case 'recursion': {
-        const creatures = p.graveyard.filter((c) => c.isCreature);
+        const creatures = p.graveyard.filter((c) => recursionMatches(e.what, c) && (!e.toBattlefield || (!c.isInstant && !c.isSorcery && !c.isLand)));
         if (!creatures.length) break;
-        const picks = yield* this.choose(p, 'recursion', `Return up to ${e.n} creature card${e.n > 1 ? 's' : ''} from your graveyard to ${e.toBattlefield ? 'the battlefield' : 'your hand'}.`, creatures.map((card) => ({ label: card.name, card })), 1, e.n);
+        const where = e.toBattlefield ? 'the battlefield' : e.toTop ? 'the top of your library' : 'your hand';
+        const picks = yield* this.choose(p, 'recursion', `Return up to ${e.n} card${e.n > 1 ? 's' : ''} from your graveyard to ${where}.`, creatures.map((card) => ({ label: card.name, card })), 1, e.n);
         for (const card of picks.map((i) => creatures[i])) {
           p.graveyard.splice(p.graveyard.indexOf(card), 1);
-          if (e.toBattlefield) {
+          if (e.toTop) {
+            this.say(`${p.name} puts ${card.name} on top of their library.`);
+            p.library.unshift(card);
+          } else if (e.toBattlefield) {
             this.say(`${p.name} returns ${card.name} to the battlefield.`);
             yield* this.enter(p, card, p.deck.commanders.includes(card), 0, null);
           } else {
@@ -1361,6 +1455,48 @@ export class Game {
         yield* this.enter(p, card, p.deck.commanders.includes(card), 0, null);
         break;
       }
+      case 'scry': {
+        const top = p.library.slice(0, e.n);
+        if (!top.length) break;
+        const where = e.surveil ? 'into your graveyard' : 'on the bottom of your library';
+        const picks = yield* this.choose(p, 'scry', `${e.surveil ? 'Surveil' : 'Scry'} ${top.length}: choose the cards to put ${where}. The rest stay on top.`, top.map((card) => ({ label: card.name, card })), 0, top.length);
+        const away = picks.map((i) => top[i]);
+        for (const card of away) {
+          p.library.splice(p.library.indexOf(card), 1);
+          if (e.surveil) this.toGraveyard(p, card, false);
+          else p.library.push(card);
+        }
+        this.say(`${p.name} ${e.surveil ? 'surveils' : 'scries'} ${top.length}${away.length ? ` and puts ${away.length} ${where.replace('your', 'their')}` : ''}.`);
+        break;
+      }
+      case 'mill': {
+        const victims = e.who === 'you' ? [p] : e.who === 'opponents' ? this.opponents(p) : e.who === 'all' ? this.alivePlayers() : target?.kind === 'player' && this.players[target.seat].alive ? [this.players[target.seat]] : [];
+        for (const v of victims) {
+          const count = Math.min(v.library.length, e.n === -2 ? Math.ceil(v.library.length / 2) : e.n === -1 ? Math.max(x, 1) * 2 : e.n);
+          for (const card of v.library.splice(0, count)) this.toGraveyard(v, card, false);
+          if (count) this.say(`${v.name} mills ${count} card${count > 1 ? 's' : ''} (${v.library.length} left).`);
+        }
+        break;
+      }
+      case 'discard': {
+        const victims = e.who === 'opponents' ? this.opponents(p) : target?.kind === 'player' && this.players[target.seat].alive ? [this.players[target.seat]] : [];
+        for (const v of victims) {
+          const count = Math.min(e.n, v.hand.length);
+          if (!count) continue;
+          const picks = yield* this.choose(v, 'discard', `Discard ${count} card${count > 1 ? 's' : ''}.`, v.hand.map((card) => ({ label: card.name, card })), count, count);
+          const gone = picks.map((i) => v.hand[i]);
+          for (const card of gone) {
+            v.hand.splice(v.hand.indexOf(card), 1);
+            this.toGraveyard(v, card, false);
+          }
+          this.say(`${v.name} discards ${gone.map((c) => c.name).join(', ')}.`);
+        }
+        break;
+      }
+      case 'monarch':
+        if (this.monarch !== p.seat) this.say(`${p.name} becomes the monarch.`);
+        this.monarch = p.seat;
+        break;
       case 'extraTurn':
         this.extraTurns.push(p.seat);
         this.say(`${p.name} will take an extra turn.`);
@@ -1388,6 +1524,19 @@ export class Game {
   }
 
   private *resolveRemoval(p: PlayerState, e: Extract<Effect, { kind: 'removal' }>, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    if (e.each) {
+      // Each player chooses their own creature to sacrifice, in turn order (rule 701.21).
+      for (const victim of e.each === 'all' ? this.alivePlayers() : this.opponents(p)) {
+        const creatures = victim.battlefield.filter((q) => q.card.isCreature);
+        if (!creatures.length) continue;
+        const pick = creatures.length === 1 ? [0] : yield* this.choose(victim, 'sacrifice', 'Sacrifice a creature.', creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+        const gone = creatures[pick[0] ?? 0];
+        this.say(`${victim.name} sacrifices ${gone.card.name}.`);
+        this.removePerm(gone, 'graveyard');
+        this.sacrificed(victim);
+      }
+      return;
+    }
     if (!target) return;
     const amount = e.amount === -1 ? x : e.amount;
 
@@ -1454,6 +1603,12 @@ export class Game {
     return Math.min(n, 3);
   }
 
+  gainLife(p: PlayerState, amount: number) {
+    if (amount <= 0) return;
+    p.life += amount;
+    this.fire(p, 'gainLife');
+  }
+
   loseLife(p: PlayerState, amount: number, source: PlayerState | null, kind: LossReason) {
     if (amount <= 0 || p.shielded) return;
     p.life -= amount;
@@ -1504,6 +1659,9 @@ export class Game {
   hasKw(perm: Perm, kw: string): boolean {
     if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw)) return true;
     if (!perm.card.isCreature) return false;
+    if (this.kindsInGame.has('anthem')) {
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw)) return true;
+    }
     for (const eq of this.attachments(perm)) {
       for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
     }
@@ -1592,6 +1750,7 @@ export class Game {
       let reason: LossReason | null = null;
       if (p.life <= 0) reason = p.lastHitKind;
       for (const dmg of p.commanderDamage.values()) if (dmg >= COMMANDER_DAMAGE) reason = 'commander';
+      if (p.poison >= 10) reason = 'combat';
       if (p.drewFromEmpty) reason = 'decked';
       if (reason) dying.push({ p, reason });
     }
@@ -1670,6 +1829,7 @@ export class Game {
       this.pending = this.pending.filter((t) => t.controller !== p.seat);
       for (const perm of this.allPerms()) if (perm.attacking === p.seat) perm.attacking = null;
     }
+    if (this.monarch !== null && !this.players[this.monarch].alive) this.monarch = this.alivePlayers()[0]?.seat ?? null;
     if (this.alivePlayers().length <= 1) this.over = true;
   }
 
@@ -1871,17 +2031,29 @@ export class Game {
     for (const d of toPerm) {
       d.to.damage += d.amount;
       if (this.hasKw(d.from, 'deathtouch')) d.to.deathtouched = true;
-      if (this.hasKw(d.from, 'lifelink')) this.players[d.from.seat].life += d.amount;
+      if (this.hasKw(d.from, 'lifelink')) this.gainLife(this.players[d.from.seat], d.amount);
     }
     for (const d of toPlayer) {
       if (!before.has(d.to)) before.set(d.to, d.to.life);
-      this.loseLife(d.to, d.amount, p, 'combat');
-      if (this.hasKw(d.from, 'lifelink')) p.life += d.amount;
+      // Infect: poison counters instead of life loss (rule 702.90).
+      if (this.hasKw(d.from, 'infect')) {
+        if (!d.to.shielded) {
+          d.to.poison += d.amount;
+          d.to.lastHitBy = p.seat;
+          d.to.lastHitKind = 'combat';
+          this.say(`${d.to.name} gets ${d.amount} poison (${d.to.poison} of 10).`);
+        }
+      } else this.loseLife(d.to, d.amount, p, 'combat');
+      if (this.hasKw(d.from, 'lifelink')) this.gainLife(p, d.amount);
       if (d.from.isCommander && !d.to.shielded) {
         const key = `${d.from.seat}:${d.from.card.name}`;
         d.to.commanderDamage.set(key, (d.to.commanderDamage.get(key) ?? 0) + d.amount);
       }
       hitPlayer.add(d.from);
+      if (this.monarch === d.to.seat && p.alive) {
+        this.monarch = p.seat;
+        this.say(`${p.name} becomes the monarch.`);
+      }
     }
     for (const [d, life] of before) this.say(`${d.name} takes ${life - d.life} (life ${d.life}).`);
 
@@ -1936,6 +2108,16 @@ export function matchesFilter(card: SimCard, filter: CastFilter): boolean {
 export function counterMatches(target: 'any' | 'noncreature' | 'creature', card: SimCard): boolean {
   if (target === 'any') return true;
   return target === 'creature' ? card.isCreature : !card.isCreature;
+}
+
+export function recursionMatches(what: 'any' | 'artifact' | 'enchantment' | 'instantSorcery' | undefined, card: SimCard): boolean {
+  switch (what) {
+    case 'any': return !card.isLand;
+    case 'artifact': return card.isArtifact;
+    case 'enchantment': return card.isEnchantment;
+    case 'instantSorcery': return card.isInstant || card.isSorcery;
+    default: return card.isCreature;
+  }
 }
 
 export function removalMatches(target: string, card: SimCard): boolean {

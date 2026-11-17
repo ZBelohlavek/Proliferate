@@ -710,6 +710,86 @@ describe('rules engine: abilities added for wider card coverage', () => {
   });
 });
 
+describe('rules engine: abilities found in real decks', () => {
+  it('mill puts cards from the top of a library into the graveyard', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 2);
+    const size = b.library.length;
+    a.hand.push(spell('Mind Sculpt', '{1}{G}', 2, 'Sorcery', 'Target opponent mills seven cards.'));
+    const once = castOnce('Mind Sculpt');
+    t.handlers[0] = (g, d) => (d.kind === 'target' ? { kind: 'player', seat: 1 } : once(g, d));
+    t.until(() => b.graveyard.length >= 7);
+    expect(b.graveyard).toHaveLength(7);
+    expect(t.game.log!.join('\n')).toContain(`mills 7 cards (${size - 7} left)`);
+  });
+
+  it('scry lets you put cards on the bottom', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 1);
+    const [first, second] = a.library;
+    a.hand.push(spell('Foresight', '{G}', 1, 'Sorcery', 'Scry 2.'));
+    const once = castOnce('Foresight');
+    t.handlers[0] = (g, d) => (d.kind === 'choose' && d.reason === 'scry' ? [0] : once(g, d));
+    t.until(() => a.graveyard.length === 1);
+    expect(a.library[0]).toBe(second);
+    expect(a.library[a.library.length - 1]).toBe(first);
+  });
+
+  it('infect gives poison counters instead of dealing damage, and ten lose the game', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    t.game.put(0, vanilla('Plague Giant', 10, 10, ['Infect']));
+    t.handlers[0] = attackAll(1);
+    t.until((g) => g.over);
+    expect(b.alive).toBe(false);
+    expect(b.life).toBe(40);
+    expect(b.poison).toBe(10);
+  });
+
+  it('an additional cost must be paid: no creature to sacrifice, no spell', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 2);
+    const rites = spell('Village Rites', '{G}', 1, 'Instant', 'As an additional cost to cast this spell, sacrifice a creature.\nDraw two cards.');
+    a.hand.push(rites);
+    expect(t.game.legalActions(a).some((x) => x.type === 'cast')).toBe(false);
+    t.game.put(0, bears());
+    t.handlers[0] = castOnce('Village Rites');
+    t.until(() => a.graveyard.length === 2);
+    expect(a.graveyard.map((c) => c.name).sort()).toEqual(['Grizzly Bears', 'Village Rites']);
+    expect(a.hand).toHaveLength(2);
+  });
+
+  it('Laboratory Maniac wins instead of losing to an empty library', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.game.put(0, creature('Laboratory Maniac', '{2}{G}', 3, 2, 2, { text: 'If you would draw a card while your library has no cards in it, you win the game instead.' }));
+    a.library.length = 0;
+    t.until((g) => g.over);
+    expect(t.game.winner).toBe(0);
+  });
+
+  it('spells that are free with a commander out cost nothing then', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const free = spell('Fierce Guardianship', '{2}{G}', 3, 'Instant', 'If you control a commander, you may cast this spell without paying its mana cost.\nCounter target noncreature spell.');
+    expect(t.game.effectiveCost(a, free)).toBe(3);
+    t.game.put(0, bears(), { commander: true });
+    expect(t.game.effectiveCost(a, free)).toBe(0);
+  });
+
+  it('"creatures you control have lifelink" reaches every creature you control', () => {
+    const t = new Table();
+    t.game.put(0, spell('Whip', '{2}{G}{G}', 4, 'Enchantment', 'Creatures you control have lifelink.'));
+    const mine = t.game.put(0, bears());
+    const theirs = t.game.put(1, bears());
+    expect(t.game.hasKw(mine, 'lifelink')).toBe(true);
+    expect(t.game.hasKw(theirs, 'lifelink')).toBe(false);
+  });
+});
+
 describe('playing against bots', () => {
   it('stops for the person and lets bots play the rest', () => {
     const decks = ['me', 'b1', 'b2', 'b3'].map((id) => toolboxDeck(id));
