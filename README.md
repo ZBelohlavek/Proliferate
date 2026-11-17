@@ -59,9 +59,9 @@ On a sample of 167 widely played Commander cards (`tests/staples.ts`) all but fo
 
 - Text the classifier doesn't recognise does nothing; a card with no recognised text is marked **no effect**. A card can also be read in part, for example a creature that keeps its body and one of its two abilities.
 - Mana is paid automatically, and mana doesn't float between spells. Ritual mana is kept as Treasures.
-- Planeswalkers can't be attacked and use only their first plus ability.
+- Planeswalkers use one loyalty ability a turn and leave at zero loyalty, but they can't be attacked or damaged, and ultimates that make emblems aren't read.
 - Tribal wording ("whenever a Dragon you control attacks") counts every creature you control. A stolen creature stays stolen even if the Aura that took it leaves. An attack tax is paid automatically when the attacker can afford it.
-- Not yet read: cycling, flashback, overload, storm, crew, ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, planeswalker minus abilities, goad, cast-from-exile and copy effects, redirecting targets, and power and toughness that count something.
+- Not yet read: cycling, flashback, overload, storm, crew, ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, goad, cast-from-exile and copy effects, redirecting targets, and power and toughness that count something.
 - "If" conditions it can't read are treated as true about half the time; ward costs {2}.
 
 That makes the built-in simulator a quick estimate. Forge remains the reference for final numbers.

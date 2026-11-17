@@ -38,6 +38,7 @@ export type Trigger =
   | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
   | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
+  | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -58,6 +59,8 @@ export type Effect = EffectBody & {
   minCmc?: number;
   /** Conditional ("if ...") triggers: probability the condition holds. */
   chance?: number;
+  /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
+  loyalty?: number;
   /** Creature-enters triggers that only watch nontoken creatures. */
   nontoken?: boolean;
   /** "Do this only once each turn." */
@@ -162,6 +165,8 @@ export interface SimCard {
   land?: LandInfo;
   /** X-cost creature that enters with X +1/+1 counters (Hangarback Walker, Stonecoil Serpent). */
   entersWithX?: boolean;
+  /** Planeswalkers: loyalty counters it enters with. */
+  loyalty?: number;
   /** Doesn't untap during its controller's untap step (Basalt Monolith, Mana Vault). */
   noUntap?: boolean;
   /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */

@@ -354,6 +354,26 @@ export class Bot implements Agent {
   }
 
   private chooseAbility(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    // Planeswalkers: a minus ability worth using now, otherwise the biggest plus.
+    const loyal = actions.filter((a): a is Extract<Action, { type: 'activate' }> => a.type === 'activate' && a.effect.when === 'loyalty');
+    if (loyal.length) {
+      const worth = (a: Extract<Action, { type: 'activate' }>) => {
+        const e = a.effect;
+        if (e.kind === 'removal') {
+          const t = this.removalTarget(g, p, e, 0, g.targetCandidates(p, e, g.findPerm(a.permId)) ?? []);
+          return !!t && t.score >= 4;
+        }
+        if (e.kind === 'wipe') return this.wipeIsGood(g, p, e, 0);
+        if (e.kind === 'recursion') return p.graveyard.some((c) => recursionMatches(e.what, c));
+        return e.kind !== 'gainLife' && e.kind !== 'scry';
+      };
+      const minus = loyal.filter((a) => (a.effect.loyalty ?? 0) < 0 && worth(a)).sort((x, y) => (x.effect.loyalty ?? 0) - (y.effect.loyalty ?? 0))[0];
+      const plus = loyal.filter((a) => (a.effect.loyalty ?? 0) >= 0).sort((x, y) => (y.effect.loyalty ?? 0) - (x.effect.loyalty ?? 0))[0];
+      const perm = minus ? g.findPerm(minus.permId) : null;
+      // Keep at least one loyalty unless the ability is removal that matters.
+      if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe')) return minus;
+      if (plus) return plus;
+    }
     return actions.find((a) => {
       if (a.type !== 'activate' || a.effect.kind === 'equip') return false;
       const perm = g.findPerm(a.permId);

@@ -844,4 +844,28 @@ describe('playing against bots', () => {
     expect(me.battlefield.every((q) => !q.tapped)).toBe(true);
     expect(session.pending?.kind).toBe('priority');
   });
+  it('a planeswalker uses one loyalty ability a turn and dies at zero loyalty', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    const walker = spell('Test Walker', '{G}', 1, 'Planeswalker', '+1: You gain 2 life.\n-3: Destroy target creature.', { loyalty: '3' });
+    expect(walker.loyalty).toBe(3);
+    const perm = t.game.put(0, walker);
+    t.game.put(1, bears());
+    let used = 0;
+    let offered = 0;
+    t.handlers[0] = (_g, d) => {
+      if (d.kind !== 'priority' || used) return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'activate' && x.effect.loyalty === -3);
+      if (i === -1) return undefined;
+      offered = d.actions.filter((x) => x.type === 'activate' && x.effect.when === 'loyalty').length;
+      used++;
+      return { action: i };
+    };
+    t.until(() => b.graveyard.length === 1);
+    expect(offered).toBe(2);
+    expect(b.graveyard[0].name).toBe('Grizzly Bears');
+    expect(a.battlefield).not.toContain(perm);
+    expect(a.graveyard.map((c) => c.name)).toContain('Test Walker');
+    expect(t.game.log!.join('\n')).toContain('runs out of loyalty');
+  });
 });

@@ -54,6 +54,10 @@ export interface Perm {
   isCommander: boolean;
   /** +1/+1 counters. */
   counters: number;
+  /** Planeswalkers: loyalty counters. */
+  loyalty?: number;
+  /** Planeswalkers: a loyalty ability was activated this turn (rule 606.3). */
+  loyaltyUsed?: boolean;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;

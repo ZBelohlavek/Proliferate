@@ -35,6 +35,7 @@ export function archidektToRaw(oc: any, uid?: string): RawCard {
     colorIdentity: (oc.colorIdentity ?? []).map((c: string) => COLOR_NAMES[c]).filter(Boolean),
     producedMana: produced.length ? produced : undefined,
     layout: oc.layout,
+    loyalty: front.loyalty ?? oc.loyalty ?? null,
     back: back ? { name: back.name, types: back.types ?? [], subTypes: back.subTypes ?? [], text: back.text ?? '' } : null,
     imageUrl: uid ? `https://cards.scryfall.io/normal/front/${uid[0]}/${uid[1]}/${uid}.jpg` : undefined,
   };

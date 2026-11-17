@@ -35,6 +35,8 @@ export interface RawCard {
   /** Mana a land can produce, if the data source tells us. */
   producedMana?: Mana[];
   layout?: string;
+  /** Printed loyalty of a planeswalker. */
+  loyalty?: string | number | null;
   back?: { name: string; types: string[]; subTypes: string[]; text: string } | null;
   imageUrl?: string;
 }
@@ -479,6 +481,7 @@ interface LineContext {
   chance?: number;
   oncePerTurn?: boolean;
   nontoken?: boolean;
+  loyalty?: number;
 }
 
 function detectTrigger(line: string, isPermanent: boolean): LineContext {
@@ -525,8 +528,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^when ~ dies[^,]*,\s*(.*)$/))) return { when: 'creatureDies', scope: 'self', body: m[1] };
 
   // Planeswalker loyalty abilities: treat the first + or 0 ability as a per-turn effect.
-  if ((m = l.match(/^(\+\d+|0): (.*)$/))) return { when: 'upkeep', body: m[2] };
-  if (/^-\d+: /.test(l)) return { when: 'static', body: '' };
+  if ((m = l.match(/^([+-]?\d+): (.*)$/))) return { when: 'loyalty', loyalty: parseInt(m[1], 10), body: m[2] };
+  if (/^-x: /.test(l)) return { when: 'static', body: '' };
 
   // Activated abilities: "COST: EFFECT" where cost is mana/tap symbols.
   const COST_PART = '(?:(?:\\{[^}]+\\})+|sacrifice ~|sacrifice (?:a|an|another) creature|pay \\d+ life)';
@@ -730,6 +733,12 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes[card.notes.length - 1] += ' (modal)';
   }
 
+  if (card.isPlaneswalker) {
+    const printed = parseInt(String(raw.loyalty ?? ''), 10);
+    // Importers that don't report loyalty: it is usually close to the mana value.
+    card.loyalty = Number.isNaN(printed) ? Math.max(3, Math.min(raw.cmc, 6)) : printed;
+    card.notes.unshift(`Planeswalker, loyalty ${card.loyalty}`);
+  }
   if (!isLand && isPermanent && /^~ enters tapped\.?$/m.test(text)) {
     card.entersTapped = true;
     card.notes.push('Enters tapped');
@@ -831,6 +840,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.chance) effect.chance = ctx.chance;
   if (ctx.oncePerTurn) effect.oncePerTurn = true;
   if (ctx.nontoken) effect.nontoken = true;
+  if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
   if (ctx.when === 'activated') {
     if (!ctx.activationCost) return;
     effect.activation = { cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}) };
@@ -869,6 +879,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'permEnters': return `When an ${ctx.castFilter} enters under your control: `;
     case 'gainLife': return 'When you gain life: ';
     case 'activated': return 'Activated: ';
+    case 'loyalty': return `${(ctx.loyalty ?? 0) > 0 ? '+' : ''}${ctx.loyalty}: `;
     default: return '';
   }
 }

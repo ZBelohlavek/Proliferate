@@ -284,6 +284,7 @@ export class Game {
       for (const perm of q.battlefield) {
         perm.usedThisTurn = [];
         perm.activations = 0;
+        perm.loyaltyUsed = false;
       }
     }
     p.landsPlayed = 0;
@@ -489,6 +490,13 @@ export class Game {
       if (e.aura || !sorcery) return false;
       if (!p.battlefield.some((q) => q.card.isCreature && q.id !== perm.attachedTo && q !== perm)) return false;
       return this.planPayment(p, e.cost ?? DEFAULT_EQUIP, 0, 0) !== null;
+    }
+    if (e.when === 'loyalty') {
+      // One loyalty ability per planeswalker per turn, at sorcery speed (rule 606.3).
+      if (!sorcery || perm.loyaltyUsed || perm.loyalty === undefined) return false;
+      if ((e.loyalty ?? 0) < 0 && perm.loyalty < -(e.loyalty ?? 0)) return false;
+      const targets = this.targetCandidates(p, e, perm);
+      return targets === null || targets.length > 0;
     }
     if (e.when !== 'activated' || !e.activation) return false;
     const act = e.activation;
@@ -937,6 +945,19 @@ export class Game {
       return true;
     }
 
+    if (e.when === 'loyalty') {
+      let aim: Target | null = null;
+      const options = this.targetCandidates(p, e, perm);
+      if (options !== null) {
+        aim = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(perm.card, e), card: perm.card, effect: e, candidates: options, cancellable: true });
+        if (!aim || !options.some((c) => sameTarget(c, aim!))) return false;
+      }
+      perm.loyalty = (perm.loyalty ?? 0) + (e.loyalty ?? 0);
+      perm.loyaltyUsed = true;
+      this.say(`${p.name} uses ${perm.card.name} (${(e.loyalty ?? 0) > 0 ? '+' : ''}${e.loyalty}, loyalty ${perm.loyalty})${aim ? ` targeting ${this.describeTarget(aim)}` : ''}.`);
+      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e], targets: [aim], x: 0, isCommander: false, sourceId: perm.id, attachTo: null, label: `${perm.card.name} ability` });
+      return true;
+    }
     const act = e.activation!;
     let target: Target | null = null;
     const all = this.targetCandidates(p, e, perm);
@@ -1130,6 +1151,7 @@ export class Game {
       id: this.nextId++, card, seat: p.seat, tapped: false, sick: true, token, isCommander: false,
       counters: 0, damage: 0, deathtouched: false, tempP: 0, tempT: 0, tempKw: [],
       attachedTo: null, activations: 0, usedThisTurn: [], attacking: null, blocked: false, blocking: null,
+      ...(card.loyalty !== undefined ? { loyalty: card.loyalty } : {}),
     };
   }
 
@@ -1777,6 +1799,12 @@ export class Game {
           } else {
             perm.deathtouched = false;
           }
+        }
+        // 704.5i: a planeswalker with no loyalty is put into its owner's graveyard.
+        if (perm.loyalty !== undefined && perm.loyalty <= 0 && q.battlefield.includes(perm)) {
+          this.say(`${perm.card.name} (${q.name}) runs out of loyalty.`);
+          this.removePerm(perm, 'graveyard');
+          changed = true;
         }
         if (perm.attachedTo !== null && !this.findPerm(perm.attachedTo)) {
           perm.attachedTo = null;
