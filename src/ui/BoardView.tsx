@@ -11,7 +11,7 @@ interface Preview {
 }
 
 /** Hover any card to see it large. */
-function usePreview() {
+export function usePreview() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const bind = (url: string | null) =>
     url
@@ -121,7 +121,7 @@ function HandCard({ c, bind }: { c: HandCardView; bind: Bind }) {
 }
 
 /** A card image, or a plain frame with the name for tokens / missing images. */
-function CardFace({ name, imageUrl, pt, token, big, ...handlers }: { name: string; imageUrl: string | null; pt: string | null; token?: boolean; big?: boolean } & object) {
+export function CardFace({ name, imageUrl, pt, token, big, ...handlers }: { name: string; imageUrl: string | null; pt: string | null; token?: boolean; big?: boolean } & object) {
   const [failed, setFailed] = useState(false);
   return (
     <div className={`card-face ${big ? 'big' : ''}`} {...handlers}>

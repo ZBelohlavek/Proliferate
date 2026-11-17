@@ -152,7 +152,7 @@ function CardSection({ deck, stats }: { deck: SimDeck; stats: Stats }) {
     <section className="panel">
       <div className="panel-head">
         <h2>Card performance <Help>
-          Which cards pull their weight compared with the rest of this deck, from Forge games.
+          Which cards pull their weight compared with the rest of this deck, from simulated games.
           <br /><br /><strong>Impact</strong> — how much better (+) or worse (−) the deck finishes in games where it cast the card, compared with a typical card in the same deck. Finish score runs from 100 (won) to 0 (first out). The bar is the 95% range: the true value is very probably inside it.
           <br /><br /><strong>Weak / Strong</strong> — the whole range is below / above the deck&apos;s typical card, so the difference is real, not luck.
           <br /><strong>About average</strong> — the range includes zero.

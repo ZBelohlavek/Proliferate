@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { SimDeck } from './engine/types';
 import { ForgeController } from './sim/forgeController';
+import { BUILTIN_MAX_ROUNDS, BuiltinController } from './sim/builtinController';
 import { emptyStats } from './sim/stats';
 import {
-  loadDecks, loadSelected, loadSettings, loadStats,
-  saveDecks, saveSelected, saveSettings, saveStats, type Settings,
+  loadBuiltinStats, loadDecks, loadSelected, loadSettings, loadStats,
+  saveBuiltinStats, saveDecks, saveSelected, saveSettings, saveStats, type Settings,
 } from './storage';
 import { ImportPanel } from './ui/ImportPanel';
 import { DeckList } from './ui/DeckList';
@@ -13,10 +14,11 @@ import { SampleGame } from './ui/SampleGame';
 import { ComparePanel } from './ui/ComparePanel';
 import { DeckReport } from './ui/DeckReport';
 import { PlaystylePanel } from './ui/PlaystylePanel';
+import { PlayPanel } from './ui/PlayPanel';
 import { useForgeCheck } from './ui/useForgeCheck';
 import { loadProfileAnswers, profileOverrides, saveProfileAnswers, type ProfileAnswer } from './ai/forgeProfile';
 
-type Tab = 'decks' | 'simulate' | 'compare' | 'report' | 'playstyle' | 'watch';
+type Tab = 'decks' | 'play' | 'simulate' | 'compare' | 'report' | 'playstyle' | 'watch';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('decks');
@@ -42,6 +44,16 @@ export default function App() {
     return () => forge.stopPolling();
   }, [forge]);
 
+  // Proliferate's own engine runs in this page's Web Workers.
+  const builtinRef = useRef<BuiltinController | null>(null);
+  if (!builtinRef.current) builtinRef.current = new BuiltinController(loadBuiltinStats(), saveBuiltinStats);
+  const builtin = builtinRef.current;
+  useEffect(() => throttledSubscribe(builtin, rerender), [builtin]);
+  useEffect(() => () => builtin.stop(), [builtin]);
+  const useBuiltin = settings.engine === 'builtin';
+  /** Results of whichever engine is selected; the two are never mixed. */
+  const stats = useBuiltin ? builtin.stats : forge.stats;
+
   useEffect(() => saveDecks(decks), [decks]);
   useEffect(() => saveSelected(selected), [selected]);
   useEffect(() => saveSettings(settings), [settings]);
@@ -62,6 +74,19 @@ export default function App() {
     setSelected((s) => (on ? [...new Set([...s, ...ids])] : s.filter((x) => !ids.includes(x))));
 
   const startSim = () => {
+    if (useBuiltin) {
+      builtin.start(activeDecks, {
+        podSize: settings.podSize,
+        pairing: settings.pairing,
+        workers: settings.builtinWorkers,
+        maxRounds: BUILTIN_MAX_ROUNDS,
+        limit: {
+          stopAt: settings.runMode === 'time' ? Date.now() + settings.runMinutes * 60_000 : null,
+          maxGames: settings.runMode === 'games' ? settings.runGames : null,
+        },
+      });
+      return;
+    }
     void forge.start(activeDecks, {
       // Players per game: 2–6, or 0 for mixed sizes (capped at 6 and at the number of decks).
       podSize: settings.podSize,
@@ -77,7 +102,18 @@ export default function App() {
       maxGames: settings.runMode === 'games' ? settings.runGames : null,
     });
   };
+  const stopSim = () => {
+    if (useBuiltin) builtin.stop();
+    else void forge.stop();
+  };
   const resetStats = () => {
+    if (useBuiltin) {
+      builtin.stop();
+      builtin.stats = emptyStats();
+      saveBuiltinStats(builtin.stats);
+      rerender();
+      return;
+    }
     void forge.stop();
     forge.stats = emptyStats();
     forge.resetCursor();
@@ -95,7 +131,8 @@ export default function App() {
     if (key === previousSelection.current) return;
     previousSelection.current = key;
     if (forge.running) void forge.stop();
-  }, [selected, forge]);
+    if (builtin.running) builtin.stop();
+  }, [selected, forge, builtin]);
 
   // Which cards Forge doesn't know or plays poorly, per deck (null when Forge isn't available).
   const forgeCheck = useForgeCheck(decks, !!forge.status?.available);
@@ -107,15 +144,18 @@ export default function App() {
           <span className="logo">⟳</span>
           <div>
             <h1>Proliferate</h1>
-            <p>EDH deck simulator · powered by Forge</p>
+            <p>Play and simulate Commander decks</p>
           </div>
         </div>
         <nav className="tabs">
           <button className={tab === 'decks' ? 'active' : ''} onClick={() => setTab('decks')}>
             Decks <span className="badge">{decks.length}</span>
           </button>
+          <button className={tab === 'play' ? 'active' : ''} onClick={() => setTab('play')}>
+            Play
+          </button>
           <button className={tab === 'simulate' ? 'active' : ''} onClick={() => setTab('simulate')}>
-            Simulate {forge.running && <span className="live-dot" />}
+            Simulate {(forge.running || builtin.running) && <span className="live-dot" />}
           </button>
           <button className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}>
             Compare
@@ -159,24 +199,26 @@ export default function App() {
             )}
           </>
         )}
+        {tab === 'play' && <PlayPanel decks={decks} />}
         {tab === 'simulate' && (
           <SimPanel
             decks={decks}
             activeDecks={activeDecks}
             forge={forge}
+            builtin={builtin}
             forgeCheck={forgeCheck}
             profileAnswers={answers.length}
             onUnselect={(ids) => setDecksSelected(ids, false)}
             settings={settings}
             onSettings={setSettings}
             onStart={startSim}
-            onStop={() => void forge.stop()}
+            onStop={stopSim}
             onReset={resetStats}
             onOpenPlaystyle={() => setTab('playstyle')}
           />
         )}
-        {tab === 'compare' && <ComparePanel decks={decks} selected={selected} stats={forge.stats} onOpenReport={openReport} />}
-        {tab === 'report' && <DeckReport decks={decks} deckId={reportDeck} onDeck={setReportDeck} stats={forge.stats} />}
+        {tab === 'compare' && <ComparePanel decks={decks} selected={selected} stats={stats} onOpenReport={openReport} />}
+        {tab === 'report' && <DeckReport decks={decks} deckId={reportDeck} onDeck={setReportDeck} stats={stats} />}
         {tab === 'playstyle' && (
           <PlaystylePanel
             decks={decks}
@@ -188,11 +230,11 @@ export default function App() {
             onUseProfile={(on) => setSettings((s) => ({ ...s, aiProfile: on ? 'You' : 'Default' }))}
           />
         )}
-        {tab === 'watch' && <SampleGame allDecks={decks} forge={forge} />}
+        {tab === 'watch' && <SampleGame allDecks={decks} activeDecks={activeDecks} forge={forge} builtin={builtin} podSize={settings.podSize} useBuiltin={useBuiltin} />}
       </main>
 
       <footer>
-        Games are played by <a href="https://github.com/Card-Forge/forge">Forge</a>, the open-source Magic rules engine. Card data from{' '}
+        Games are played by Proliferate&apos;s own engine or by <a href="https://github.com/Card-Forge/forge">Forge</a>, the open-source Magic rules engine. Card data from{' '}
         <a href="https://archidekt.com">Archidekt</a> and <a href="https://scryfall.com">Scryfall</a>. Proliferate is unofficial Fan Content permitted
         under the Wizards of the Coast Fan Content Policy. Decks and results are stored only in this browser.
       </footer>

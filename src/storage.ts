@@ -7,8 +7,9 @@ import { DEFAULT_PLAYERS, sanitizePodSize } from './sim/pods';
 
 const KEYS = {
   decks: 'proliferate.decks.v1',
-  // Forge results. (Older versions also had a separate quick-engine key, no longer used.)
+  // Results are kept per engine: the two play differently, so their numbers don't mix.
   stats: 'proliferate.stats.forge.v1',
+  builtinStats: 'proliferate.stats.builtin.v1',
   selected: 'proliferate.selected.v1',
   settings: 'proliferate.settings.v1',
 };
@@ -41,6 +42,8 @@ export const loadDecks = () => read<SimDeck[]>(KEYS.decks, []);
 export const saveDecks = (decks: SimDeck[]) => write(KEYS.decks, decks);
 export const loadStats = () => read<Stats>(KEYS.stats, emptyStats());
 export const saveStats = (stats: Stats) => write(KEYS.stats, stats);
+export const loadBuiltinStats = () => read<Stats>(KEYS.builtinStats, emptyStats());
+export const saveBuiltinStats = (stats: Stats) => write(KEYS.builtinStats, stats);
 export const loadSelected = () => read<string[] | null>(KEYS.selected, null);
 export const saveSelected = (ids: string[]) => write(KEYS.selected, ids);
 
@@ -48,6 +51,13 @@ export const saveSelected = (ids: string[]) => write(KEYS.selected, ids);
 export type AiProfileChoice = 'Default' | 'Cautious' | 'Reckless' | 'Experimental' | 'You' | 'Mixed';
 
 export interface Settings {
+  /**
+   * Which simulator plays the games: Forge (full rules, on your computer) or
+   * Proliferate's built-in engine (in the browser, approximate card text).
+   */
+  engine: 'forge' | 'builtin';
+  /** Parallel workers for the built-in engine. */
+  builtinWorkers: number;
   podSize: number;
   /** Parallel Forge processes. */
   forgeWorkers: number;
@@ -68,6 +78,8 @@ export interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  engine: 'forge',
+  builtinWorkers: Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)),
   podSize: DEFAULT_PLAYERS,
   // Forge's AI is multithreaded; beyond ~1 process per 4 threads games just slow each other down.
   forgeWorkers: Math.max(1, Math.min(8, Math.floor((navigator.hardwareConcurrency || 4) / 4))),
@@ -93,6 +105,8 @@ export const loadSettings = (): Settings => {
   }
   s.podSize = sanitizePodSize(s.podSize);
   if (!PROFILES.includes(s.aiProfile)) s.aiProfile = 'Default';
+  if (s.engine !== 'builtin') s.engine = 'forge';
+  s.builtinWorkers = Math.min(16, Math.max(1, Math.floor(Number(s.builtinWorkers)) || 1));
   s.gamesPerLaunch = Math.min(5, Math.max(1, Math.floor(Number(s.gamesPerLaunch)) || 2));
   return s;
 };

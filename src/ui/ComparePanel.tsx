@@ -104,7 +104,7 @@ export function ComparePanel({ decks, selected, stats, onOpenReport }: Props) {
                 {row('Two-card combos', (d) => states[d.id]?.data ? states[d.id].data!.combos.filter((c) => c.twoCard).length : '…', 'Known two-card game-ending combos in the deck, from Commander Spellbook. These aren\'t expected in Brackets 1–2.')}
                 {row('Commander Spellbook', (d) => (states[d.id]?.data ? <SpellbookTag tag={states[d.id].data!.spellbookTag} /> : '…'), "Commander Spellbook's own power label, based on the strongest combo in the deck. Their scale, not the official brackets — click the ⓘ next to a label to see what it means.")}
 
-                {section('Simulation results (Forge)')}
+                {section('Simulation results')}
                 {row('Rating', (d) => sim(stats, ratings, d, 'rating'))}
                 {row('Win rate', (d) => sim(stats, ratings, d, 'win'))}
                 {row('Avg place', (d) => sim(stats, ratings, d, 'place'))}
@@ -132,7 +132,7 @@ export function ComparePanel({ decks, selected, stats, onOpenReport }: Props) {
                 {row('Tutors', comp('tutors'))}
                 {row('Protection', comp('protection'))}
 
-                {section('Cards (when cast in Forge games) — open the full report for details')}
+                {section('Cards (when cast in simulated games) — open the full report for details')}
                 {row('Weakest', (d) => <CardList deck={d} stats={stats} which="weak" />)}
                 {row('Strongest', (d) => <CardList deck={d} stats={stats} which="strong" />)}
                 {row('', (d) => <button onClick={() => onOpenReport(d.id)}>Full report →</button>)}
