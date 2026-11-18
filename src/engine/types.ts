@@ -39,13 +39,17 @@ export type Trigger =
   | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
   | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
+  | 'surveil' // you surveil
+  | 'countered' // a spell or ability you control counters a spell
+  | 'dieRoll' // you roll a die (see Effect.minRoll)
+  | 'opponentMonarch' // an opponent becomes the monarch
   | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
   | 'turnedFaceUp' // this face-down permanent is turned face up
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
-/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. */
-export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all';
+/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
+export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate';
 
@@ -67,6 +71,8 @@ export type Effect = EffectBody & {
   nontoken?: boolean;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
+  /** Die-roll triggers: the lowest result that counts ("whenever you roll a 4 or higher"). */
+  minRoll?: number;
   /** Cast triggers: only on the caster's first, second, ... spell of the turn ("their second spell each turn"). */
   nth?: number;
   /** Cast triggers: only during the caster's own turn, or only during someone else's ("during each opponent's turn"). */
@@ -93,17 +99,18 @@ export type EffectBody =
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** "Other creatures you control": not the source itself. */ other?: boolean }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
-  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[] }
+  /** self: the source itself ("~ gains haste until end of turn"), no target. */
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
   | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
   | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
-  | { kind: 'drain'; n: number; gain: number }
+  | { kind: 'drain'; n: number; gain: number; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
@@ -111,9 +118,11 @@ export type EffectBody =
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
   /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
-  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean }
+  /** byExperience: onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean; byExperience?: boolean }
   /** proliferate: only creatures that already have a counter. */
-  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
+  /** byExperience: as many counters as you have experience counters (Kratos). */
+  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean; byExperience?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
   /**
@@ -159,7 +168,27 @@ export type EffectBody =
   /** Laboratory Maniac: drawing from an empty library wins the game instead. */
   | { kind: 'winOnEmptyDraw' }
   /** You become the monarch: draw a card at each of your end steps until someone takes it by combat damage. */
-  | { kind: 'monarch' }
+  | { kind: 'monarch'; /** Garland: a target opponent becomes the monarch instead. */ opponent?: boolean }
+  /** You get an experience counter. */
+  | { kind: 'experience' }
+  /** Put a stun counter on an opponent's nonland permanent (its next untap doesn't happen). */
+  | { kind: 'stun' }
+  /** Mathas: a bounty counter on an opponent's creature; when it dies, its controller's opponents each draw 1 and gain 2. */
+  | { kind: 'bounty' }
+  /** Korvold: sacrifice another permanent (part of the trigger, not optional). */
+  | { kind: 'sacrificeOther' }
+  /** Roll this many six-sided dice; each result fires your die-roll triggers. */
+  | { kind: 'rollDice'; n: number }
+  /** The source has a keyword while a condition holds. */
+  | { kind: 'selfKeyword'; keyword: string; cond: 'halfLife' | 'yourTurn' }
+  /** Satya: a token copy of another nontoken creature you control, tapped and attacking; sacrificed at the next end step unless you pay energy equal to its mana value. */
+  | { kind: 'copyCreature'; temporary: boolean }
+  /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
+  | { kind: 'enterCounters'; n: number }
+  /** Kudo: other creatures have this base power and toughness. */
+  | { kind: 'baseSize'; p: number; t: number }
+  /** You get this many energy counters. */
+  | { kind: 'energy'; n: number }
   /**
    * Manifest (rule 701.40): put the top card of a library onto the battlefield face down as a 2/2.
    * who: 'you'; 'targetController', the controller of what the previous part of the ability hit

@@ -60,6 +60,10 @@ export interface Perm {
   loyaltyUsed?: boolean;
   /** Stun counters: each replaces one untap. */
   stun?: number;
+  /** Mathas's bounty counter. */
+  bounty?: boolean;
+  /** A temporary token copy (Satya): sacrificed at the next end step unless its controller pays energy. */
+  temporary?: boolean;
   /**
    * A merged permanent (mutate, rule 721): its cards from top to bottom. `card` is then the
    * top card's characteristics plus every card's abilities. `real` is null for a token.
@@ -114,6 +118,12 @@ export interface PlayerState {
   /** Combat damage taken from each commander, keyed by "seat:name" (rule 903.10a). */
   commanderDamage: Map<string, number>;
   treasures: number;
+  /** Turn number on which this player last lost life (Gev). */
+  lostLifeTurn: number;
+  /** Experience counters (Meren, Kratos). */
+  experience: number;
+  /** Energy counters (Satya). */
+  energy: number;
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
