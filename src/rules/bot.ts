@@ -583,7 +583,8 @@ export class Bot implements Agent {
         if (!perm || perm.seat === p.seat || !removalMatches(e.target, perm.card)) continue;
         if (e.mode === 'destroy' && g.hasKw(perm, 'indestructible')) continue;
         if (e.mode === 'damage' && amount < g.toughness(perm) - perm.damage) continue;
-        if (e.mode === 'damage' && g.hasKw(perm, 'indestructible')) continue;
+        // -N/-N kills through indestructible; damage doesn't.
+        if (e.mode === 'damage' && !e.shrink && g.hasKw(perm, 'indestructible')) continue;
         if (e.mode === 'fight' && (!fighter || (g.power(fighter) < g.toughness(perm) - perm.damage && !g.hasKw(fighter, 'deathtouch')))) continue;
         const leader = boardThreat(g, g.players[perm.seat]) > 15 ? 1.2 : 1;
         score = threat(g, perm) * leader;
@@ -600,7 +601,7 @@ export class Bot implements Agent {
     const affects = (perm: Perm) => {
       if (perm.card.isLand) return false;
       if (creaturesOnly && !perm.card.isCreature) return false;
-      if (e.mode === 'damage') return perm.card.isCreature && (e.amount === -1 ? x : e.amount) >= g.toughness(perm);
+      if (e.mode === 'damage') return perm.card.isCreature && (e.amount === -1 ? x : e.amount) >= g.toughness(perm) && (!!e.shrink || !g.hasKw(perm, 'indestructible'));
       if (e.mode === 'destroy' && g.hasKw(perm, 'indestructible')) return false;
       return true;
     };

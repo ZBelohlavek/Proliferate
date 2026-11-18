@@ -255,9 +255,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   } else if (/return all (nonland permanents|creatures)( [^.]*)? to their owners'? hands/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'bounce', amount: 0, oneSided: /you don't control|opponents control/.test(line) }, note: 'Mass bounce' });
   } else if ((m = line.match(/(all creatures|each other creature|each creature|creatures your opponents control|creatures you don't control) gets? -(\d+|x)\/-(\d+|x)/))) {
-    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[3], 2), oneSided: /opponents|don't/.test(m[1]) }, note: 'Shrink sweeper' });
+    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[3], 2), oneSided: /opponents|don't/.test(m[1]), shrink: 'temp' }, note: 'Shrink sweeper' });
   } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on each creature( target player controls| your opponents control| you don't control)?`)))) {
-    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[1], 1), oneSided: !!m[2] }, note: 'Shrink sweeper (-1/-1 counters)' });
+    out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[1], 1), oneSided: !!m[2], shrink: 'counters' }, note: 'Shrink sweeper (-1/-1 counters)' });
   } else if (/each player sacrifices all (colored )?(permanents|nonland permanents)/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'nonland', mode: 'destroy', amount: 0, oneSided: false }, note: 'Mass sacrifice (permanents)' });
   } else if (/each (player|opponent) sacrifices (all|each) creatures?/.test(line)) {
@@ -293,10 +293,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
         const each = /each (opponent|other)/.test(m[1]) ? 'opponents' as const : m[1] === 'each player' ? 'all' as const : undefined;
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'edict', amount: 0, ...(each ? { each } : {}) }, note: each === 'all' ? 'Each player sacrifices a creature' : each ? 'Each opponent sacrifices a creature' : 'Edict' });
       } else if ((m = line.match(/target creature( an opponent controls| you don't control)? gets -(\d+|x)\/-(\d+|x)/))) {
-        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount: num(m[3], 3) }, note: 'Shrink removal' });
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount: num(m[3], 3), shrink: 'temp' }, note: 'Shrink removal' });
       } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on (up to one )?target creature`)))) {
         const amount = num(m[1], 1);
-        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount }, note: `Shrink removal (${amount === -1 ? 'X' : amount} -1/-1 counters)` });
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, shrink: 'counters' }, note: `Shrink removal (${amount === -1 ? 'X' : amount} -1/-1 counters)` });
       }
     }
   }
@@ -349,11 +349,13 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
       const size = scale === 'creatures' ? 'your creature count' : scale === 'power' ? 'your greatest power' : p === -1 ? 'X' : String(p);
       out.push({ body: { kind: 'overrun', p, t, trample: /trample/.test(line), ...(scale ? { scale } : {}) }, note: scale || p === -1 ? `Team pump +X/+X this turn (X = ${size})` : `Team pump +${p}/+${t} this turn` });
     } else if (card.isPermanent) {
-      out.push({ body: { kind: 'anthem', p, t }, note: `Anthem +${p}/+${t}` });
+      const other = !!m[1] || /^other /.test(m[2]);
+      out.push({ body: { kind: 'anthem', p, t, ...(other ? { other } : {}) }, note: `Anthem +${p}/+${t}${other ? ' (other creatures)' : ''}` });
     }
-  } else if (card.isPermanent && (m = line.match(/^(?:other )?creatures you control have ([a-z, ]+)\.?$/)) && KNOWN_KEYWORDS.some((k) => m![1].includes(k))) {
-    const kws = KNOWN_KEYWORDS.filter((k) => m![1].includes(k));
-    out.push({ body: { kind: 'anthem', p: 0, t: 0, keywords: kws }, note: `Your creatures have ${kws.join(', ')}` });
+  } else if (card.isPermanent && (m = line.match(/^(other )?creatures you control have ([a-z, ]+)\.?$/)) && KNOWN_KEYWORDS.some((k) => m![2].includes(k))) {
+    const kws = KNOWN_KEYWORDS.filter((k) => m![2].includes(k));
+    const other = !!m[1];
+    out.push({ body: { kind: 'anthem', p: 0, t: 0, keywords: kws, ...(other ? { other } : {}) }, note: `Your ${other ? 'other ' : ''}creatures have ${kws.join(', ')}` });
   } else if ((m = line.match(/^creatures you control gain ([a-z, ]+) until end of turn/)) && KNOWN_KEYWORDS.some((k) => m![1].includes(k)) && !/hexproof|indestructible/.test(m[1])) {
     const kws = KNOWN_KEYWORDS.filter((k) => m![1].includes(k));
     out.push({ body: { kind: 'overrun', p: 0, t: 0, trample: kws.includes('trample'), grant: kws }, note: `Your creatures gain ${kws.join(', ')} this turn` });
@@ -445,8 +447,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   // --- Rule-changing permanents ----------------------------------------------
   if (/it creates twice that many/.test(line)) out.push({ body: { kind: 'doubler', tokens: true, counters: false }, note: 'Doubles the tokens you make' });
   if (/it puts twice that many of those counters/.test(line)) out.push({ body: { kind: 'doubler', tokens: false, counters: true }, note: 'Doubles the +1/+1 counters you place' });
-  if (/causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time/.test(line)) {
-    out.push({ body: { kind: 'etbDoubler' }, note: 'Your enters abilities trigger twice' });
+  if ((m = line.match(/^if (an artifact or creature entering|a permanent entering|a creature entering|a creature attacking|a creature dying|you casting or copying an instant or sorcery spell)(?: the battlefield)? causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time/))) {
+    const event = /attacking/.test(m[1]) ? 'attack' as const : /dying/.test(m[1]) ? 'dies' as const : /casting/.test(m[1]) ? 'magecraft' as const : /permanent/.test(m[1]) ? 'permanentEnters' as const : 'enters' as const;
+    const what = { enters: 'an artifact or creature entering', permanentEnters: 'a permanent entering', attack: 'a creature attacking', dies: 'a creature dying', magecraft: 'casting an instant or sorcery' }[event];
+    out.push({ body: { kind: 'etbDoubler', ...(event === 'enters' ? {} : { event }) }, note: `Abilities set off by ${what} trigger twice` });
   }
   if ((m = line.match(/creatures can't attack you( or planeswalkers you control)? unless their controller pays \{(\d)\} for each/))) {
     out.push({ body: { kind: 'attackTax', amount: parseInt(m[2], 10) }, note: `Attack tax: {${m[2]}} per creature attacking you` });
@@ -476,11 +480,18 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   else if (/exile (target player's|target opponent's|each opponent's) graveyard/.test(line)) out.push({ body: { kind: 'exileGraveyards', all: false }, note: "Exile opponents' graveyards" });
 
   // --- Copying, stealing, cheating into play, extra turns ----------------------
-  if (/you may have ~ enter as a copy of (any |a |another |target )?(nonland permanent|creature|artifact or creature)/.test(line)) {
-    out.push({ body: { kind: 'clone' }, note: 'Enters as a copy of the best creature on the battlefield' });
+  if ((m = line.match(/you may have ~ enter as a copy of (any |a |another |target )?(nonland permanent|creature|artifact or creature)( or planeswalker)?( you control| an opponent controls)?/))) {
+    const from = m[4] === ' you control' ? 'yours' as const : m[4] ? 'opponents' as const : undefined;
+    const nonlegendary = /(it isn't|it's not|isn't) legendary/.test(line);
+    const extraCounter = /enters with an additional \+1\/\+1 counter/.test(line);
+    out.push({
+      body: { kind: 'clone', ...(from ? { from } : {}), ...(nonlegendary ? { nonlegendary } : {}), ...(extraCounter ? { extraCounter } : {}) },
+      note: `Enters as a copy of the best creature ${from === 'yours' ? 'you control' : from ? 'an opponent controls' : 'on the battlefield'}${nonlegendary ? " (it isn't legendary)" : ''}`,
+    });
   }
   if (/gain control of target (\w+ )?(creature|permanent|nonland permanent)/.test(line) && !/until end of turn/.test(fullLine)) {
-    out.push({ body: { kind: 'steal', from: 'battlefield' }, note: 'Take control of a creature' });
+    const whileSource = /for as long as (you control ~|~ remains on the battlefield)/.test(line);
+    out.push({ body: { kind: 'steal', from: 'battlefield', ...(whileSource ? { whileSource } : {}) }, note: whileSource ? 'Take control of a creature while you keep this' : 'Take control of a creature' });
   }
   if (/put (a|an|up to one) ([^.]*?)(creature|permanent) card[^.]*? from your hand onto the battlefield/.test(line)) {
     out.push({ body: { kind: 'cheat' }, note: 'Put a creature from your hand onto the battlefield' });
@@ -511,6 +522,9 @@ interface LineContext {
   oncePerTurn?: boolean;
   nontoken?: boolean;
   loyalty?: number;
+  selfToo?: boolean;
+  nth?: number;
+  turn?: 'own' | 'others';
 }
 
 function detectTrigger(line: string, isPermanent: boolean): LineContext {
@@ -534,17 +548,17 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^whenever an opponent draws a card[^,]*,\s*(.*)$/))) return { when: 'opponentDraw', body: m[1] };
   if ((m = l.match(/^whenever you sacrifice (a|an|another) (\w+ )?(permanent|creature|artifact|token)[^,]*,\s*(.*)$/))) return { when: 'sacrifice', body: m[4] };
   if ((m = l.match(/^whenever (equipped|enchanted) creature dies,\s*(.*)$/))) return { when: 'creatureDies', scope: 'attached', body: m[2] };
-  if ((m = l.match(/^whenever ~ or another creature( you control)? dies,\s*(.*)$/))) return { when: 'creatureDies', scope: m[1] ? 'any' : 'all', body: m[2] };
+  if ((m = l.match(/^whenever ~ or another (nontoken )?creature( you control)? dies,\s*(.*)$/))) return { when: 'creatureDies', scope: m[2] ? 'any' : 'all', body: m[3], selfToo: true, nontoken: !!m[1] || undefined };
   if ((m = l.match(/^when you cast (this spell|~),\s*(.*)$/))) return { when: 'resolve', body: m[2] };
   if ((m = l.match(/^at the beginning of (your|each) (upkeep|end step|precombat main phase|combat on your turn|draw step|first main phase)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3] };
   if ((m = l.match(/^at the beginning of each (player's|opponent's) (upkeep|end step)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3] };
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) deals combat damage to (a player|an opponent|one or more|a player or|a player, )[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'self', body: m[3] };
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) deals (combat )?damage[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'self', body: m[3] };
   if ((m = l.match(/^whenever one or more (\w+ )?creatures you control deal combat damage to a player[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'oneOrMore', body: m[2] };
-  if ((m = l.match(/^whenever (a|another) (\w+ )?(?:creature|\w+) you control deals combat damage to (a player|an opponent)[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'any', body: m[4] };
+  if ((m = l.match(/^whenever (a|another) (\w+ )?(?:creature|\w+) you control deals combat damage to (a player|an opponent)[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'any', body: m[4], nontoken: m[2] === 'nontoken ' || undefined };
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) attacks[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'self', body: m[2] };
   if ((m = l.match(/^whenever (you attack|one or more (?:\w+ )?\w+ you control attack)[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'oneOrMore', body: m[2] };
-  if ((m = l.match(/^whenever (a|another) (\w+ )?(?:creature|\w+) you control attacks[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'any', body: m[3] };
+  if ((m = l.match(/^whenever (a|another) (\w+ )?(?:creature|\w+) you control attacks[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'any', body: m[3], nontoken: m[2] === 'nontoken ' || undefined };
   if ((m = l.match(/^whenever you cast (an? |your )?([^,]*?)spell([^,]*),\s*(.*)$/))) {
     const what = m[2] + m[3];
     const castFilter: CastFilter = /noncreature/.test(what) ? 'noncreature' : /instant|sorcery/.test(what) ? 'instantSorcery' : /creature/.test(what) ? 'creature' : /artifact/.test(what) ? 'artifact' : /enchantment/.test(what) ? 'enchantment' : 'any';
@@ -554,7 +568,11 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?(creatures?|tokens?)( you control)? (enters?|enter)[^,]*,\s*(.*)$/))) return { when: 'creatureEnters', body: m[7], nontoken: !!m[2] || undefined };
   // Tribal wording: "whenever another nontoken Dragon you control enters". Treated as any creature.
   if ((m = l.match(/^whenever (a|another|one or more)( other)?( nontoken)? (?!artifact|enchantment|permanent|planeswalker|player|opponent|land|spell)(\w+) you control( of the chosen type)? (enters?)[^,]*,\s*(.*)$/))) return { when: 'creatureEnters', body: m[7], nontoken: !!m[3] || undefined };
-  if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?creatures?( you control)? (dies|die|is put into a graveyard)[^,]*,\s*(.*)$/))) return { when: 'creatureDies', scope: m[4] ? undefined : 'all', body: m[6] };
+  if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?creatures?( you control)? (dies|die|is put into a graveyard)[^,]*,\s*(.*)$/))) {
+    // "A creature you control dies" on a creature sees its own death too; "another" and "other" don't.
+    const selfToo = m[1] !== 'another' && m[3] !== 'other ' || undefined;
+    return { when: 'creatureDies', scope: m[4] ? undefined : 'all', body: m[6], nontoken: !!m[2] || undefined, selfToo };
+  }
   if ((m = l.match(/^when ~ dies[^,]*,\s*(.*)$/))) return { when: 'creatureDies', scope: 'self', body: m[1] };
 
   // Planeswalker loyalty abilities: treat the first + or 0 ability as a per-turn effect.
@@ -668,7 +686,8 @@ export function classifyCard(raw: RawCard): SimCard {
   }
 
   // "Choose one —" modal spells: keep only the best bullet.
-  const isModal = /choose (one|two|one or both|one or more|up to one|up to two) —|choose one\./.test(text);
+  // "As ~ enters, choose Mardu or Jeskai": only one of the bullets applies, like a modal spell.
+  const isModal = /choose (one|two|one or both|one or more|up to one|up to two) —|choose one\./.test(text) || /^as ~ enters, choose [a-z]+ or [a-z]+\.$/m.test(text);
   // "When ~ enters, choose one —": the bullets that follow happen on that trigger.
   let header: LineContext[] | null = null;
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -705,11 +724,20 @@ export function classifyCard(raw: RawCard): SimCard {
       ctx.body = ctx.body.replace(/^if [^,]+, /, '');
     }
     if (/only once each turn/.test(line)) ctx.oncePerTurn = true;
-    // "Their second spell each turn", "your second card": at most once a turn, and often not at all.
-    if (/^whenever [^,]*\b(second|third)\b[^,]*,/.test(line) && ctx.when !== 'draw') {
+    // "Their first spell each turn", "your second spell during each opponent's turn": the engine counts spells, so check exactly.
+    const nth = (ctx.when === 'cast' || ctx.when === 'opponentCast') ? line.match(/^whenever [^,]*\b(first|second|third) spell\b([^,]*),/) : null;
+    if (nth) {
+      ctx.nth = { first: 1, second: 2, third: 3 }[nth[1]];
+      ctx.oncePerTurn = undefined;
+      if (/during (their|your) turn/.test(nth[2])) ctx.turn = 'own';
+      else if (/during (each|an) opponent's turn/.test(nth[2])) ctx.turn = 'others';
+    } else if (/^whenever [^,]*\b(second|third)\b[^,]*,/.test(line) && ctx.when !== 'draw') {
+      // "Your second card", "the second time": at most once a turn, and often not at all.
       ctx.oncePerTurn = true;
       ctx.chance = 0.5;
     }
+    // "Whenever a player casts ..., they create": what the caster gets, not you. Kept only for your own spells.
+    if (ctx.when === 'opponentCast' && /^(they|that player) (create|draw|gain)/.test(ctx.body)) continue;
     // "With mana value equal to the chosen number" and the like: only some spells qualify.
     if ((ctx.when === 'opponentCast' || ctx.when === 'cast') && /^whenever [^.]*\b(chosen number|chosen name|same name as)\b/.test(line)) ctx.chance = 0.25;
     // Voting: only one outcome happens. With bots at the table, assume the last one listed (ties usually go there).
@@ -722,6 +750,8 @@ export function classifyCard(raw: RawCard): SimCard {
     const sentences = ctx.body.replace(/"[^"]*"/g, '').split(/(?<=\.)\s+(?=[a-z~])/);
     for (const sentence of sentences) {
       const found = recogniseEffects(sentence, { isPermanent, isCreature }, ctx.body);
+      // Sanguine Bond: "loses that much life" is the life just gained (X = the amount, see the engine's gainLife).
+      if (ctx.when === 'gainLife' && /loses? that much life/.test(sentence)) for (const f of found) if (f.body.kind === 'damagePlayer' || f.body.kind === 'drain') { f.body.n = -1; f.note = f.note.replace(/\d+$/, 'that much'); }
       // Mana abilities on nonland permanents (rocks and dorks).
       const manaMatch = ctx.when === 'activated' ? sentence.match(/^(?:for each [^,]*, )?add (.*)$/) : null;
       // Rituals: mana from an instant or sorcery is kept as that many Treasures.
@@ -729,7 +759,7 @@ export function classifyCard(raw: RawCard): SimCard {
       if (ritual) {
         const p = parseProduced(ritual[1]);
         const n = /for each/.test(sentence) ? 3 : p?.amount ?? 0;
-        const f: Found = { body: { kind: 'treasure', n }, note: `Ritual: ${n} one-shot mana` };
+        const f: Found = { body: { kind: 'treasure', n, ritual: true }, note: `Ritual: ${n} one-shot mana` };
         if (n > 0) {
           if (isModal && bullet) modalFound.push({ found: f, ctx });
           else pushEffect(card, f, ctx);
@@ -739,7 +769,7 @@ export function classifyCard(raw: RawCard): SimCard {
       if (manaMatch) {
         const p = /^for each color/.test(sentence) ? { amount: 2, colors: 'any' as const } : parseProduced(manaMatch[1]);
         if (p && ctx.sacCreature) {
-          pushEffect(card, { body: { kind: 'treasure', n: p.amount }, note: `Sacrifice a creature for ${p.amount} mana` }, ctx);
+          pushEffect(card, { body: { kind: 'treasure', n: p.amount, ritual: true }, note: `Sacrifice a creature for ${p.amount} mana` }, ctx);
           continue;
         }
         const paid = ctx.activationCost ? ctx.activationCost.generic + ctx.activationCost.pips.length : 0;
@@ -921,7 +951,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
   if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
-  if (/^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
+  if (/^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
 
@@ -938,6 +968,9 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.chance) effect.chance = ctx.chance;
   if (ctx.oncePerTurn) effect.oncePerTurn = true;
   if (ctx.nontoken) effect.nontoken = true;
+  if (ctx.selfToo) effect.selfToo = true;
+  if (ctx.nth) effect.nth = ctx.nth;
+  if (ctx.turn) effect.turn = ctx.turn;
   if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
   if (ctx.when === 'activated') {
     if (!ctx.activationCost) return;
@@ -958,6 +991,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   let note = describeTrigger(ctx) + f.note;
   if (ctx.chance) note += ' (conditional, ~50%)';
   if (ctx.oncePerTurn) note += ' (once per turn)';
+  if (ctx.nth) note += ` (${['first', 'second', 'third'][ctx.nth - 1]} spell ${ctx.turn === 'own' ? 'during their own turn' : ctx.turn === 'others' ? "during an opponent's turn" : 'each turn'})`;
   card.notes.push(note);
 }
 
