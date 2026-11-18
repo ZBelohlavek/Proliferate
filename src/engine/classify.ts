@@ -18,6 +18,7 @@ import type {
   Trigger,
   TriggerScope,
 } from './types';
+import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
 /** Card data normalised from either Archidekt or Scryfall. */
@@ -155,7 +156,7 @@ function parseKeywords(raw: RawCard, text: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** chance: this part of the ability only happens some of the time (a condition in the same sentence). */
-type Found = { body: EffectBody; note: string; chance?: number; minRoll?: number };
+type Found = { body: EffectBody; note: string; chance?: number; minRoll?: number; /** Paid in energy when it happens, or skipped ("you may pay {E}{E}. When you do"). */ energyCost?: number };
 
 function removalTargetOf(phrase: string): RemovalTarget | null {
   if (/nonland permanent|target permanent|target ([\w-]+ )?permanent/.test(phrase)) return 'permanent';
@@ -616,11 +617,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'baseSize', p: num(m[1], 2), t: num(m[2], 2) }, note: `Other creatures are ${m[1]}/${m[2]} before bonuses` });
   }
   if (/you get an experience counter/.test(line)) out.push({ body: { kind: 'experience' }, note: 'You get an experience counter' });
-  // Energy is only spent by Satya's token copies so far, so other energy cards stay unread.
-  if ((m = line.match(/you get ((?:\{e\})+)/)) && /token that's a copy/.test(fullLine)) {
-    const n = (m[1].match(/\{e\}/g) ?? []).length;
-    out.push({ body: { kind: 'energy', n }, note: `You get ${n} energy` });
-  }
+  // --- Land hate, Fogs, energy, charge counters (see classifyMechanics.ts) ------------
+  recogniseMechanics(line, out, fullLine);
   if (/put a stun counter on (up to one )?target (nonland permanent|creature|permanent)/.test(line)) out.push({ body: { kind: 'stun' }, note: "Stun counter on an opponent's permanent" });
   if (/put a bounty counter on target creature an opponent controls/.test(line)) {
     out.push({ body: { kind: 'bounty' }, note: "Bounty on an opponent's creature (when it dies, its controller's opponents draw 1 and gain 2)" });
@@ -708,6 +706,10 @@ interface LineContext {
   selfToo?: boolean;
   nth?: number;
   turn?: 'own' | 'others';
+  /** Activation costs paid in energy or charge counters (see classifyMechanics.ts). */
+  energy?: number;
+  charge?: number;
+  sorcery?: boolean;
 }
 
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
@@ -722,6 +724,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   let l = line.replace(/^[a-z' ]+ — (?=(when|whenever|at|if|as|~|you|creatures|target|each|draw|create))/, '');
   let m: RegExpMatchArray | null;
 
+  const mech = mechanicTrigger(l);
+  if (mech) return mech;
   const milled = graveyardTrigger(l);
   if (milled) return { when: milled.when, scope: milled.scope, body: milled.body, ...(milled.creature ? { castFilter: 'creature' as const } : {}) };
   if (/^whenever a land enters[^,]*, [^.]* damage to that land's controller/.test(l)) return { when: 'static', body: l };
@@ -807,18 +811,19 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if (/^-x: /.test(l)) return { when: 'static', body: '' };
 
   // Activated abilities: "COST: EFFECT" where cost is mana/tap symbols.
-  const COST_PART = '(?:(?:\\{[^}]+\\})+|sacrifice ~|sacrifice (?:a|an|another) (?!artifact|land|permanent|enchantment|treasure|food|clue)\\w+|pay \\d+ life|tap (?:two|three|four|five) untapped [a-z]+ you control)';
+  const COST_PART = '(?:(?:\\{[^}]+\\})+|' + MECHANIC_COST + '|sacrifice ~|sacrifice (?:a|an|another) (?!artifact|land|permanent|enchantment|treasure|food|clue)\\w+|pay \\d+ life|tap (?:two|three|four|five) untapped [a-z]+ you control)';
   if ((m = l.match(new RegExp(`^(${COST_PART}(?:, ${COST_PART})*):\\s*(.*)$`)))) {
     const costText = m[1];
     const tap = /\{t\}/.test(costText);
-    const cost = parseManaCost(costText.replace(/\{t\}|\{q\}/g, ''));
+    const extra = mechanicCost(costText);
+    const cost = parseManaCost(costText.replace(new RegExp(MECHANIC_COST, 'g'), '').replace(/\{t\}|\{q\}/g, ''));
     // {X} in an activation cost: assume the smallest useful X, 1.
     cost.generic += cost.x;
     cost.x = 0;
     const life = costText.match(/pay (\d+) life/);
     if (life) cost.life += parseInt(life[1], 10);
     const tapCreatures = costText.match(/tap (two|three|four|five) untapped/);
-    return { when: 'activated', body: m[2], activationCost: cost, tap, sacrifice: /sacrifice ~/.test(costText), sacCreature: /sacrifice (a|an|another) (?!~)\w+/.test(costText), ...(tapCreatures ? { tapCreatures: num(tapCreatures[1], 4) } : {}) };
+    return { when: 'activated', body: m[2], activationCost: cost, tap, sacrifice: /sacrifice ~/.test(costText) || !!extra.exileSelf, ...(extra.energy ? { energy: extra.energy } : {}), ...(extra.charge ? { charge: extra.charge } : {}), sacCreature: /sacrifice (a|an|another) (?!~)\w+/.test(costText), ...(tapCreatures ? { tapCreatures: num(tapCreatures[1], 4) } : {}) };
   }
 
   // Other triggered/conditional lines we don't model.
@@ -985,6 +990,7 @@ export function classifyCard(raw: RawCard): SimCard {
       ctx.body = ctx.body.replace(/^if [^,]+, /, '');
     }
     if (/only once each turn/.test(line)) ctx.oncePerTurn = true;
+    if (ctx.when === 'activated' && /activate only as a sorcery/.test(line)) ctx.sorcery = true;
     // "Their first spell each turn", "your second spell during each opponent's turn": the engine counts spells, so check exactly.
     const nth = (ctx.when === 'cast' || ctx.when === 'opponentCast') ? line.match(/^whenever [^,]*\b(first|second|third) spell\b([^,]*),/) : null;
     if (nth) {
@@ -1009,7 +1015,15 @@ export function classifyCard(raw: RawCard): SimCard {
     if (ctx.when === 'activated' && /put ~ on top of (its owner's|your) library/.test(ctx.body)) ctx.body = '';
     // A line can hold several sentences, e.g. "Draw two cards. Create a Treasure."
     const sentences = ctx.body.replace(/"[^"]*"/g, '').split(/(?<=\.)\s+(?=[a-z~])/);
-    for (const sentence of sentences) {
+    // "You may pay {E}{E}{E}. When you do, ...": what follows costs that much energy (see classifyMechanics.ts).
+    let energyGate = 0;
+    for (let sentence of sentences) {
+      const gate = energyGateOf(sentence);
+      if (gate) {
+        energyGate = gate;
+        if (!/^you get /.test(sentence)) continue;
+      }
+      if (energyGate && !gate) sentence = sentence.replace(/^(when|if) you (do|pay), /, '');
       // "Whenever another creature enters, it gains haste": "it" is the newcomer, which a self-only pump can't reach.
       const found = recogniseEffects(sentence, { isPermanent, isCreature }, ctx.body).filter((f) => !(f.body.kind === 'pump' && f.body.self && ctx.when === 'creatureEnters'));
       // Sanguine Bond: "loses that much life" is the life just gained (X = the amount, see the engine's gainLife).
@@ -1027,6 +1041,21 @@ export function classifyCard(raw: RawCard): SimCard {
           else pushEffect(card, f, ctx);
         }
         continue;
+      }
+      // Mana from charge counters (Astral Cornucopia, Empowered Autogenerator, Pentad Prism) or paid with energy (Solar Transformer).
+      const charged = manaMatch ? chargeMana(sentence, line, !!ctx.tap) : null;
+      if (charged) {
+        manaLines++;
+        card.effects.push({ ...charged, when: 'static' } as Effect);
+        continue;
+      }
+      if (manaMatch && ctx.energy && ctx.tap) {
+        const p = /any combination of colors/.test(sentence) ? { amount: count3(sentence), colors: 'any' as const } : parseProduced(manaMatch[1]);
+        if (p) {
+          manaLines++;
+          card.effects.push({ kind: 'mana', amount: p.amount, colors: p.colors, energy: ctx.energy, when: 'static' });
+          continue;
+        }
       }
       if (manaMatch) {
         const p = /^for each color/.test(sentence) ? { amount: 2, colors: 'any' as const } : parseProduced(manaMatch[1]);
@@ -1050,6 +1079,7 @@ export function classifyCard(raw: RawCard): SimCard {
         continue;
       }
       for (const f of found) {
+        if (energyGate && !(gate && f.body.kind === 'energy')) f.energyCost = energyGate;
         if (isModal && bullet) {
           modalFound.push({ found: f, ctx });
           continue;
@@ -1133,6 +1163,7 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
   }
   graveyardKeywords(text, card);
+  mechanicKeywords(text, card);
   const ninjutsu = isCreature && text.match(/^(commander )?ninjutsu ((?:\{[^}]+\})+)/m);
   if (ninjutsu) {
     card.ninjutsu = { cost: parseManaCost(ninjutsu[2]), ...(ninjutsu[1] ? { commander: true } : {}) };
@@ -1263,7 +1294,7 @@ export function classifyCard(raw: RawCard): SimCard {
   if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
-  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard;
+  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.sunburst;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   card.value = cardValue(card);
@@ -1286,9 +1317,15 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
-  if (graveyardLineHandled(line)) return true;
+  if (graveyardLineHandled(line) || mechanicLineHandled(line)) return true;
   if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
+}
+
+/** "Add three mana in any combination of colors". */
+function count3(sentence: string): number {
+  const m = sentence.match(/^add (\w+) mana/);
+  return m ? num(m[1], 1) : 1;
 }
 
 function rank(order: string[], kind: string): number {
@@ -1305,6 +1342,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (chance) effect.chance = chance;
   if (f.minRoll ?? ctx.minRoll) effect.minRoll = f.minRoll ?? ctx.minRoll;
   if (ctx.oncePerTurn) effect.oncePerTurn = true;
+  if (f.energyCost) effect.energyCost = f.energyCost;
   if (ctx.nontoken) effect.nontoken = true;
   if (ctx.selfToo) effect.selfToo = true;
   if (ctx.nth) effect.nth = ctx.nth;
@@ -1322,10 +1360,13 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   }
   if (ctx.when === 'activated') {
     if (!ctx.activationCost) return;
-    effect.activation = { cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}), ...(ctx.tapCreatures ? { tapCreatures: ctx.tapCreatures } : {}) };
+    effect.activation = {
+      cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}), ...(ctx.tapCreatures ? { tapCreatures: ctx.tapCreatures } : {}),
+      ...(ctx.energy ? { energy: ctx.energy } : {}), ...(ctx.charge ? { charge: ctx.charge } : {}), ...(ctx.sorcery ? { sorcery: true } : {}),
+    };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);

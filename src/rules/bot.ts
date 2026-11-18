@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { commanderName, counterMatches, isAura, isInstantSpeed, removalMatches, type Game } from './game';
+import { chargeUse, commanderName, counterMatches, isAura, isInstantSpeed, removalMatches, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -16,7 +16,7 @@ import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog']);
 
 export interface BotOptions {
   /** How eagerly it attacks: about 0.6 (careful) to 1.5 (reckless). Default: random 0.8–1.3. */
@@ -50,13 +50,18 @@ interface DeckPlan {
   mill: number;
   /** Cards that drain or burn players. */
   drain: number;
+  /** Cards that destroy lands or punish them (Blood Moon, Armageddon, Strip Mine). */
+  landHate: number;
 }
 
+const LAND_HATE = new Set(['landRule', 'tapPunish', 'landWipe', 'landSac', 'nonbasicBurn', 'landDiesPunish']);
+
 function deckPlan(p: PlayerState): DeckPlan {
-  const plan: DeckPlan = { mill: 0, drain: 0 };
+  const plan: DeckPlan = { mill: 0, drain: 0, landHate: 0 };
   for (const c of [...p.deck.commanders, ...p.deck.cards.flatMap((e) => Array<SimCard>(e.count).fill(e.card))]) {
     if (c.effects.some((e) => e.kind === 'mill' && e.who !== 'you' && e.who !== 'all')) plan.mill++;
     if (c.effects.some((e) => e.kind === 'drain' || e.kind === 'damagePlayer')) plan.drain++;
+    if (c.effects.some((e) => LAND_HATE.has(e.kind) || (e.kind === 'removal' && (e.target === 'land' || e.target === 'nonbasicLand')))) plan.landHate++;
   }
   return plan;
 }
@@ -288,6 +293,10 @@ export class Bot implements Agent {
     if (g.step === 'declareBlockers' && myTurn) {
       const ninja = this.chooseNinjutsu(g, actions);
       if (ninja) return pick(ninja);
+    }
+    if (g.step === 'declareBlockers' && !myTurn) {
+      const fog = this.chooseFog(g, p, actions);
+      if (fog) return pick(fog);
     }
     if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
 
@@ -654,6 +663,14 @@ export class Bot implements Agent {
       return this.wipeIsGood(g, p, wipe, x) ? 95 : null;
     }
 
+    // Land hate: only when it hurts the table more than us, or the deck is built on it.
+    if ([...kinds].some((k) => LAND_HATE.has(k))) {
+      const worth = this.landHateWorth(g, p, card);
+      if (worth === null) return null;
+      if (card.isInstant || card.isSorcery) return 40 + worth;
+      if (!card.isCreature) return 50 + card.value + worth;
+    }
+
     let score = 0;
     if (kinds.has('mana') || kinds.has('ramp') || kinds.has('costReduction') || kinds.has('treasure') || kinds.has('extraLand')) {
       score = Math.max(score, 100 - g.round * 4);
@@ -768,7 +785,9 @@ export class Bot implements Agent {
       if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe' || winsNow)) return minus;
       if (plus) return plus;
     }
-    return actions.find((a) => {
+    // Abilities that spend energy or charge counters come before the ones that make them.
+    const spends = (a: Action) => (a.type === 'activate' && (a.effect.activation?.energy || a.effect.activation?.charge) ? 0 : 1);
+    return [...actions].sort((a, b) => spends(a) - spends(b)).find((a) => {
       if (a.type !== 'activate' || a.effect.kind === 'equip') return false;
       const perm = g.findPerm(a.permId);
       if (!perm || (!a.effect.activation?.tap && perm.activations >= 3)) return false;
@@ -783,8 +802,14 @@ export class Bot implements Agent {
         const fodder = p.battlefield.filter((q) => q.card.isCreature && q !== perm && !q.isCommander && (q.token || q.card.value < 2.5));
         if (!fodder.length || (perm.activations >= 2 && !(drains && fodder.some((q) => q.token)))) return false;
       }
+      // "Pay X {E}": only with a few energy saved up.
+      if (e.activation?.energy === -1 && p.energy < 3) return false;
       switch (e.kind) {
         case 'draw': return p.library.length > 8 || winsOnEmptyDraw(p);
+        case 'energy': case 'digPermanent': case 'extraTurn': return true;
+        case 'wipe': return this.wipeIsGood(g, p, e, 0);
+        // Charge counters: only on something that pays them off in reach (not Fire Nation Turret's fifty).
+        case 'charge': return e.target ? p.battlefield.some((q) => q !== perm && q.card.isArtifact && chargeUse(q.card) > 0) : chargeUse(perm.card) > 0;
         case 'rollDice': return true;
         case 'gainLife': return p.life < 30 && g.activeSeat !== p.seat;
         // Tinybones: only when someone has an empty hand.
@@ -896,6 +921,9 @@ export class Bot implements Agent {
       return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0))) ?? d.candidates[0];
     }
     switch (e.kind) {
+      case 'fog':
+        // The attacker that would hurt us most.
+        return asTarget(bestOf(perms, (q) => (q.attacking === p.seat ? 10 : 0) + (q.blocked ? 0 : 5) + g.power(q))) ?? d.candidates[0];
       case 'removal': {
         const pick = this.removalTarget(g, p, e, this.castingX, d.candidates);
         if (pick) return pick.target;
@@ -1019,9 +1047,12 @@ export class Bot implements Agent {
     const amount = e.amount === -1 ? Math.max(x, 1) : e.amount;
     const fighter = e.mode === 'fight' ? p.battlefield.filter((q) => q.card.isCreature).reduce<Perm | null>((a, b) => (!a || g.power(b) > g.power(a) ? b : a), null) : null;
 
+    // Permanents our own spells and abilities on the stack already aim at.
+    const aimed = new Set(g.stack.filter((s) => s.controller === p.seat).flatMap((s) => s.targets).flatMap((t) => (t?.kind === 'perm' ? [t.id] : [])));
     let best: { target: Target; score: number } | null = null;
     for (const t of candidates) {
       let score = 0;
+      if (t.kind === 'perm' && aimed.has(t.id)) continue;
       if (t.kind === 'player') {
         // "Any target" burn: only go face to finish someone.
         const o = g.players[t.seat];
@@ -1030,6 +1061,11 @@ export class Bot implements Agent {
       } else if (t.kind === 'perm') {
         const perm = g.findPerm(t.id);
         if (!perm || perm.seat === p.seat || !removalMatches(e.target, perm.card)) continue;
+        if (perm.landInfo) {
+          score = this.landTargetScore(g, perm);
+          if (!best || score > best.score) best = { target: t, score };
+          continue;
+        }
         if (e.mode === 'destroy' && g.hasKw(perm, 'indestructible')) continue;
         if (e.mode === 'damage' && amount < g.toughness(perm) - perm.damage) continue;
         // -N/-N kills through indestructible; damage doesn't.
@@ -1043,6 +1079,147 @@ export class Bot implements Agent {
       if (!best || score > best.score) best = { target: t, score };
     }
     return best;
+  }
+
+  /**
+   * Prevent combat damage when an attack on us would kill us or take a big bite: Fog, Spore Frog,
+   * Inkshield, or Maze of Ith on the biggest attacker.
+   */
+  private chooseFog(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const coming = g.attackers().filter((a) => a.attacking === p.seat && (!a.blocked || g.hasKw(a, 'trample')) && !a.fogged);
+    if (!coming.length) return undefined;
+    const total = coming.reduce((n, a) => n + hitDamage(g, a), 0);
+    const biggest = Math.max(...coming.map((a) => hitDamage(g, a)));
+    const lethal = total >= p.life || coming.some((a) => a.isCommander && hitDamage(g, a) >= 21 - Math.max(0, ...[...p.commanderDamage.values()]));
+    const fogOf = (a: Action) => (a.type === 'cast' && a.from !== 'alt' ? a.card.effects.find((e) => e.kind === 'fog') : a.type === 'activate' && a.effect.kind === 'fog' ? a.effect : undefined);
+    let best: Action | undefined;
+    let bestSaved = 0;
+    for (const a of actions) {
+      const f = fogOf(a);
+      if (!f || f.kind !== 'fog') continue;
+      const saved = f.who === 'creature' ? biggest : total;
+      // A one-creature answer only matters if it takes us out of lethal, or blunts a big hit.
+      if (f.who === 'creature' && lethal && total - saved >= p.life) continue;
+      if (saved > bestSaved) {
+        best = a;
+        bestSaved = saved;
+      }
+    }
+    if (!best) return undefined;
+    const isSpell = best.type === 'cast';
+    // Spells are cards: kept for real danger. Abilities (Maze of Ith) are free to use on any good hit.
+    if (lethal || bestSaved >= Math.max(isSpell ? 10 : 4, p.life * (isSpell ? 0.4 : 0.15))) return best;
+    return undefined;
+  }
+
+  /** Colors `q` could make now but not once every nonbasic land taps only for `into` (Blood Moon). */
+  private colorsLost(g: Game, q: PlayerState, into: Mana): number {
+    const now = new Set<Mana>();
+    const after = new Set<Mana>([into]);
+    for (const l of q.battlefield) {
+      if (!l.landInfo) continue;
+      const made = g.landProduces(l);
+      for (const c of made === 'any' ? q.identity : made) {
+        now.add(c);
+        if (l.card.isBasic) after.add(c);
+      }
+    }
+    return q.identity.filter((c) => now.has(c) && !after.has(c)).length;
+  }
+
+  /** How good a land is to destroy: nonbasic, fixing, a color its controller has nowhere else, a player short on lands. */
+  private landTargetScore(g: Game, land: Perm): number {
+    const owner = g.players[land.seat];
+    const makes = g.landProduces(land);
+    let score = 2;
+    if (!land.card.isBasic) score += 1.5;
+    if (makes === 'any' || makes.length >= 2) score += 1;
+    // The only source of one of its controller's colors.
+    const others = owner.battlefield.filter((q) => q.landInfo && q !== land).map((q) => g.landProduces(q));
+    const colors = makes === 'any' ? owner.identity : makes.filter((m) => m !== 'C');
+    if (colors.some((c) => !others.some((o) => o === 'any' || o.includes(c)))) score += 2;
+    if (g.landCount(owner) <= 4) score += 1;
+    if (boardThreat(g, owner) > 15) score += 1;
+    if ((this.plan?.landHate ?? 0) >= 8) score += 2;
+    return score;
+  }
+
+  /**
+   * Whether land hate is worth casting now, and how much: Blood Moon when opponents lean on nonbasic lands
+   * more than we do, Armageddon-style wipes when we are ahead on board, and anything for a deck built on it.
+   */
+  private landHateWorth(g: Game, p: PlayerState, card: SimCard): number | null {
+    const hater = (this.plan?.landHate ?? 0) >= 8;
+    const opps = g.opponents(p);
+    if (!opps.length) return null;
+    const nonbasic = (q: PlayerState) => q.battlefield.filter((l) => l.landInfo && !l.card.isBasic).length;
+    const lands = (q: PlayerState) => g.landCount(q);
+    const avg = (f: (q: PlayerState) => number) => opps.reduce((n, q) => n + f(q), 0) / opps.length;
+    const board = (q: PlayerState) => boardThreat(g, q, true);
+    let worth = 0;
+    for (const e of card.effects) {
+      switch (e.kind) {
+        case 'landRule': {
+          if (e.rule === 'everyType') break;
+          if (e.rule === 'untapOneLand') {
+            // Winter Orb: everyone is choked; good for a deck that needs little mana or already has its board.
+            if (!hater && board(p) <= avg(board)) return null;
+            worth += 5;
+            break;
+          }
+          const gap = avg(nonbasic) - nonbasic(p);
+          // Blood Moon and Harbinger also cut opponents off colors their basic lands don't make.
+          const turnsInto: Mana | null = e.rule === 'nonbasicMountains' ? 'R' : e.rule === 'nonbasicIslands' ? 'U' : null;
+          const cut = turnsInto ? opps.reduce((n, q) => n + this.colorsLost(g, q, turnsInto), 0) - this.colorsLost(g, p, turnsInto) : 0;
+          if (gap < 1.5 && cut <= 0 && !(hater && gap >= 0)) return null;
+          worth += Math.min(15, gap * 2) + cut * 4;
+          break;
+        }
+        case 'tapPunish': {
+          if (e.what === 'tapAll' || e.opponents) {
+            worth += 6;
+            break;
+          }
+          const mine = e.nonbasic ? nonbasic(p) : lands(p);
+          const theirs = e.nonbasic ? avg(nonbasic) : avg(lands);
+          if (!hater && theirs < mine + 1) return null;
+          worth += 4;
+          break;
+        }
+        case 'landWipe': {
+          if (e.nonbasic) {
+            const gap = avg(nonbasic) - nonbasic(p);
+            if (gap < 1.5) return null;
+            worth += gap * 2;
+          } else {
+            // Armageddon: when our board already wins without lands, or the deck is built for it and we are not behind.
+            if (board(p) < avg(board) + 4 && !(hater && board(p) >= avg(board))) return null;
+            worth += 10;
+          }
+          break;
+        }
+        case 'landSac': {
+          const lose = e.keep !== undefined ? Math.max(0, lands(p) - e.keep) : e.n;
+          const hit = e.keep !== undefined ? Math.max(0, avg(lands) - e.keep) : e.n;
+          if (e.who === 'each' && hit <= lose && !hater) return null;
+          if (e.who === 'each' && lands(p) <= 3 && e.keep === undefined) return null;
+          worth += 3 + hit - (e.who === 'each' ? lose : 0);
+          break;
+        }
+        case 'nonbasicBurn': {
+          const theirs = opps.reduce((n, q) => n + nonbasic(q), 0) * e.per;
+          const mine = nonbasic(p) * e.per;
+          if (opps.some((q) => !q.shielded && nonbasic(q) * e.per >= q.life)) return 60;
+          if (theirs < mine * 2 + 3 || mine >= p.life) return null;
+          worth += theirs - mine;
+          break;
+        }
+        case 'landDiesPunish':
+          worth += hater ? 6 : 2;
+          break;
+      }
+    }
+    return worth;
   }
 
   private wipeIsGood(g: Game, p: PlayerState, e: Wipe, x: number): boolean {

@@ -660,6 +660,7 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
             {p.exile.length > 0 && <span title={`Exile: ${p.exile.map((c) => c.name).join(', ')}`}>⛔ {p.exile.length}</span>}
             {p.treasures > 0 && <span title="Treasure tokens">💰 {p.treasures}</span>}
             {p.poison > 0 && <span title="Poison counters: ten lose the game">☠ {p.poison}</span>}
+            {p.energy > 0 && <span title="Energy counters">⚡ {p.energy}</span>}
             {g.monarch === p.seat && <span title="The monarch draws a card at each of their end steps">👑</span>}
             {damage.length > 0 && <span>Commander damage: {damage.join(', ')}</span>}
           </div>
@@ -705,6 +706,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     perm.sick && card.isCreature && 'Summoning sick',
     keywords.length && keywords.join(', '),
     perm.counters > 0 && `${perm.counters} +1/+1 counter${perm.counters > 1 ? 's' : ''}`,
+    perm.charge && `${perm.charge} charge counter${perm.charge > 1 ? 's' : ''}`,
+    perm.fogged && 'Combat damage to and from it is prevented this turn',
     perm.lore && `Lore ${perm.lore} of ${card.saga}`,
     perm.level && `Level ${perm.level}`,
     perm.goadedBy?.length && `Goaded by ${perm.goadedBy.map((s) => shortName(g.players[s])).join(', ')}`,
@@ -719,6 +722,7 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
       {perm.isCommander && <span className="cmdr-badge">CMDR</span>}
       {perm.sick && card.isCreature && !g.hasKw(perm, 'haste') && <span className="sick-badge" title="Summoning sick">zZ</span>}
       {perm.counters > 0 && <span className="count-badge">+{perm.counters}</span>}
+      {!!perm.charge && <span className="count-badge" title="Charge counters">⚙{perm.charge}</span>}
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
       {(badge || host || attached.length > 0) && <span className="zone-badge">{badge ?? (host ? `on ${host.card.name}` : `⚙ ${attached.join(', ')}`)}</span>}
     </div>
