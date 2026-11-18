@@ -18,6 +18,7 @@ import type {
   Trigger,
   TriggerScope,
 } from './types';
+import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
 /** Card data normalised from either Archidekt or Scryfall. */
@@ -665,6 +666,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   // Noble Heritage: opponents who take the counters can't touch you.
   if (/^for each opponent who does, you gain protection from that player/.test(line)) out.push({ body: { kind: 'protect', player: true }, note: 'Protection from opponents who took counters', chance: 0.5 });
 
+  // --- Rarer wordings nothing above read (classifyRare.ts) -----------------------
+  if (!out.length) recogniseRare(line, out, card, fullLine);
+
   return out;
 }
 
@@ -729,6 +733,10 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   // Strip ability words like "Landfall — " / "Constellation — ".
   let l = line.replace(/^[a-z' ]+ — (?=(when|whenever|at|if|as|~|you|creatures|target|each|draw|create))/, '');
   let m: RegExpMatchArray | null;
+  // Rarer wordings (classifyRare.ts).
+  l = rewriteRare(l);
+  const rare = rareTrigger(l);
+  if (rare) return rare;
 
   const milled = graveyardTrigger(l);
   if (milled) return { when: milled.when, scope: milled.scope, body: milled.body, ...(milled.creature ? { castFilter: 'creature' as const } : {}) };
@@ -1271,7 +1279,7 @@ export function classifyCard(raw: RawCard): SimCard {
   if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
-  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard;
+  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length);
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   card.value = cardValue(card);
@@ -1363,6 +1371,8 @@ function describeTrigger(ctx: LineContext): string {
     case 'landfall': return 'Landfall: ';
     case 'opponentCast': return `When an opponent casts ${ctx.castFilter === 'any' ? 'a spell' : `${ctx.castFilter} spells`}: `;
     case 'opponentDraw': return 'When an opponent draws: ';
+    case 'opponentDiscard': return 'When an opponent discards: ';
+    case 'opponentLoseLife': return 'When an opponent loses life: ';
     case 'ringTempts': return 'When the Ring tempts you: ';
     case 'sacrifice': return 'When you sacrifice: ';
     case 'draw': return 'When you draw: ';
