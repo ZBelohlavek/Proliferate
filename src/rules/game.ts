@@ -99,6 +99,12 @@ export class Game {
   private readonly maxRounds: number;
   private readonly startSeat: number;
   private triggerBudget = 0;
+  /** The rest of this turn's combat and postcombat main phases, in order. Additional combats go here (rule 500.8). */
+  private phases: ('combat' | 'main')[] = [];
+  /** Combat phases begun this turn (Genji Glove, Aurelia: "the first combat phase of the turn"). */
+  combatsThisTurn = 0;
+  /** Full Throttle, World at War: at the beginning of each combat this turn, untap all creatures that attacked this turn. */
+  private untapAttackersEachCombat = false;
   private pending: PendingTrigger[] = [];
   /** Commanders that just went to a graveyard, exile or hand (rule 903.9). */
   private pendingCommander: { seat: number; card: SimCard; to: 'graveyard' | 'exile' | 'hand' | 'library' }[] = [];
@@ -395,13 +401,23 @@ export class Game {
     yield* this.priority();
     if (this.stopped(p)) return;
 
-    yield* this.combat(p);
-    this.endCombat();
-    if (this.stopped(p)) return;
-
-    this.step = 'main2';
-    yield* this.priority();
-    if (this.stopped(p)) return;
+    // Combat, then the postcombat main phase. Additional combat (and main) phases are added to `phases` (rule 500.8).
+    this.phases = ['combat', 'main'];
+    this.combatsThisTurn = 0;
+    this.untapAttackersEachCombat = false;
+    while (this.phases.length) {
+      const phase = this.phases.shift()!;
+      if (phase === 'combat') {
+        this.combatsThisTurn++;
+        if (this.combatsThisTurn > 1) this.say(`${p.name} begins an additional combat phase.`);
+        yield* this.combat(p);
+        this.endCombat();
+      } else {
+        this.step = 'main2';
+        yield* this.priority();
+      }
+      if (this.stopped(p)) return;
+    }
 
     this.step = 'end';
     for (const id of this.unearthed) {
@@ -703,6 +719,8 @@ export class Game {
       if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
       // Crew, kept simple: in your first main phase, so the Vehicle can attack.
       if (perm.card.crew && sorcery && this.step === 'main1' && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
+      // Station (rule 702.184a): tap another untapped creature to add charge counters, as a sorcery, until the last threshold.
+      if (sorcery && this.stationRoom(perm) && this.stationCrew(p, perm).length) actions.push({ type: 'station', permId: perm.id });
       // Classes gain their next level as a sorcery (rule 716.2a).
       const next = sorcery ? this.nextLevel(perm) : undefined;
       if (next && this.planPayment(p, next.cost, 0, 0) !== null) actions.push({ type: 'level', permId: perm.id });
@@ -765,6 +783,10 @@ export class Game {
     if (act.sorcery && !sorcery) return false;
     if (act.energy && p.energy < Math.max(1, act.energy)) return false;
     if (act.charge && (perm.charge ?? 0) < act.charge) return false;
+    if (act.discard && p.hand.length < act.discard) return false;
+    // Devoted Druid: never put on the counter that kills it.
+    if (act.shrinkSelf && this.toughness(perm) - act.shrinkSelf < 1) return false;
+    if (act.removeCounters && this.counterPool(p, perm, act.removeCounters.from) < act.removeCounters.n) return false;
     if (act.sacCreature && !p.battlefield.some((q) => q.card.isCreature)) return false;
     if (act.tapCreatures && p.battlefield.filter((q) => q.card.isCreature && !q.tapped && !(act.tap && q === perm)).length < act.tapCreatures) return false;
     if (this.planPayment(p, act.cost, 0, 0, act.tap ? perm : undefined) === null) return false;
@@ -812,6 +834,18 @@ export class Game {
         perm.uncrewed = perm.card;
         perm.card = this.castCard(perm.card, 'crewed');
         this.say(`${p.name} crews ${perm.card.name} with ${crew.map((c) => c.card.name).join(', ')}.`);
+        return true;
+      }
+      case 'station': {
+        const perm = this.findPerm(action.permId);
+        const crew = perm ? this.stationCrew(p, perm) : [];
+        if (!perm || !crew.length) return false;
+        const [pick] = crew.length === 1 ? [0] : yield* this.choose(p, 'station', `Station ${perm.card.name}: tap which creature?`, crew.map((q) => ({ label: `${q.card.name} (${this.power(q)})`, card: q.card, permId: q.id })), 1, 1);
+        const driver = crew[pick ?? 0];
+        driver.tapped = true;
+        const n = Math.max(0, this.power(driver));
+        this.say(`${p.name} taps ${driver.card.name} to station ${perm.card.name}.`);
+        if (n) this.addCharge(perm, n);
         return true;
       }
       case 'cycle': {
@@ -1061,7 +1095,13 @@ export class Game {
     for (const perm of p.battlefield) {
       if (perm === exclude) continue;
       if (perm.landInfo) {
-        if (!perm.tapped) out.push({ perm, colors: this.landProduces(perm), amount: boost && this.colorlessLand(perm) ? 2 : 1 });
+        if (perm.tapped) continue;
+        const perArtifact = perm.card.effects.some((e) => e.kind === 'mana' && e.perArtifact);
+        if (perArtifact) {
+          out.push({ perm, colors: this.landProduces(perm), amount: Math.max(1, p.battlefield.filter((q) => q.card.isArtifact).length - 1) });
+          continue;
+        }
+        out.push({ perm, colors: this.landProduces(perm), amount: boost && this.colorlessLand(perm) ? 2 : 1 });
         continue;
       }
       if (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')) continue;
@@ -1087,7 +1127,9 @@ export class Game {
         out.push(best);
       }
     }
-    for (let i = 0; i < p.treasures; i++) out.push({ perm: null, colors: 'any', amount: 1 });
+    // Goldspan Dragon: "Treasures you control have '{T}, Sacrifice this artifact: Add two mana of any one color.'"
+    const treasure = this.kindsInGame.has('treasureBoost') && this.statics(p, 'treasureBoost') > 0 ? 2 : 1;
+    for (let i = 0; i < p.treasures; i++) out.push({ perm: null, colors: 'any', amount: treasure });
     return out;
   }
 
@@ -1302,10 +1344,10 @@ export class Game {
         if (src.energy) p.energy = Math.max(0, p.energy - src.energy);
         // Empowered Autogenerator: the counter goes on as part of the ability.
         if (src.charge === 'grow') src.perm.charge = (src.perm.charge ?? 0) + 1;
-      } else {
-        p.treasures -= units;
-        // Each Treasure is sacrificed on its own: Korvold and Juri trigger once for each.
-        for (let i = 0; i < units; i++) this.sacrificed(p);
+      } else if (units > 0) {
+        // Each Treasure is its own source (two mana with Goldspan Dragon) and is sacrificed on its own: Korvold and Juri trigger once for each.
+        p.treasures -= 1;
+        this.sacrificed(p);
       }
     }
     if (lands.length && this.kindsInGame.has('tapPunish')) this.landsTapped(p, lands);
@@ -1406,6 +1448,7 @@ export class Game {
         }
         for (const perm of this.allPerms()) {
           if (perm === src || perm.card.isLand || !this.removable(e.target, perm) || !this.canTarget(p, perm)) continue;
+          if (e.bountyOnly && !perm.bounty) continue;
           if ((e.mode === 'damage' || e.mode === 'fight') && !perm.card.isCreature) continue;
           if (e.mode === 'fight' && perm.seat === p.seat) continue;
           out.push({ kind: 'perm', id: perm.id });
@@ -1441,9 +1484,15 @@ export class Game {
         if (e.what === 'ability') return this.stack.filter((s) => s.kind === 'ability' && s.controller === p.seat && s.sourceId !== src?.id && s.effects.length > 0).map((s) => ({ kind: 'stack', id: s.id }));
         return this.stack.filter((s) => s.kind === 'spell' && (s.card.isInstant || s.card.isSorcery) && (!e.yours || s.controller === p.seat)).map((s) => ({ kind: 'stack', id: s.id }));
       case 'stun':
-        return this.opponents(p).flatMap((o) => o.battlefield).filter((q) => !q.card.isLand && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+        return this.opponents(p).flatMap((o) => o.battlefield).filter((q) => !q.card.isLand && (!e.tapped || (q.tapped && q.card.isCreature)) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'bounty':
+        // Bounty Board may mark any creature; the bot marks opponents' creatures.
         return this.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isCreature && !q.bounty && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'kwCounter':
+        if (e.on === 'self') return null;
+        return p.battlefield.filter((q) => q.card.isCreature && !q.kwCounters?.includes(e.kw) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'poison':
+        return e.who === 'target' ? this.opponents(p).map((o) => ({ kind: 'player', seat: o.seat })) : null;
       case 'monarch':
         return e.opponent ? this.opponents(p).map((o) => ({ kind: 'player', seat: o.seat })) : null;
       case 'fog':
@@ -1822,7 +1871,22 @@ export class Game {
       paidX = act.energy > 0 ? act.energy : aimed ? aimed.card.cmc : p.energy;
       this.payEnergy(p, paidX);
     }
-    if (act.charge) perm.charge = (perm.charge ?? 0) - act.charge;
+    if (act.charge) {
+      perm.charge = (perm.charge ?? 0) - act.charge;
+      this.refreshStation(perm);
+    }
+    if (act.discard) {
+      const picks = yield* this.choose(p, 'discard', `Discard ${act.discard} card${act.discard > 1 ? 's' : ''} for ${perm.card.name}.`, p.hand.map((c) => ({ label: c.name, card: c })), act.discard, act.discard);
+      const gone = picks.map((i) => p.hand[i]).filter(Boolean);
+      for (const c of gone) {
+        p.hand.splice(p.hand.indexOf(c), 1);
+        p.graveyard.push(c);
+      }
+      if (gone.length) this.say(`${p.name} discards ${gone.map((c) => c.name).join(', ')}.`);
+      if (this.kindsInGame.has('when:opponentDiscard')) for (let i = 0; i < gone.length; i++) this.fireOpponents(p, 'opponentDiscard', 1);
+    }
+    if (act.shrinkSelf) perm.counters -= act.shrinkSelf;
+    if (act.removeCounters) this.removeCountersFrom(p, perm, act.removeCounters.n, act.removeCounters.from);
     if (act.tapCreatures) {
       // Tap the creatures that matter least (summoning sickness doesn't stop this, rule 302.6).
       const crew = p.battlefield.filter((q) => q.card.isCreature && !q.tapped).sort((a, b) => this.power(a) - this.power(b)).slice(0, act.tapCreatures);
@@ -1864,6 +1928,8 @@ export class Game {
     const kept: Effect[] = [];
     for (const e of effects) {
       if (this.triggerBudget-- <= 0) return;
+      // "If ~ has four or more quest counters on it" (rule 603.4).
+      if (e.minCharge && (src?.charge ?? 0) < e.minCharge) continue;
       // "If" conditions the classifier couldn't read hold about half the time.
       if (e.chance !== undefined && !this.rng.chance(e.chance)) continue;
       if (e.oncePerTurn && src) {
@@ -1893,6 +1959,11 @@ export class Game {
     if (!perm) return;
     const holder = this.players[perm.seat];
     if (perm.fragile && (spell || perm.fragile === 'any')) this.trigger(holder, perm.card, perm.id, [SACRIFICE_SELF]);
+    // Shay Cormac: an opponent's creature targeted by your spell or ability gets a bounty counter.
+    if (this.kindsInGame.has('bountyOnTarget') && holder !== by && perm.card.isCreature && !perm.bounty && this.statics(by, 'bountyOnTarget') > 0) {
+      perm.bounty = true;
+      this.say(`${perm.card.name} gets a bounty counter.`);
+    }
     if (!this.kindsInGame.has('when:targeted')) return;
     const mine = by.seat === holder.seat;
     for (const src of holder.battlefield) {
@@ -2392,6 +2463,7 @@ export class Game {
       else perm.charge = (perm.charge ?? 0) + n;
     }
     if (card.loyalty !== undefined) perm.loyalty = card.loyalty * doubled;
+    if (perm.charge) this.refreshStation(perm);
     if (perm.printed && clone?.kind === 'clone' && clone.extraCounter && card.isCreature) perm.counters += doubled;
     if (card.isCreature && this.kindsInGame.has('enterCounters')) {
       const hurt = this.opponents(p).filter((o) => o.lostLifeTurn === this.turnNumber).length;
@@ -2593,6 +2665,14 @@ export class Game {
       if (p.energy < e.energyCost) return;
       this.payEnergy(p, e.energyCost);
     }
+    // "Then if it has eight or more night counters on it, remove all of them and ..." (Replicating Ring).
+    if (e.chargeAtResolve) {
+      if (!src || (src.charge ?? 0) < e.chargeAtResolve.n) return;
+      if (e.chargeAtResolve.reset) {
+        src.charge = 0;
+        this.refreshStation(src);
+      }
+    }
 
     switch (e.kind) {
       case 'ramp': {
@@ -2642,6 +2722,9 @@ export class Game {
         break;
       case 'wipe': {
         const amount = n(e.amount);
+        // Wrath of the Skies: pay all the energy you have; everything with mana value up to that goes.
+        const cap = e.byEnergy ? p.energy : Infinity;
+        if (e.byEnergy) this.payEnergy(p, cap);
         this.say(`${p.name} wipes the board (${e.mode} ${e.target === 'creatures' ? 'creatures' : 'nonland permanents'}${e.oneSided ? ', opponents only' : ''}).`);
         // Everything goes at once, so death triggers see every creature that died with them (rule 603.10a).
         const hit: Perm[] = [];
@@ -2651,6 +2734,7 @@ export class Game {
             if (perm.card.isLand) continue;
             if (e.target === 'creatures' && !perm.card.isCreature) continue;
             if (e.target === 'artifacts' && !perm.card.isArtifact) continue;
+            if (perm.card.cmc > cap || (e.byEnergy && perm.card.isPlaneswalker && !perm.card.isCreature)) continue;
             if (e.mode === 'damage') {
               if (perm.card.isCreature) this.hurt(perm, amount, e.shrink);
             } else if (e.mode === 'exile' || e.mode === 'bounce' || !this.hasKw(perm, 'indestructible')) hit.push(perm);
@@ -2768,8 +2852,9 @@ export class Game {
         if (!victim?.alive) break;
         const amount = e.n === -1 ? Math.max(x, 1) : e.n;
         if (this.damageMills(p, victim, amount)) break;
-        this.loseLife(victim, this.doubledDamage(victim, amount), p, 'noncombat');
-        this.say(`${p.name} hits ${victim.name} for ${this.doubledDamage(victim, amount)} (life ${victim.life}).`);
+        const dealt = this.doubledDamage(victim, amount, p);
+        this.loseLife(victim, dealt, p, 'noncombat');
+        this.say(`${p.name} hits ${victim.name} for ${dealt} (life ${victim.life}).`);
         break;
       }
       case 'gainLife':
@@ -2884,7 +2969,7 @@ export class Game {
       case 'counters': {
         const amount = (e.byExperience ? p.experience : e.n === -1 ? Math.max(x, 1) : e.n) * 2 ** this.doublers(p, 'counters');
         if (amount <= 0) break;
-        const creatures = p.battlefield.filter((q) => q.card.isCreature);
+        const creatures = p.battlefield.filter((q) => q.card.isCreature && (!e.artifact || q.card.isArtifact));
         if (e.proliferate) {
           // Proliferate: you choose, so +1/+1 counters on your creatures and -1/-1 counters on your opponents' (rule 701.34).
           // Doubling Season only doubles counters on permanents you control.
@@ -2915,13 +3000,13 @@ export class Game {
           if (p.energy > 0) p.energy++;
           if (p.experience > 0) p.experience++;
         } else if (e.all) {
-          for (const perm of creatures) perm.counters += amount;
+          for (const perm of creatures) this.putCounters(perm, amount);
         } else if (src && src.card.isCreature && p.battlefield.includes(src) && !e.other) {
-          src.counters += amount;
+          this.putCounters(src, amount);
         } else if (e.other ? creatures.some((q) => q !== src) : creatures.length) {
           if (e.other) creatures.splice(creatures.indexOf(src!), creatures.includes(src!) ? 1 : 0);
           const pick = creatures.length === 1 ? [0] : yield* this.choose(p, 'counters', `Put ${amount} +1/+1 counter${amount > 1 ? 's' : ''} on which creature?`, creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
-          creatures[pick[0] ?? 0].counters += amount;
+          this.putCounters(creatures[pick[0] ?? 0], amount);
         }
         break;
       }
@@ -3116,6 +3201,55 @@ export class Game {
         if (list.length) this.say(`${p.name} untaps ${list.length === 1 ? list[0].card.name : `${list.length} permanents`}.`);
         break;
       }
+      case 'loyaltyUp':
+        if (src && src.loyalty !== undefined && p.battlefield.includes(src)) {
+          src.loyalty += e.n;
+          this.say(`${src.card.name} gets ${e.n} loyalty (${src.loyalty}).`);
+        }
+        break;
+      case 'doubleCounters': {
+        const total = (q: Perm) => Math.max(0, q.counters) + (q.charge ?? 0) + (q.loyalty ?? 0);
+        const mine = p.battlefield.filter((q) => total(q) > 0);
+        const list = e.on === 'yours' ? mine : mine.sort((a, b) => total(b) - total(a)).slice(0, 1);
+        for (const q of list) {
+          if (q.counters > 0) this.putCounters(q, q.counters);
+          if (q.charge) this.addCharge(q, q.charge);
+          if (q.loyalty) q.loyalty *= 2;
+        }
+        if (list.length) this.say(`${p.name} doubles the counters on ${list.map((q) => q.card.name).join(', ')}.`);
+        break;
+      }
+      case 'winGame':
+        if (!this.over) this.winGame(p, card?.name ?? src?.card.name ?? 'an ability');
+        break;
+      case 'loseGame': {
+        // The player the trigger is about (the one dealt combat damage), else the opponent closest to losing.
+        const about = this.resolving?.subject;
+        const v = about !== undefined && this.players[about] ? this.players[about] : [...this.opponents(p)].sort((a, b) => a.life - b.life)[0];
+        if (!v || !v.alive || v === p) break;
+        this.say(`${v.name} loses the game (${card?.name ?? src?.card.name ?? 'an ability'}).`);
+        v.life = Math.min(v.life, 0);
+        v.lastHitBy = p.seat;
+        v.lastHitKind = 'noncombat';
+        break;
+      }
+      case 'extraCombat': {
+        // Only during the turn's own combat or main phases; a cap keeps loops (Aurelia with Lightning Runner) finite.
+        const inCombat = ['beginCombat', 'declareAttackers', 'declareBlockers', 'combatDamage', 'endCombat'].includes(this.step);
+        if (e.inCombat && (!inCombat || this.activeSeat !== p.seat)) break;
+        if (e.firstOnly && this.combatsThisTurn > 1) break;
+        if (e.untapAttacked) this.untapAttackersEachCombat = true;
+        const room = Math.max(0, 6 - this.combatsThisTurn - this.phases.filter((ph) => ph === 'combat').length);
+        const n = Math.min(e.n, room);
+        if (!n) break;
+        const added: ('combat' | 'main')[] = [];
+        for (let i = 0; i < n; i++) added.push('combat');
+        if (e.main) added.push('main');
+        if (e.after === 'lastMain') this.phases.push(...added);
+        else this.phases.unshift(...added);
+        this.say(`There ${n === 1 ? 'is an additional combat phase' : `are ${n} additional combat phases`} this turn${e.main ? ', followed by an additional main phase' : ''}.`);
+        break;
+      }
       case 'copySpell': {
         const id = e.what === 'trigger' ? this.resolving?.subject : target?.kind === 'stack' ? target.id : undefined;
         const orig = this.stack.find((s) => s.id === id);
@@ -3182,19 +3316,25 @@ export class Game {
         this.gainEnergy(p, e.n === -1 ? x : e.n);
         break;
       case 'charge': {
-        const amount = e.n * 2 ** this.doublers(p, 'counters');
+        const amount = n(e.n) * 2 ** this.doublers(p, 'counters');
+        if (amount <= 0) break;
         let on = e.target ? null : src && p.battlefield.includes(src) ? src : null;
         if (e.target) {
           // Another artifact you control: the one that does the most with charge counters.
           const options = p.battlefield.filter((q) => q.card.isArtifact && q !== src).sort((a, b) => chargeUse(b.card) - chargeUse(a.card));
           if (!options.length) break;
+          // Inspirit: a +1/+1 counter on an artifact creature instead, when no artifact does anything with charge counters.
+          const body = e.orCounter && chargeUse(options[0].card) === 0 ? options.filter((q) => q.card.isCreature).sort((a, b) => this.power(b) - this.power(a))[0] : undefined;
+          if (body) {
+            body.counters += 2 ** this.doublers(p, 'counters');
+            this.say(`${body.card.name} gets a +1/+1 counter.`);
+            break;
+          }
           const pick = options.length === 1 ? [0] : yield* this.choose(p, 'counters', `Put ${amount} charge counter${amount > 1 ? 's' : ''} on which artifact?`, options.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
           on = options[pick[0] ?? 0];
         }
         if (!on) break;
-        on.charge = (on.charge ?? 0) + amount;
-        this.say(`${on.card.name} gets ${amount} charge counter${amount > 1 ? 's' : ''} (${on.charge}).`);
-        this.chargeWins(on);
+        this.addCharge(on, amount);
         break;
       }
       case 'fog':
@@ -3253,6 +3393,7 @@ export class Game {
       case 'stun': {
         const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
         if (!perm) break;
+        if (e.tap) perm.tapped = true;
         perm.stun = (perm.stun ?? 0) + 1;
         this.say(`${perm.card.name} gets a stun counter.`);
         break;
@@ -3261,7 +3402,28 @@ export class Game {
         const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
         if (!perm || perm.bounty) break;
         perm.bounty = true;
+        if (!e.plain) perm.bountyGrant = true;
         this.say(`${perm.card.name} gets a bounty counter.`);
+        break;
+      }
+      case 'poison': {
+        const victims = e.who === 'each' ? this.alivePlayers() : e.who === 'opponents' ? this.opponents(p) : target?.kind === 'player' ? [this.players[target.seat]] : [];
+        for (const v of victims) {
+          if (!v.alive || v.shielded) continue;
+          v.poison += e.n;
+          if (v !== p) {
+            v.lastHitBy = p.seat;
+            v.lastHitKind = 'noncombat';
+          }
+          this.say(`${v.name} gets ${e.n} poison counter${e.n > 1 ? 's' : ''} (${v.poison} of 10).`);
+        }
+        break;
+      }
+      case 'kwCounter': {
+        const perm = e.on === 'self' ? (src && p.battlefield.includes(src) ? src : null) : target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (!perm || perm.kwCounters?.includes(e.kw)) break;
+        (perm.kwCounters ??= []).push(e.kw);
+        this.say(`${perm.card.name} gets ${/^[aeiou]/.test(e.kw) ? 'an' : 'a'} ${e.kw} counter.`);
         break;
       }
       case 'sacrificeOther': {
@@ -3519,8 +3681,126 @@ export class Game {
     p.energyPaid = (p.energyPaid ?? 0) + amount;
   }
 
+  /** Counters a "remove N counters" cost can take: +1/+1 counters on the source ('self'), or any counters on `p`'s permanents ('any'). */
+  counterPool(p: PlayerState, src: Perm, from: 'self' | 'any'): number {
+    if (from === 'self') return Math.max(0, src.counters);
+    return p.battlefield.reduce((n, q) => n + Math.max(0, q.counters) + (q.charge ?? 0), 0);
+  }
+
+  /** Pay a "remove counters" cost: charge counters first (they are spent anyway), then +1/+1 counters on the least useful creature. */
+  private removeCountersFrom(p: PlayerState, src: Perm, n: number, from: 'self' | 'any') {
+    let left = n;
+    if (from === 'self') {
+      src.counters -= Math.min(left, Math.max(0, src.counters));
+      return;
+    }
+    for (const q of [...p.battlefield].sort((a, b) => (b.charge ?? 0) - (a.charge ?? 0))) {
+      if (left <= 0) break;
+      const take = Math.min(left, q.charge ?? 0);
+      if (take) {
+        q.charge! -= take;
+        left -= take;
+        this.refreshStation(q);
+      }
+    }
+    for (const q of [...p.battlefield].filter((x) => x.counters > 0).sort((a, b) => this.power(a) - this.power(b))) {
+      if (left <= 0) break;
+      const take = Math.min(left, q.counters);
+      q.counters -= take;
+      left -= take;
+    }
+  }
+
+  /**
+   * A creature with a bounty counter died. Mathas's counter carries "each opponent draws a card and gains 2 life";
+   * Bounty Board pays the same while it is out; Shay Cormac gets +1/+1 counters.
+   */
+  private bountyPaid(perm: Perm, controller: PlayerState) {
+    const payouts = this.allPerms().flatMap((q) => q.card.effects.filter((e) => e.kind === 'bountyPayout').map((e) => ({ q, e: e as Extract<Effect, { kind: 'bountyPayout' }> })));
+    if (perm.bountyGrant || payouts.some(({ e }) => e.what === 'drawGain')) {
+      for (const o of this.opponents(controller)) {
+        this.draw(o, 1);
+        this.gainLife(o, 2);
+      }
+      this.say(`The bounty on ${perm.card.name} pays out.`);
+    }
+    for (const { q, e } of payouts) {
+      if (e.what !== 'counters' || q === perm) continue;
+      this.putCounters(q, e.n * 2 ** this.doublers(this.players[q.seat], 'counters'));
+      this.say(`${q.card.name} collects the bounty on ${perm.card.name} (${e.n} +1/+1 counters).`);
+    }
+  }
+
+  /** Put +1/+1 counters on a permanent: "whenever one or more +1/+1 counters are put on" abilities trigger (Simic Ascendancy, Knighted Myr). */
+  putCounters(perm: Perm, n: number) {
+    if (n <= 0) return;
+    perm.counters += n;
+    if (!this.kindsInGame.has('when:countersPut')) return;
+    const p = this.players[perm.seat];
+    for (const q of p.battlefield) {
+      const hits = q.card.effects.filter((e) => e.when === 'countersPut' && (e.scope === 'self' ? q === perm : perm.card.isCreature));
+      if (hits.length) this.trigger(p, q.card, q.id, hits, n);
+    }
+  }
+
+  /** Put charge (quest, oil ...) counters on a permanent: station thresholds, charge wins and the like follow. */
+  addCharge(perm: Perm, n: number) {
+    perm.charge = (perm.charge ?? 0) + n;
+    const name = (perm.printed ?? perm.card).counterName ?? 'charge';
+    this.say(`${perm.card.name} gets ${n} ${name} counter${n > 1 ? 's' : ''} (${perm.charge}).`);
+    this.chargeWins(perm);
+  }
+
+  /** Whether stationing this permanent still reaches a threshold it hasn't got to yet. */
+  stationRoom(perm: Perm): boolean {
+    const st = (perm.printed ?? perm.card).station;
+    if (!st) return false;
+    const top = Math.max(st.creatureAt ?? 0, ...st.tiers.map((t) => t.n));
+    return (perm.charge ?? 0) < top;
+  }
+
+  /** The other untapped creatures that could station this permanent, strongest first (summoning sickness doesn't matter, rule 302.6). */
+  stationCrew(p: PlayerState, perm: Perm): Perm[] {
+    return p.battlefield.filter((q) => q !== perm && q.card.isCreature && !q.tapped && this.power(q) > 0).sort((a, b) => this.power(b) - this.power(a));
+  }
+
+  private stationCards = new WeakMap<SimCard, Map<number, SimCard>>();
+  /** Station (rule 702.184c): the abilities of every threshold the charge counters reach; a Spacecraft is a creature from `creatureAt`. */
+  private refreshStation(perm: Perm) {
+    const base = perm.printed ?? perm.card;
+    const st = base.station;
+    if (!st) return;
+    const charge = perm.charge ?? 0;
+    const reached = st.tiers.filter((t) => t.n <= charge);
+    const creature = st.creatureAt !== undefined && charge >= st.creatureAt;
+    const key = reached.length * 2 + (creature ? 1 : 0);
+    let cache = this.stationCards.get(base);
+    if (!cache) this.stationCards.set(base, (cache = new Map()));
+    let card = cache.get(key);
+    if (!card) {
+      card = key === 0 ? base : {
+        ...base,
+        isCreature: base.isCreature || creature,
+        keywords: [...base.keywords, ...reached.flatMap((t) => t.keywords)],
+        effects: [...base.effects, ...reached.flatMap((t) => t.effects)],
+      };
+      cache.set(key, card);
+    }
+    if (perm.card === card) return;
+    const was = perm.card;
+    perm.printed = base;
+    perm.card = card;
+    for (const e of card.effects) {
+      this.kindsInGame.add(e.kind);
+      this.kindsInGame.add(`when:${e.when}`);
+    }
+    if (card.isCreature && !was.isCreature) this.say(`${base.name} is now a ${card.power}/${card.toughness} artifact creature.`);
+    else if (card.effects.length > was.effects.length || card.keywords.length > was.keywords.length) this.say(`${base.name} reaches its ${Math.max(...reached.map((t) => t.n))}+ station threshold.`);
+  }
+
   /** Darksteel Reactor: twenty charge counters win the game. */
   private chargeWins(perm: Perm) {
+    this.refreshStation(perm);
     for (const e of perm.card.effects) {
       if (e.kind === 'chargeWin' && (perm.charge ?? 0) >= e.n) {
         const p = this.players[perm.seat];
@@ -3585,9 +3865,10 @@ export class Game {
     let t = 0;
     for (const perm of this.players[target.seat].battlefield) {
       for (const e of perm.card.effects) {
-        if (e.kind === 'anthem' && this.anthemApplies(e, target) && !(e.other && perm === target)) {
-          p += e.p;
-          t += e.t;
+        if (e.kind === 'anthem' && this.anthemApplies(e, target) && !(e.other && perm === target) && this.chargeOn(perm, e)) {
+          const times = e.perCharge ? perm.charge ?? 0 : 1;
+          p += e.p * times;
+          t += e.t * times;
         }
       }
     }
@@ -3597,6 +3878,11 @@ export class Game {
       t -= c.n;
     }
     return { p, t };
+  }
+
+  /** A static ability that needs "N or more charge counters" on its source (Beastmaster Ascension) is on. */
+  private chargeOn(src: Perm, e: Effect): boolean {
+    return !e.minCharge || (src.charge ?? 0) >= e.minCharge;
   }
 
   /** Anthems limited to some creatures: enchantment or artifact creatures, or ones you control but don't own. */
@@ -3677,7 +3963,7 @@ export class Game {
   }
 
   hasKw(perm: Perm, kw: string): boolean {
-    if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw)) return true;
+    if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw) || perm.kwCounters?.includes(kw)) return true;
     if (this.kindsInGame.has('selfKeyword')) {
       for (const e of perm.card.effects) {
         if (e.kind !== 'selfKeyword' || e.keyword !== kw) continue;
@@ -3687,7 +3973,7 @@ export class Game {
     }
     if (!perm.card.isCreature) return false;
     if (this.kindsInGame.has('anthem')) {
-      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && this.anthemApplies(e, perm) && !(e.other && q === perm) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && this.anthemApplies(e, perm) && !(e.other && q === perm) && this.chargeOn(q, e) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
     }
     for (const eq of this.attachments(perm)) {
       for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
@@ -3792,14 +4078,7 @@ export class Game {
           && (q === controller ? e.scope !== 'opponents' : e.scope === 'all' || e.scope === 'opponents') && (w !== perm || e.selfToo) && !(e.nontoken && perm.token));
         if (hits.length) for (let i = this.triggerTimes(q, 'dies'); i > 0; i--) this.trigger(q, w.card, w.id, hits, 0, w);
       }
-      // Mathas's bounty: each opponent of the creature's controller draws a card and gains 2 life.
-      if (perm.bounty) {
-        for (const o of this.opponents(controller)) {
-          this.draw(o, 1);
-          this.gainLife(o, 2);
-        }
-        this.say(`The bounty on ${perm.card.name} pays out.`);
-      }
+      if (perm.bounty) this.bountyPaid(perm, controller);
       // Skullclamp: "whenever equipped creature dies".
       for (const eq of worn) {
         const hits = eq.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'attached');
@@ -4113,9 +4392,18 @@ export class Game {
   }
 
   /** Curse of Bloodletting: damage to the enchanted player is doubled for each one. */
-  private doubledDamage(victim: PlayerState, amount: number): number {
-    if (!this.anyCurse) return amount;
-    return amount * 2 ** this.cursedBy(victim, 'double').length;
+  private doubledDamage(victim: PlayerState, amount: number, from?: PlayerState, combat = false): number {
+    let out = amount;
+    // Fated Firepower (+1 per fire counter), Solphim (noncombat damage doubled): damage `from`'s sources deal to an opponent.
+    if (from && from !== victim && amount > 0 && this.kindsInGame.has('damageBonus')) {
+      for (const perm of from.battlefield) for (const e of perm.card.effects) {
+        if (e.kind !== 'damageBonus' || (e.noncombat && combat)) continue;
+        if (e.perCharge) out += perm.charge ?? 0;
+        if (e.double) out *= 2;
+      }
+    }
+    if (!this.anyCurse) return out;
+    return out * 2 ** this.cursedBy(victim, 'double').length;
   }
 
   /** The Ring tempts `p` (rule 701.54): the next of its abilities, a ring-bearer (their strongest creature), then "whenever the Ring tempts you". */
@@ -4338,7 +4626,7 @@ export class Game {
       if (!p.alive) continue;
       for (const perm of p.battlefield) {
         if (perm.card.name !== 'Bloodchief Ascension') continue;
-        if (this.opponents(p).some((o) => this.lifeLostThisTurn[o.seat] >= 2)) perm.counters++;
+        if (this.opponents(p).some((o) => this.lifeLostThisTurn[o.seat] >= 2)) this.addCharge(perm, 1);
       }
     }
   }
@@ -4463,6 +4751,11 @@ export class Game {
 
   private *combat(p: PlayerState): Flow<void> {
     this.step = 'beginCombat';
+    if (this.untapAttackersEachCombat) {
+      const again = p.battlefield.filter((q) => q.tapped && q.attackedTurn === this.turnNumber && q.card.isCreature && !q.stun);
+      for (const q of again) q.tapped = false;
+      if (again.length) this.say(`${p.name} untaps ${again.length === 1 ? again[0].card.name : `${again.length} creatures`} that attacked this turn.`);
+    }
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -4700,7 +4993,7 @@ export class Game {
       // The Mindskinner: prevented, and the player mills that many instead.
       if (this.damageMills(p, d.to, d.amount)) continue;
       if (!before.has(d.to)) before.set(d.to, d.to.life);
-      d.amount = this.doubledDamage(d.to, d.amount);
+      d.amount = this.doubledDamage(d.to, d.amount, p, true);
       // Infect: poison counters instead of life loss (rule 702.90).
       if (this.hasKw(d.from, 'infect')) {
         if (!d.to.shielded) {
@@ -4758,7 +5051,8 @@ export class Game {
         const each = perm.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'any');
         if (each.length) for (const a of hitPlayer) {
           const hits = each.filter((e) => !(e.nontoken && a.token));
-          if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+          // The player it hit is what the ability is about (Strixhaven Stadium: "that player loses the game").
+          if (hits.length) this.trigger(p, perm.card, perm.id, hits, 0, null, a.attacking ?? undefined);
         }
       }
     }
@@ -4825,7 +5119,11 @@ export function chargeUse(card: SimCard): number {
     else if (e.kind === 'mana' && e.charge) n += 4;
     else if (e.kind === 'treasure' && e.byCharge) n += 3;
     else if (e.activation?.charge) n += e.activation.charge <= 5 ? 6 - e.activation.charge : 0;
+    else if (e.minCharge) n += 2;
+    else if (e.chargeAtResolve) n += 4;
   }
+  // Spacecraft and Planets: counters bring them to their station thresholds.
+  if (card.station) n += 5;
   return n;
 }
 

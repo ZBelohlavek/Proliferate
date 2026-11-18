@@ -55,6 +55,7 @@ export type Trigger =
   | 'targeted' // a permanent becomes the target of a spell or ability (see scope, targetedBy, spellOnly)
   | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
+  | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -95,6 +96,10 @@ export type Effect = EffectBody & {
   energyCost?: number;
   /** Multikicker (rule 702.33c): the effect happens once more for each time the spell was kicked (Comet Storm). */
   perKick?: boolean;
+  /** "If ~ has N or more charge (quest, oil ...) counters on it" (rule 603.4): only then does it trigger or apply. */
+  minCharge?: number;
+  /** "Then if it has N or more charge counters on it, (remove them all and) ...": checked as the ability resolves. */
+  chargeAtResolve?: { n: number; reset: boolean };
   /** "Becomes the target" triggers: whose spell or ability it must be ('you' or 'opponents'; default anyone's). */
   targetedBy?: 'you' | 'opponents';
   /** "Becomes the target of a spell": abilities don't count. */
@@ -110,6 +115,12 @@ export type Effect = EffectBody & {
     charge?: number;
     /** "Activate only as a sorcery." */
     sorcery?: boolean;
+    /** "Discard a card" as part of the cost. */
+    discard?: number;
+    /** "Put a -1/-1 counter on ~" as part of the cost (Devoted Druid). */
+    shrinkSelf?: number;
+    /** "Remove two +1/+1 counters from ~" ('self'), or "remove a counter from a permanent you control" ('any': any kind, any of yours). */
+    removeCounters?: { n: number; from: 'self' | 'any' };
     /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
     boast?: boolean;
   };
@@ -122,7 +133,7 @@ export type EffectBody =
    * charge: the amount is the source's charge counters ('tap': Astral Cornucopia; 'grow': a counter is added first,
    * Empowered Autogenerator) or each counter can be removed for one mana without tapping ('spend': Pentad Prism).
    */
-  | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend' }
+  | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend'; /** A land that taps for one mana for each artifact you control, less one it costs (Uthros, Titanic Godcore). */ perArtifact?: boolean }
   | { kind: 'costReduction'; amount: number; filter: CastFilter }
   /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
   | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean }
@@ -135,8 +146,8 @@ export type EffectBody =
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
   /** replace: a destroyed land's controller may search for a basic land to put onto the battlefield (Ghost Quarter). */
   /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean }
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
@@ -157,7 +168,7 @@ export type EffectBody =
   /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
   | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
@@ -198,7 +209,7 @@ export type EffectBody =
   | { kind: 'returnSelf'; counters: number }
   /** proliferate: only creatures that already have a counter. */
   /** byExperience: as many counters as you have experience counters (Kratos). */
-  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
+  | { kind: 'counters'; n: number; all: boolean; /** "Each artifact creature you control" (Steel Overseer). */ artifact?: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
   /**
@@ -253,9 +264,17 @@ export type EffectBody =
   /** You get an experience counter. */
   | { kind: 'experience' }
   /** Put a stun counter on an opponent's nonland permanent (its next untap doesn't happen). */
-  | { kind: 'stun' }
+  | { kind: 'stun'; /** Tap it first (Fear of Sleep Paralysis). */ tap?: boolean; /** Only a tapped creature (Cryogen Relic). */ tapped?: boolean }
   /** Mathas: a bounty counter on an opponent's creature; when it dies, its controller's opponents each draw 1 and gain 2. */
-  | { kind: 'bounty' }
+  | { kind: 'bounty'; /** Only the counter: the creature doesn't get Mathas's "when this dies, each opponent draws and gains 2". */ plain?: boolean; /** Any creature, not only an opponent's (Bounty Board). */ any?: boolean }
+  /** Static: whenever a creature with a bounty counter dies, each of its controller's opponents draws and gains 2 (Bounty Board), or this gets `n` +1/+1 counters (Shay Cormac). */
+  | { kind: 'bountyPayout'; what: 'drawGain' | 'counters'; n: number }
+  /** Static: an opponent's creature that becomes the target of your spell or ability gets a bounty counter (Shay Cormac). */
+  | { kind: 'bountyOnTarget' }
+  /** Players get poison counters (rule 122.1f): each opponent, each player, or one target player. */
+  | { kind: 'poison'; n: number; who: 'opponents' | 'each' | 'target' }
+  /** A keyword counter (rule 122.1b): an indestructible or flying counter on the source ('self') or one of your creatures ('yours'). */
+  | { kind: 'kwCounter'; kw: string; on: 'self' | 'yours' }
   /** Korvold: sacrifice another permanent (part of the trigger, not optional). */
   | { kind: 'sacrificeOther' }
   /** Roll this many six-sided dice; each result fires your die-roll triggers. */
@@ -275,7 +294,7 @@ export type EffectBody =
   /** Energy you would get is doubled (Aether Refinery: mult 2) or increased (Izzet Generatorium: plus 1). */
   | { kind: 'energyBoost'; mult: number; plus: number }
   /** Charge counters: on the source, or on another target artifact you control. */
-  | { kind: 'charge'; n: number; target?: 'artifact' }
+  | { kind: 'charge'; n: number; target?: 'artifact'; /** "Your choice of a +1/+1 counter or two charge counters" (Inspirit): a +1/+1 counter on an artifact creature when no artifact uses charge counters. */ orCounter?: boolean }
   /** Darksteel Reactor: you win the game once the source has this many charge counters. */
   | { kind: 'chargeWin'; n: number }
   /**
@@ -360,6 +379,28 @@ export type EffectBody =
   | { kind: 'lifeLossMill' }
   /** Untap your permanents: up to n lands, all your creatures, all your nonland permanents, one permanent, or the source itself. */
   | { kind: 'untap'; what: 'lands' | 'creatures' | 'nonland' | 'artifacts' | 'permanent' | 'self'; n: number }
+  /**
+   * Additional combat phases (rule 500.8): `n` combats, then an additional main phase if `main`. They come right after
+   * the current phase, or after the second main phase ('lastMain', World at War). firstOnly: only during the turn's
+   * first combat (Genji Glove, Aurelia). inCombat: only during your own combat (Great Train Heist). untapAttacked: at the
+   * beginning of each combat this turn, untap all creatures that attacked this turn (Full Throttle).
+   */
+  | { kind: 'extraCombat'; n: number; main?: boolean; after?: 'lastMain'; firstOnly?: boolean; inCombat?: boolean; untapAttacked?: boolean }
+  /**
+   * Static: damage your sources deal to an opponent is increased: by the source's charge counters (Fated Firepower's
+   * fire counters, `perCharge`), or doubled (`double`; only noncombat damage with `noncombat`, Solphim).
+   */
+  | { kind: 'damageBonus'; perCharge?: boolean; double?: boolean; noncombat?: boolean }
+  /** Put loyalty counters on this planeswalker (Kaito, Ral). */
+  | { kind: 'loyaltyUp'; n: number }
+  /** Double the number of each kind of counter on your permanents ('yours', Deepglow Skate) or on your best one ('best', Aetheric Amplifier). */
+  | { kind: 'doubleCounters'; on: 'yours' | 'best' }
+  /** Static: your Treasures tap for two mana (Goldspan Dragon). */
+  | { kind: 'treasureBoost' }
+  /** You win the game (Simic Ascendancy). */
+  | { kind: 'winGame' }
+  /** That player loses the game: the player the trigger is about (Strixhaven Stadium). */
+  | { kind: 'loseGame' }
   /** Static: untap these permanents of yours during each other player's untap step too (Seedborn Muster, Unwinding Clock). */
   | { kind: 'untapAlways'; what: 'all' | 'artifacts' | 'self' }
   /**
@@ -508,6 +549,14 @@ export interface SimCard {
     evoke?: boolean;
     dash?: boolean;
   };
+  /**
+   * Station (rule 702.184): tap another creature you control to put charge counters equal to its power on this,
+   * as a sorcery. Each tier's abilities and keywords apply from `n` charge counters on; a Spacecraft becomes an
+   * artifact creature with the card's power and toughness at `creatureAt`.
+   */
+  station?: { tiers: { n: number; keywords: string[]; effects: Effect[] }[]; creatureAt?: number };
+  /** What this card's charge counters are really called (quest, oil, loot ...), for the log. */
+  counterName?: string;
   /** Enters with this many charge counters (-1: X; sunburst: one for each color of mana spent, rule 702.44). */
   charge?: number;
   /** Sunburst (rule 702.44): a creature gets +1/+1 counters, anything else charge counters, one for each color spent. */
