@@ -152,6 +152,9 @@ export class Game {
       drewFromEmpty: false,
       landsPlayed: 0,
       spellsThisTurn: 0,
+      drawsThisTurn: 0,
+      ringLevel: 0,
+      ringBearer: null,
       poison: 0,
       shielded: false,
       lastHitBy: null,
@@ -339,10 +342,14 @@ export class Game {
     p.landsPlayed = 0;
     p.graveyardTypes = undefined;
     p.shielded = false;
-    for (const q of this.players) q.spellsThisTurn = 0;
+    for (const q of this.players) {
+      q.spellsThisTurn = 0;
+      q.drawsThisTurn = 0;
+    }
 
     // Upkeep step (503).
     this.step = 'upkeep';
+    this.cumulativeUpkeep(p);
     this.fire(p, 'upkeep');
     if (this.winconSeats.has(p.seat)) this.upkeepWins(p);
     yield* this.priority();
@@ -423,6 +430,20 @@ export class Game {
   /** `quiet`: don't set off "whenever an opponent draws" (used for draws those abilities cause, so two can't feed each other). */
   draw(p: PlayerState, n: number, quiet = false) {
     for (let i = 0; i < n; i++) {
+      // Narset, Notion Thief, Teferi's Ageless Insight (replacement effects apply once per draw, rule 614.5).
+      if (this.kindsInGame.has('drawRule') && !quiet) {
+        const rule = this.drawRule(p);
+        if (rule === 'limit') return;
+        if (rule !== null && typeof rule === 'object') {
+          this.say(`${rule.thief.name} draws instead of ${p.name}.`);
+          this.draw(rule.thief, 1, true);
+          continue;
+        }
+        if (rule === 'double') {
+          this.draw(p, 1, true);
+          this.say(`${p.name} draws an extra card.`);
+        }
+      }
       const c = p.library.shift();
       if (!c) {
         if (this.statics(p, 'winOnEmptyDraw') > 0) {
@@ -439,17 +460,34 @@ export class Game {
       }
       p.hand.push(c);
       p.drawnNames.add(c.name);
+      p.drawsThisTurn++;
       if (this.turnNumber === 0) continue;
       if (this.kindsInGame.has('when:draw')) this.fire(p, 'draw');
       if (quiet) continue;
       for (const o of this.players) {
         if (o === p || !o.alive) continue;
         for (const perm of o.battlefield) {
-          const hits = perm.card.effects.filter((e) => e.when === 'opponentDraw');
+          // "Whenever an opponent draws their second card each turn" (Faerie Mastermind) counts that player's draws.
+          const hits = perm.card.effects.filter((e) => e.when === 'opponentDraw' && (e.nth === undefined || e.nth === p.drawsThisTurn));
           if (hits.length) this.trigger(o, perm.card, perm.id, hits);
         }
       }
     }
+  }
+
+  /**
+   * What happens to `p`'s next draw: nothing (null), it doesn't happen ('limit': Narset), an opponent draws
+   * instead (Notion Thief), or it becomes two ('double': Teferi's Ageless Insight). The first card of the
+   * draw step is exempt from the last two.
+   */
+  private drawRule(p: PlayerState): 'limit' | 'double' | { thief: PlayerState } | null {
+    const rules = (q: PlayerState) => q.battlefield.flatMap((perm) => perm.card.effects.filter((e): e is Extract<Effect, { kind: 'drawRule' }> => e.kind === 'drawRule' && e.when === 'static'));
+    const opponents = this.opponents(p);
+    if (p.drawsThisTurn >= 1 && opponents.some((o) => rules(o).some((e) => e.rule === 'limit'))) return 'limit';
+    if (this.step === 'draw' && this.activeSeat === p.seat && p.drawsThisTurn === 0) return null;
+    const thief = opponents.find((o) => rules(o).some((e) => e.rule === 'steal'));
+    if (thief) return { thief };
+    return rules(p).some((e) => e.rule === 'double') ? 'double' : null;
   }
 
   /** How many of a static effect `p` controls, or everyone controls when `p` is null. */
@@ -2010,6 +2048,8 @@ export class Game {
         this.takeControl(host, p);
         this.hold(host, perm);
       }
+      const lock = card.effects.find((e) => e.kind === 'equip' && e.lock);
+      if (lock?.kind === 'equip') this.lockDown(host, perm, lock);
     }
     // Doubling Season: counters a permanent enters with are doubled too (rule 122.6, 614.1c).
     const doubled = 2 ** this.doublers(p, 'counters');
@@ -2118,7 +2158,7 @@ export class Game {
     // A merged permanent returns as its separate cards (rule 721.3); a face-down or transformed one returns face up, front face first.
     const cards = perm.parts
       ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-      : [{ card: perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+      : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
     for (const { card, commander } of cards) {
       this.say(`${card.name} is exiled and returns to the battlefield under ${owner.name}'s control.`);
       yield* this.enter(owner, card, commander, 0, null);
@@ -2666,6 +2706,9 @@ export class Game {
         if (orig) yield* this.copyItem(p, orig);
         break;
       }
+      case 'ringTempts':
+        this.ringTempts(p);
+        break;
       case 'experience':
         p.experience++;
         this.say(`${p.name} gets an experience counter (${p.experience}).`);
@@ -2845,6 +2888,15 @@ export class Game {
       p.lastHitBy = source.seat;
       p.lastHitKind = kind;
     }
+    // Mindcrank: mill that many.
+    if (this.kindsInGame.has('lifeLossMill')) {
+      for (const o of this.opponents(p)) {
+        const n = this.statics(o, 'lifeLossMill');
+        if (!n) continue;
+        this.millCards(p, amount * n);
+        p.milledBy = o.seat;
+      }
+    }
     return amount;
   }
 
@@ -3000,7 +3052,7 @@ export class Game {
       if (owner.alive) {
         const cards = perm.parts
           ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-          : perm.token ? [] : [{ card: perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+          : perm.token ? [] : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
         for (const { card, commander } of cards) {
           if (dest === 'graveyard') owner.graveyard.push(card);
           else if (dest === 'exile') owner.exile.push(card);
@@ -3020,6 +3072,11 @@ export class Game {
     if (this.anyHeld) {
       const gone = new Set(perms.map((q) => q.id));
       for (const q of this.allPerms()) if (q.heldBy !== undefined && gone.has(q.heldBy)) this.giveBack(q);
+    }
+    // A lockdown Aura that leaves gives the permanent its abilities back.
+    if (this.anyLocked) {
+      const gone = new Set(perms.map((q) => q.id));
+      for (const q of this.allPerms()) if (q.lockedBy !== undefined && gone.has(q.lockedBy)) this.unlock(q);
     }
 
     for (const { perm, seat, worn } of died) {
@@ -3052,8 +3109,76 @@ export class Game {
     }
   }
 
+  /**
+   * Cumulative upkeep (rule 702.24): an age counter, then pay the cost once per counter or sacrifice it.
+   * Paid while it costs three times the cost or less and mana allows; the trigger is handled at once here.
+   */
+  private cumulativeUpkeep(p: PlayerState) {
+    for (const perm of [...p.battlefield]) {
+      const cost = perm.card.cumulativeUpkeep;
+      if (!cost) continue;
+      perm.age = (perm.age ?? 0) + 1;
+      const total: ManaCost = { generic: cost.generic * perm.age, pips: Array.from({ length: perm.age }, () => cost.pips).flat(), x: 0, life: 0 };
+      const plan = perm.age <= 3 ? this.planPayment(p, total, 0, 0) : null;
+      if (plan) {
+        this.commitPayment(p, plan);
+        this.say(`${p.name} pays cumulative upkeep for ${perm.card.name} (${perm.age} age counter${perm.age > 1 ? 's' : ''}).`);
+      } else {
+        this.say(`${p.name} doesn't pay cumulative upkeep and sacrifices ${perm.card.name}.`);
+        this.removePerm(perm, 'graveyard');
+        this.sacrificed(p);
+      }
+    }
+  }
+
   /** True once anything was taken "for as long as" something stays. */
   private anyHeld = false;
+  /** True once a lockdown Aura has been attached. */
+  private anyLocked = false;
+
+  /** Amphibian Downpour, Imprisoned in the Moon: `host` loses its abilities while `aura` stays attached (rule 613.1). */
+  private lockDown(host: Perm, aura: Perm, e: Extract<Effect, { kind: 'equip' }>) {
+    if (host.unlocked) return;
+    host.unlocked = host.card;
+    host.lockedBy = aura.id;
+    host.card = lockedCard(host.card, e.lock === 'land' ? null : e.lockSize ?? { p: 1, t: 1 });
+    this.anyLocked = true;
+    this.say(`${host.unlocked.name} loses all its abilities${e.lock === 'land' ? ' and becomes a land' : ` and is a ${this.power(host)}/${this.toughness(host)}`}.`);
+  }
+
+  /** The Ring tempts `p` (rule 701.54): the next of its abilities, a ring-bearer (their strongest creature), then "whenever the Ring tempts you". */
+  private ringTempts(p: PlayerState) {
+    p.ringLevel = Math.min(4, p.ringLevel + 1);
+    const creatures = p.battlefield.filter((q) => q.card.isCreature);
+    const bearer = creatures.length ? creatures.reduce((a, b) => (this.power(b) + (this.hasKw(b, 'flying') || this.hasKw(b, 'unblockable') ? 2 : 0) > this.power(a) + (this.hasKw(a, 'flying') || this.hasKw(a, 'unblockable') ? 2 : 0) ? b : a)) : null;
+    p.ringBearer = bearer?.id ?? null;
+    this.say(`The Ring tempts ${p.name} (${p.ringLevel} of 4)${bearer ? `; ${bearer.card.name} is the ring-bearer` : ''}.`);
+    this.fire(p, 'ringTempts');
+  }
+
+  /** How many of the Ring's abilities `perm` has: its controller's count if it is their ring-bearer, else 0. */
+  ringLevel(perm: Perm): number {
+    const p = this.players[perm.seat];
+    return p.ringBearer === perm.id ? p.ringLevel : 0;
+  }
+
+  /** Draw a card, then discard a card. */
+  private *loot(p: PlayerState, why: string): Flow<void> {
+    this.draw(p, 1);
+    if (!p.hand.length) return;
+    const [pick] = yield* this.choose(p, 'discard', `${why}: discard a card.`, p.hand.map((card) => ({ label: card.name, card })), 1, 1);
+    const card = p.hand[pick ?? 0];
+    p.hand.splice(p.hand.indexOf(card), 1);
+    this.toGraveyard(p, card, false);
+    this.say(`${p.name} loots (${why}), discarding ${card.name}.`);
+  }
+
+  private unlock(perm: Perm) {
+    if (!perm.unlocked) return;
+    perm.card = perm.unlocked;
+    perm.unlocked = undefined;
+    perm.lockedBy = undefined;
+  }
 
   private hold(perm: Perm, by: Perm) {
     if (perm.owner === undefined) return;
@@ -3311,6 +3436,8 @@ export class Game {
     if (!blocker.card.isCreature || blocker.tapped) return false;
     if (this.hasKw(attacker, 'unblockable')) return false;
     if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
+    // The Ring, first ability: the ring-bearer can't be blocked by creatures with greater power.
+    if (this.ringLevel(attacker) >= 1 && this.power(blocker) > this.power(attacker)) return false;
     return true;
   }
 
@@ -3379,6 +3506,8 @@ export class Game {
       const group = attacking.filter((a) => a.attacking === seat);
       if (group.length) this.say(`${p.name} attacks ${this.players[seat].name} with ${group.map((a) => `${a.card.name} ${this.power(a)}/${this.toughness(a)}`).join(', ')}.`);
     }
+    // The Ring, second ability: whenever the ring-bearer attacks, draw a card, then discard a card.
+    for (const a of attacking) if (this.ringLevel(a) >= 2) yield* this.loot(p, `${a.card.name} carries the Ring`);
     // Isshin: abilities that creatures attacking set off trigger an additional time.
     const times = this.triggerTimes(p, 'attack');
     for (let i = 0; i < times; i++) {
@@ -3450,6 +3579,14 @@ export class Game {
     if (this.stopped(p)) return;
 
     this.step = 'endCombat';
+    // The Ring, third ability: a creature that blocked the ring-bearer is sacrificed at end of combat.
+    const doomed = this.attackers().filter((a) => this.ringLevel(a) >= 3).flatMap((a) => this.blockersOf(a));
+    if (doomed.length) {
+      this.say(`${doomed.map((b) => b.card.name).join(', ')} blocked the ring-bearer and ${doomed.length === 1 ? 'is' : 'are'} sacrificed.`);
+      this.removePerms(doomed, 'graveyard');
+      for (const b of doomed) this.sacrificed(this.players[b.seat]);
+      yield* this.checkState();
+    }
     yield* this.priority();
   }
 
@@ -3547,6 +3684,12 @@ export class Game {
     for (const [d, life] of before) this.say(`${d.name} takes ${life - d.life} (life ${d.life}).`);
     for (const [src, amount] of linked) this.gainLife(this.players[src.seat], amount);
 
+    // The Ring, fourth ability: when the ring-bearer deals combat damage to a player, each opponent loses 3 life.
+    for (const a of hitPlayer) {
+      if (this.ringLevel(a) < 4) continue;
+      for (const o of this.opponents(p)) this.loseLife(o, 3, p, 'noncombat');
+      this.say(`The Ring: each opponent of ${p.name} loses 3 life.`);
+    }
     // "Deals combat damage to a player" triggers.
     for (const a of hitPlayer) {
       const own = a.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
@@ -3573,6 +3716,22 @@ export class Game {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** A lockdown Aura's view of a card: a vanilla creature of `size`, or (with null) a land that taps for {C}. Cached per card. */
+const LOCKED = new Map<string, WeakMap<SimCard, SimCard>>();
+export function lockedCard(card: SimCard, size: { p: number; t: number } | null): SimCard {
+  const key = size ? `${size.p}/${size.t}` : 'land';
+  let cache = LOCKED.get(key);
+  if (!cache) LOCKED.set(key, (cache = new WeakMap()));
+  let out = cache.get(card);
+  if (!out) {
+    out = size
+      ? { ...card, isCreature: true, isPlaneswalker: false, power: size.p, toughness: size.t, keywords: [], effects: [], scales: undefined, crew: undefined, loyalty: undefined }
+      : { ...card, isCreature: false, isArtifact: false, isEnchantment: false, isPlaneswalker: false, power: 0, toughness: 0, keywords: [], scales: undefined, crew: undefined, loyalty: undefined, effects: [{ kind: 'mana', amount: 1, colors: ['C'], when: 'static' }] };
+    cache.set(card, out);
+  }
+  return out;
+}
 
 /** The characteristics of a merged permanent: the top card's, with every card's abilities (rule 721.2a). */
 export function mergedCard(faces: SimCard[]): SimCard {

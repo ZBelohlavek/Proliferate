@@ -83,6 +83,12 @@ export interface Perm {
   faceDown?: SimCard;
   /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
   heldBy?: number;
+  /** Under a lockdown Aura (Amphibian Downpour, Imprisoned in the Moon): its real card. `card` is then the vanilla version. */
+  unlocked?: SimCard;
+  /** The Aura that locks it down. */
+  lockedBy?: number;
+  /** Age counters (cumulative upkeep). */
+  age?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
@@ -141,6 +147,11 @@ export interface PlayerState {
   poison: number;
   /** Spells cast this turn (Rule of Law). */
   spellsThisTurn: number;
+  /** Cards drawn this turn (for "their second card each turn"). */
+  drawsThisTurn: number;
+  /** How many times the Ring has tempted this player, up to 4 (rule 701.54), and the current ring-bearer. */
+  ringLevel: number;
+  ringBearer: number | null;
   /** Permanent types already cast or played from the graveyard this turn (Muldrotha). */
   graveyardTypes?: Set<string>;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
