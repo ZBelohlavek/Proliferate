@@ -656,6 +656,14 @@ export class Game {
       const next = sorcery ? this.nextLevel(perm) : undefined;
       if (next && this.planPayment(p, next.cost, 0, 0) !== null) actions.push({ type: 'level', permId: perm.id });
     }
+    // Ninjutsu: once blockers are declared, swap a ninja in for an unblocked attacker (rule 702.49a).
+    if (this.step === 'declareBlockers' && this.activeSeat === p.seat) {
+      const unblocked = p.battlefield.filter((q) => q.attacking !== null && !q.blocked);
+      if (unblocked.length) {
+        const ninjas = [...new Set(p.hand), ...p.commandZone.filter((c) => c.ninjutsu?.commander)].filter((c) => c.ninjutsu && this.planPayment(p, c.ninjutsu.cost, 0, 0) !== null);
+        for (const card of ninjas) for (const q of unblocked) actions.push({ type: 'ninjutsu', card, permId: q.id });
+      }
+    }
     return actions;
   }
 
@@ -782,6 +790,26 @@ export class Game {
         if (!perm || !next || !plan) return false;
         this.commitPayment(p, plan);
         this.setLevel(p, perm, next.level);
+        return true;
+      }
+      case 'ninjutsu': {
+        const attacker = p.battlefield.find((q) => q.id === action.permId);
+        const card = action.card;
+        const fromCommand = p.commandZone.includes(card) && !!card.ninjutsu?.commander;
+        const zone = fromCommand ? p.commandZone : p.hand;
+        const plan = card.ninjutsu ? this.planPayment(p, card.ninjutsu.cost, 0, 0) : null;
+        if (!attacker || attacker.attacking === null || attacker.blocked || !zone.includes(card) || !plan || this.step !== 'declareBlockers') return false;
+        this.commitPayment(p, plan);
+        const defender = attacker.attacking;
+        this.say(`${p.name} uses ninjutsu: ${attacker.card.name} returns to hand and ${card.name} attacks ${this.players[defender].name}.`);
+        this.removePerm(attacker, 'hand');
+        zone.splice(zone.indexOf(card), 1);
+        const perm = yield* this.enter(p, card, fromCommand || p.deck.commanders.includes(card), 0, null);
+        if (perm && p.battlefield.includes(perm) && perm.card.isCreature) {
+          perm.tapped = true;
+          perm.attacking = defender;
+          perm.blocked = false;
+        }
         return true;
       }
       case 'turnFaceUp': {
