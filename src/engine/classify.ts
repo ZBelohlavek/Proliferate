@@ -5,6 +5,7 @@
 // removal, wipes, tokens, ...). Lines we don't recognise are ignored. The
 // `notes` list records what we understood so users can audit their decks.
 
+import { applyCardRule, CARD_RULES } from './cardRules';
 import type {
   CastFilter,
   CurseAbility,
@@ -1015,6 +1016,9 @@ function readKicker(raw: RawCard, card: SimCard, line: RegExpMatchArray, text: s
 }
 
 export function classifyCard(raw: RawCard): SimCard {
+  // Cards with their own rule may be read from rewritten text (see cardRules.ts).
+  const rule = CARD_RULES[raw.name.split(' // ')[0]];
+  if (rule?.text !== undefined) raw = { ...raw, text: rule.text };
   const types = raw.types.map((t) => t.toLowerCase());
   const supers = raw.superTypes.map((t) => t.toLowerCase());
   const isLand = types.includes('land');
@@ -1444,6 +1448,7 @@ export function classifyCard(raw: RawCard): SimCard {
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
   if (kickLine) readKicker(raw, card, kickLine, fullText);
+  if (rule) applyCardRule(card, rule);
 
   card.modeled = !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');

@@ -137,7 +137,8 @@ export type EffectBody =
   /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
-  | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
+  /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
+  | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any' }
   /**
@@ -302,7 +303,7 @@ export type EffectBody =
    * Prevent combat damage this turn (rule 615): all of it ('all', Fog), the damage dealt to you ('you', Inkshield,
    * which makes a 2/1 flyer for each 1 prevented: `tokens`), or the damage dealt to and by one target attacking creature ('creature', Maze of Ith).
    */
-  | { kind: 'fog'; who: 'all' | 'you' | 'creature'; tokens?: boolean; untap?: boolean }
+  | { kind: 'fog'; who: 'all' | 'you' | 'creature'; tokens?: boolean; untap?: boolean; /** Return the creatures attacking you to their owners' hands instead (Aetherize). */ bounce?: boolean }
   /**
    * Manifest (rule 701.40): put the top card of a library onto the battlefield face down as a 2/2.
    * who: 'you'; 'targetController', the controller of what the previous part of the ability hit
@@ -542,6 +543,8 @@ export interface SimCard {
   notes: string[];
   /** Lines of rules text the classifier found nothing in (lower case, card name as ~). */
   unread?: string[];
+  /** The card has its own rule (src/engine/cardRules.ts): why it is played the way it is. */
+  ruled?: string;
   imageUrl?: string;
 }
 
