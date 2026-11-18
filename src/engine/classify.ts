@@ -199,9 +199,14 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'extraLand' }, note: 'Extra land drop' });
   }
 
+  // Mister Negative: "exchange life totals with target opponent. If you lost life this way, draw that many cards."
+  if (/exchange life totals with target opponent/.test(line)) {
+    out.push({ body: { kind: 'exchangeLife' }, note: 'Swap life totals with the opponent highest on life' });
+  }
+
   // --- Card draw -----------------------------------------------------------
   m = line.match(new RegExp(`(?:you |target player |each player )?draws? ${NUM} (additional )?cards?`));
-  if (m && !/opponent draws|that player draws|each opponent draws/.test(line)) {
+  if (m && !/opponent draws|that player draws|each opponent draws/.test(line) && !/exchange life totals/.test(fullLine)) {
     const n = num(m[1], 1);
     out.push({ body: { kind: 'draw', n }, note: `Draw ${n === -1 ? 'X' : n}` });
   } else if (/draw cards equal to|draws cards equal to/.test(line)) {
@@ -322,6 +327,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const t = num(m[4], 1);
     const kws = KNOWN_KEYWORDS.filter((k) => (m![6] ?? '').includes(k));
     out.push({ body: { kind: 'tokens', n, power: p === -1 ? 3 : p, toughness: t === -1 ? 3 : t, keywords: kws }, note: `Make ${n === -1 ? 'X' : n}× ${p === -1 ? 'X' : p}/${t === -1 ? 'X' : t} token${n === 1 ? '' : 's'}` });
+  } else if (/^choose up to one other target enchantment or artifact\. if you're the monarch, you may create a token that's a copy of it/.test(fullLine)) {
+    // Court of Vantress: copies only while you're the monarch; the "become a copy" half is left out.
+    if (/^choose up to one/.test(line)) out.push({ body: { kind: 'copyPermanent', monarch: true }, note: "Token copy of another artifact or enchantment while you're the monarch" });
   } else if ((m = line.match(new RegExp(`create ${NUM} tokens? that'?s? a copy of`)))) {
     out.push({ body: { kind: 'tokens', n: num(m[1], 1), power: 3, toughness: 3, keywords: [] }, note: 'Token copy (≈3/3)' });
   }

@@ -96,6 +96,8 @@ export type EffectBody =
   | { kind: 'treasure'; n: number; ritual?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
+  /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
+  | { kind: 'exchangeLife' }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
@@ -128,7 +130,7 @@ export type EffectBody =
    * all: every matching card instead of n of them. from: whose graveyard ('any' graveyard, or only 'opponents''; default your own);
    * cards from someone else's graveyard enter under your control. maxCmc: only cards with at most this mana value.
    */
-  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: RecursionWhat; toTop?: boolean; all?: boolean; from?: 'any' | 'opponents'; maxCmc?: number; tapped?: boolean; /** Onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */ byExperience?: boolean }
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: RecursionWhat; toTop?: boolean; all?: boolean; from?: 'any' | 'opponents'; maxCmc?: number; tapped?: boolean; /** Onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */ byExperience?: boolean; /** Only creature cards with power less than the source's (Mirko). */ belowPower?: boolean; /** The returned permanent gets a finality counter. */ finality?: boolean }
   /** Put up to n cards from your library into your graveyard (Buried Alive, Entomb). what: creature cards only, or any. */
   | { kind: 'entomb'; n: number; what: 'creature' | 'any' }
   /** Opponents mill more: twice as many (mult 2, Bruvac) and/or extra cards (plus 4, The Water Crystal). */
@@ -209,6 +211,8 @@ export type EffectBody =
   | { kind: 'selfKeyword'; keyword: string; cond: 'halfLife' | 'yourTurn' }
   /** Satya: a token copy of another nontoken creature you control, tapped and attacking; sacrificed at the next end step unless you pay energy equal to its mana value. */
   | { kind: 'copyCreature'; temporary: boolean }
+  /** A token copy of another nonlegendary artifact or enchantment; only while you're the monarch when `monarch` (Court of Vantress). */
+  | { kind: 'copyPermanent'; monarch?: boolean }
   /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
   | { kind: 'enterCounters'; n: number }
   /** Kudo: other creatures have this base power and toughness. */
