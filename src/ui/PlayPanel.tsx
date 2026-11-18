@@ -195,7 +195,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const permState = (perm: Perm): { cls: string; onClick?: () => void } => {
     if (!d) return { cls: '' };
     if (d.kind === 'priority') {
-      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew') && a.permId === perm.id);
+      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'turnFaceUp' || a.type === 'level') && a.permId === perm.id);
       return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
     }
     if (d.kind === 'target' && isTarget({ kind: 'perm', id: perm.id })) return { cls: 'target', onClick: () => answer({ kind: 'perm', id: perm.id }) };
@@ -242,7 +242,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
 
   const cardState = (card: SimCard, from: 'hand' | 'command'): { cls: string; onClick?: () => void } => {
     if (d?.kind !== 'priority') return { cls: '' };
-    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && (a.from === from || (a.from === 'overload' && from === 'hand'))) || (a.type === 'land' && a.card === card && from === 'hand') || (a.type === 'cycle' && a.card === card && from === 'hand'));
+    const mine = indexesFor((a) => (a.type === 'cast' && a.card === card && (a.from === from || ((a.from === 'overload' || a.from === 'alt') && from === 'hand'))) || (a.type === 'land' && a.card === card && from === 'hand') || (a.type === 'cycle' && a.card === card && from === 'hand'));
     return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
   };
 
@@ -438,7 +438,10 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
       const list = [...attacks].map(([attacker, to]) => ({ attacker, defender: to }));
       return (
         <div className="prompt-row">
-          <span><strong>Declare attackers.</strong> Click your creatures to attack with them.</span>
+          <span>
+            <strong>Declare attackers.</strong> Click your creatures to attack with them.
+            {d.goaded?.length ? ` Goaded (must attack, and not the player who goaded them): ${d.goaded.map((x) => g.findPerm(x.attacker)?.card.name).join(', ')}.` : ''}
+          </span>
           {d.defenders.length > 1 && (
             <label className="small">
               Attacking{' '}
@@ -532,6 +535,17 @@ function ordinal(n: number): string {
   return `${r}${r === 1 ? 'st' : r === 2 ? 'nd' : r === 3 ? 'rd' : 'th'}`;
 }
 
+function altLabel(card: SimCard): string {
+  const a = card.altCost!;
+  const how = [
+    a.pitch && `exile a ${({ W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' } as const)[a.pitch]} card`,
+    a.life && `pay ${a.life} life`,
+    a.returnIslands && `return ${a.returnIslands === 1 ? 'an Island' : `${a.returnIslands} Islands`}`,
+    (a.mana.generic || a.mana.pips.length) && costText({ cost: a.mana } as SimCard),
+  ].filter(Boolean).join(', ');
+  return `${a.evoke ? 'Evoke' : a.dash ? 'Dash' : 'Cast'} ${card.name} (${how || 'free'})`;
+}
+
 function costText(card: SimCard): string {
   const c = card.cost;
   const pips = c.pips.map((p) => `{${p.join('/')}}`).join('');
@@ -552,6 +566,10 @@ function effectLabel(e: Effect): string {
     case 'recursion': return 'return a creature';
     case 'tutor': return 'search your library';
     case 'pump': return 'pump a creature';
+    case 'goad': return 'goad a creature';
+    case 'blink': return 'exile and return';
+    case 'untap': return 'untap';
+    case 'copySpell': return 'copy';
     default: return e.kind;
   }
 }
@@ -561,7 +579,10 @@ function actionLabel(g: Game, a: Action): string {
     case 'pass': return 'Pass';
     case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}${a.fromGraveyard ? ' from your graveyard' : ''}`;
     case 'cast': {
+      if (a.faceDown) return `Cast ${a.card.name} face down {3}`;
+      if (a.mutate) return `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}`;
       if (a.from === 'overload') return `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}`;
+      if (a.from === 'alt') return altLabel(a.card);
       if (a.from !== 'graveyard') return `Cast ${a.card.name} ${costText(a.card)}`;
       const how = a.card.flashback ? 'Flashback' : a.card.graveyard?.how === 'cast' ? a.card.graveyard.label[0].toUpperCase() + a.card.graveyard.label.slice(1) : 'Cast from graveyard:';
       return `${how} ${a.card.name} ${costText(g.castCard(a.card, 'graveyard'))}`;
@@ -571,7 +592,16 @@ function actionLabel(g: Game, a: Action): string {
       const what = use.label === 'return' ? `Return ${a.card.name} from your graveyard` : `${use.label[0].toUpperCase()}${use.label.slice(1)} ${a.card.name}`;
       return `${what} ${costText({ cost: use.cost } as SimCard)}`;
     }
+    case 'level': {
+      const perm = g.findPerm(a.permId);
+      const next = perm ? g.nextLevel(perm) : undefined;
+      return `${perm?.card.name ?? 'Class'}: level ${next?.level ?? ''} ${next ? costText({ cost: next.cost } as SimCard) : ''}`;
+    }
     case 'crew': return `Crew ${g.findPerm(a.permId)?.card.name ?? 'Vehicle'}`;
+    case 'turnFaceUp': {
+      const perm = g.findPerm(a.permId);
+      return `Turn face up: ${perm?.faceDown?.name ?? 'creature'} ${costText({ cost: (perm && g.faceUpCost(perm)) ?? { generic: 0, pips: [], x: 0, life: 0 } } as SimCard)}`;
+    }
     case 'cycle': return `Cycle ${a.card.name} ${costText({ cost: a.card.cycling!.cost } as SimCard)}`;
     case 'activate': {
       const name = g.findPerm(a.permId)?.card.name ?? 'ability';
@@ -668,10 +698,15 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
   const title = [
     card.name,
     card.typeLine,
+    perm.faceDown && perm.seat === ME && `Face down: it is your ${perm.faceDown.name}`,
+    perm.parts && `Mutated: ${perm.parts.map((x) => x.face.name).join(' over ')}`,
     perm.tapped && 'Tapped',
     perm.sick && card.isCreature && 'Summoning sick',
     keywords.length && keywords.join(', '),
     perm.counters > 0 && `${perm.counters} +1/+1 counter${perm.counters > 1 ? 's' : ''}`,
+    perm.lore && `Lore ${perm.lore} of ${card.saga}`,
+    perm.level && `Level ${perm.level}`,
+    perm.goadedBy?.length && `Goaded by ${perm.goadedBy.map((s) => shortName(g.players[s])).join(', ')}`,
     attached.length && `Attached: ${attached.join(', ')}`,
     host && `Attached to ${host.card.name}`,
     card.notes.length ? `Plays as: ${card.notes.join('; ')}` : '',
