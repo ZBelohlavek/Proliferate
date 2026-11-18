@@ -37,6 +37,7 @@ export type Trigger =
   | 'draw' // you draw a card
   | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
   | 'gainLife' // you gain life
+  | 'milled' // a player mills one or more cards (scope 'self': you, 'any': an opponent, 'all': anyone; castFilter 'creature': only creature cards)
   | 'activated' // activated ability, paid for with spare mana
   | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
   | 'static'; // always on while the permanent is on the battlefield
@@ -66,7 +67,7 @@ export type Effect = EffectBody & {
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
-  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean };
+  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number };
 };
 
 export type EffectBody =
@@ -100,8 +101,26 @@ export type EffectBody =
   | { kind: 'loseLife'; n: number }
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
-  /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
-  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean }
+  /**
+   * Return cards from a graveyard. what: which cards it can return (default creatures). toTop: onto the library instead of into the hand.
+   * all: every matching card instead of n of them. from: whose graveyard ('any' graveyard, or only 'opponents''; default your own);
+   * cards from someone else's graveyard enter under your control. maxCmc: only cards with at most this mana value.
+   */
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: RecursionWhat; toTop?: boolean; all?: boolean; from?: 'any' | 'opponents'; maxCmc?: number; tapped?: boolean }
+  /** Put up to n cards from your library into your graveyard (Buried Alive, Entomb). what: creature cards only, or any. */
+  | { kind: 'entomb'; n: number; what: 'creature' | 'any' }
+  /** Opponents mill more: twice as many (mult 2, Bruvac) and/or extra cards (plus 4, The Water Crystal). */
+  | { kind: 'millBoost'; mult: number; plus: number }
+  /** Damage your sources would deal to opponents is prevented and they mill that many instead (The Mindskinner). */
+  | { kind: 'damageToMill' }
+  /** You may play these cards from your graveyard (Crucible of Worlds: lands; Muldrotha: permanents, one of each type a turn). */
+  | { kind: 'graveyardPlay'; what: 'lands' | 'permanents' | 'artifacts'; lifeCost?: number; /** It enters with a finality counter. */ finality?: boolean }
+  /** Grafdigger's Cage: creature cards can't enter from graveyards and nobody casts spells from graveyards. */
+  | { kind: 'graveyardLock' }
+  /** Put the top (or bottom) card of your library into your graveyard; a creature card with power up to the source's goes onto the battlefield (Grenzo). */
+  | { kind: 'millReanimate'; fromBottom: boolean }
+  /** Persist and undying: the creature that just died returns with a -1/-1 (persist) or +1/+1 (undying) counter. */
+  | { kind: 'returnSelf'; counters: number }
   /** proliferate: only creatures that already have a counter. */
   | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
@@ -122,10 +141,10 @@ export type EffectBody =
   | { kind: 'digPermanent' }
   /** Opponents can't cast their commanders from the command zone. */
   | { kind: 'commandLock' }
-  /** Cards that would go to a graveyard are exiled instead. */
-  | { kind: 'graveyardHate' }
-  /** Exile graveyards: every opponent's, or everyone's. */
-  | { kind: 'exileGraveyards'; all: boolean }
+  /** Cards that would go to a graveyard are exiled instead (only your opponents' cards, with `opponents`: Dauthi Voidwalker). */
+  | { kind: 'graveyardHate'; opponents?: boolean }
+  /** Exile graveyards: every opponent's, or everyone's. `cards`: only that many cards, the best ones in opponents' graveyards. */
+  | { kind: 'exileGraveyards'; all: boolean; cards?: number }
   /** Enters as a copy of a creature on the battlefield. */
   | { kind: 'clone' }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
@@ -135,8 +154,11 @@ export type EffectBody =
   | { kind: 'extraTurn' }
   /** Look at the top n cards and keep or bin each. Surveil puts the rest in the graveyard, scry on the bottom. */
   | { kind: 'scry'; n: number; surveil: boolean }
-  /** Put cards from the top of a library into the graveyard. n: -1 = X, -2 = half the library. */
-  | { kind: 'mill'; n: number; who: 'target' | 'opponents' | 'all' | 'you' }
+  /**
+   * Put cards from the top of a library into the graveyard. n: -1 = X, -2 = half the library, -3 = twice X.
+   * untilLands: reveal cards until that many lands are revealed and mill them all (Consuming Aberration, Mind Grind).
+   */
+  | { kind: 'mill'; n: number; who: 'target' | 'opponents' | 'all' | 'you'; untilLands?: number }
   | { kind: 'discard'; n: number; who: 'target' | 'opponents' }
   /** You have no maximum hand size. */
   | { kind: 'noMaxHand' }
@@ -148,6 +170,35 @@ export type EffectBody =
   | { kind: 'approach' };
 
 export type EffectKind = EffectBody['kind'];
+
+/** Which cards a recursion effect can return. */
+export type RecursionWhat = 'any' | 'artifact' | 'enchantment' | 'instantSorcery' | 'land' | 'planeswalker' | 'creatureOrPlaneswalker' | 'artifactOrCreature' | 'artifactOrEnchantment' | 'permanent' | 'legendary';
+
+/**
+ * A way to use a card from your graveyard.
+ * - cast: cast it from the graveyard for `cost` (escape, retrace). `exileOthers`: also exile that many other cards
+ *   from your graveyard; `discardLand`: also discard a land card (retrace); `exiled`: exiled when it leaves the stack (escape spells).
+ * - return: pay `cost` to put it onto the battlefield (unearth, Reassembling Skeleton) or into your hand.
+ *   `haste` and `exileAtEnd`: unearth; `token`: a token copy is made and the card is exiled (embalm, eternalize, encore).
+ *   `sorcery`: only as a sorcery; `sacCreature`: sacrifice a creature too.
+ */
+export interface GraveyardUse {
+  how: 'cast' | 'return';
+  cost: ManaCost;
+  label: string;
+  exileOthers?: number;
+  discardLand?: boolean;
+  exiled?: boolean;
+  to?: 'battlefield' | 'hand';
+  tapped?: boolean;
+  haste?: boolean;
+  exileAtEnd?: boolean;
+  token?: boolean;
+  sorcery?: boolean;
+  sacCreature?: boolean;
+  /** Token copies made with eternalize are 4/4. */
+  size?: number;
+}
 
 export interface LandInfo {
   produces: Mana[] | 'any';
@@ -195,6 +246,10 @@ export interface SimCard {
   stun?: number;
   /** Flashback: may be cast from the graveyard for this cost, then exiled. */
   flashback?: ManaCost;
+  /** Other ways to use the card from the graveyard: escape, retrace, unearth, embalm, "{1}{B}: return ~ from your graveyard". */
+  graveyard?: GraveyardUse;
+  /** Persist (returns with a -1/-1 counter) or undying (with a +1/+1 counter) when it dies without one. */
+  persist?: 'persist' | 'undying';
   /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
   extraCost?: { sacrifice?: 'creature' | 'artifact' | 'artifactOrCreature'; discard?: number; either?: boolean };
   /** A nonland permanent that enters tapped. */

@@ -14,7 +14,7 @@
 
 import { Rng } from '../engine/rng';
 import type {
-  CastFilter, Color, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, SimCard, SimDeck, Trigger,
+  CastFilter, Color, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
   Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
@@ -99,6 +99,10 @@ export class Game {
   private tuckSpell = false;
   /** Seat of the monarch, if any (rule 724). */
   monarch: number | null = null;
+  /** Unearthed creatures: exiled at the end step, or if they would leave the battlefield (rule 702.84). */
+  private readonly unearthed = new Set<number>();
+  /** Permanents with a finality counter: exiled instead of going to a graveyard. */
+  private readonly finality = new Set<number>();
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
 
@@ -290,6 +294,7 @@ export class Game {
       }
     }
     p.landsPlayed = 0;
+    p.graveyardTypes = undefined;
     p.shielded = false;
     for (const q of this.players) q.spellsThisTurn = 0;
 
@@ -318,6 +323,14 @@ export class Game {
     if (this.stopped(p)) return;
 
     this.step = 'end';
+    for (const id of this.unearthed) {
+      const perm = this.findPerm(id);
+      if (perm) {
+        this.say(`${perm.card.name} is exiled (unearth).`);
+        this.removePerm(perm, 'exile');
+      }
+    }
+    this.unearthed.clear();
     if (this.monarch === p.seat) {
       this.say(`${p.name} draws a card as the monarch.`);
       this.draw(p, 1);
@@ -463,6 +476,10 @@ export class Game {
         if (card.isLand && card.land) actions.push({ type: 'land', card, back: false });
         else if (card.backLand) actions.push({ type: 'land', card, back: true });
       }
+      // Crucible of Worlds, Muldrotha: lands from the graveyard.
+      if (this.kindsInGame.has('graveyardPlay')) {
+        for (const card of new Set(p.graveyard)) if (card.isLand && card.land && this.graveyardPermission(p, card)) actions.push({ type: 'land', card, back: false, fromGraveyard: true });
+      }
     }
 
     const mana = this.availableMana(p);
@@ -486,11 +503,12 @@ export class Game {
     }
     const seen = new Set<SimCard>();
     for (const card of p.graveyard) {
-      if (card.flashback && !seen.has(card)) {
-        seen.add(card);
-        consider(card, 'graveyard');
-      }
+      if (seen.has(card)) continue;
+      seen.add(card);
+      if (this.graveyardCastable(p, card)) consider(card, 'graveyard');
+      if (card.graveyard?.how === 'return' && this.canReturnFromGraveyard(p, card, sorcery)) actions.push({ type: 'graveyard', card });
     }
+    seen.clear();
     // Cycling works at any time you have priority (rule 702.29).
     for (const card of p.hand) {
       if (card.cycling && !seen.has(card) && this.planPayment(p, card.cycling.cost, 0, 0) !== null) {
@@ -529,6 +547,7 @@ export class Game {
     if (act.tap && (perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')))) return false;
     if (act.cost.life >= p.life && act.cost.life > 0) return false;
     if (act.sacCreature && !p.battlefield.some((q) => q.card.isCreature)) return false;
+    if (act.tapCreatures && p.battlefield.filter((q) => q.card.isCreature && !q.tapped && !(act.tap && q === perm)).length < act.tapCreatures) return false;
     if (this.planPayment(p, act.cost, 0, 0, act.tap ? perm : undefined) === null) return false;
     const candidates = this.targetCandidates(p, e, perm);
     return candidates === null || candidates.length > 0;
@@ -551,11 +570,13 @@ export class Game {
   private *perform(p: PlayerState, action: Action, x: number): Flow<boolean> {
     switch (action.type) {
       case 'land': {
-        const idx = p.hand.indexOf(action.card);
-        if (idx === -1) return false;
-        p.hand.splice(idx, 1);
+        const zone = action.fromGraveyard ? p.graveyard : p.hand;
+        const idx = zone.indexOf(action.card);
+        if (idx === -1 || (action.fromGraveyard && !this.graveyardPermission(p, action.card))) return false;
+        if (action.fromGraveyard) this.useGraveyardPermission(p, action.card);
+        zone.splice(idx, 1);
         const info = action.back ? action.card.backLand! : action.card.land!;
-        this.say(`${p.name} plays ${action.back ? action.card.backLand!.name : action.card.name}.`);
+        this.say(`${p.name} plays ${action.back ? action.card.backLand!.name : action.card.name}${action.fromGraveyard ? ' from their graveyard' : ''}.`);
         this.putLand(p, action.card, info);
         p.landsPlayed++;
         p.castNames.add(action.card.name);
@@ -596,9 +617,177 @@ export class Game {
       }
       case 'activate':
         return yield* this.activate(p, action.permId, action.effect);
+      case 'graveyard':
+        return yield* this.returnFromGraveyard(p, action.card);
       default:
         return false;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Using cards from the graveyard
+  // -------------------------------------------------------------------------
+
+  /** Grafdigger's Cage: nothing is cast from graveyards and creature cards don't come back from them. */
+  graveyardLocked(): boolean {
+    return this.statics(null, 'graveyardLock') > 0;
+  }
+
+  /**
+   * Whether a static ability lets `p` play this card from their graveyard (Crucible of Worlds, Muldrotha, Noctis).
+   * Returns the extra life it costs, or null if nothing allows it.
+   */
+  graveyardPermission(p: PlayerState, card: SimCard): { life: number; finality?: boolean } | null {
+    if (!this.kindsInGame.has('graveyardPlay')) return null;
+    if (!card.isLand && this.graveyardLocked()) return null;
+    let best: { life: number; finality?: boolean } | null = null;
+    for (const perm of p.battlefield) {
+      for (const e of perm.card.effects) {
+        if (e.kind !== 'graveyardPlay' || e.when !== 'static') continue;
+        let ok = false;
+        if (e.what === 'lands') ok = card.isLand;
+        else if (e.what === 'artifacts') ok = card.isArtifact && !card.isLand;
+        else ok = permanentTypes(card).some((t) => !p.graveyardTypes?.has(t));
+        if (ok && (!best || (e.lifeCost ?? 0) < best.life)) best = { life: e.lifeCost ?? 0, ...(e.finality ? { finality: true } : {}) };
+      }
+    }
+    return best;
+  }
+
+  /** Muldrotha: note the permanent type used. A Crucible-style permission for lands uses nothing up. */
+  private useGraveyardPermission(p: PlayerState, card: SimCard) {
+    const own = p.battlefield.some((q) => q.card.effects.some((e) => e.kind === 'graveyardPlay' && e.when === 'static' && (e.what === 'lands' ? card.isLand : e.what === 'artifacts' && card.isArtifact)));
+    if (own) return;
+    const type = permanentTypes(card).find((t) => !p.graveyardTypes?.has(t));
+    if (type) (p.graveyardTypes ??= new Set()).add(type);
+  }
+
+  /** May `p` cast this card from their graveyard now (flashback, escape, retrace, disturb, or a static permission)? */
+  graveyardCastable(p: PlayerState, card: SimCard): boolean {
+    if (card.isLand || !p.graveyard.includes(card) || this.graveyardLocked()) return false;
+    if (card.flashback) return true;
+    const use = card.graveyard;
+    if (use?.how === 'cast') {
+      if (use.exileOthers && p.graveyard.length - 1 < use.exileOthers) return false;
+      if (use.discardLand && !p.hand.some((c) => c.isLand)) return false;
+      return true;
+    }
+    const permission = this.graveyardPermission(p, card);
+    return !!permission && p.life > permission.life;
+  }
+
+  /** May `p` use this card's "return from your graveyard" ability now (unearth, embalm, Reassembling Skeleton)? */
+  canReturnFromGraveyard(p: PlayerState, card: SimCard, sorcery = this.sorcerySpeed(p)): boolean {
+    const use = card.graveyard;
+    if (!use || use.how !== 'return' || !p.graveyard.includes(card)) return false;
+    if (use.sorcery && !sorcery) return false;
+    if (use.to === 'battlefield' && card.isCreature && this.graveyardLocked()) return false;
+    if (use.sacCreature && !p.battlefield.some((q) => q.card.isCreature)) return false;
+    return this.planPayment(p, use.cost, 0, 0) !== null;
+  }
+
+  private *returnFromGraveyard(p: PlayerState, card: SimCard): Flow<boolean> {
+    const use = card.graveyard;
+    if (!use || !this.canReturnFromGraveyard(p, card)) return false;
+    const plan = this.planPayment(p, use.cost, 0, 0);
+    if (!plan) return false;
+    let fodder: Perm | null = null;
+    if (use.sacCreature) {
+      const creatures = p.battlefield.filter((q) => q.card.isCreature);
+      const pick = creatures.length === 1 ? [0] : yield* this.choose(p, 'sacrifice', `Sacrifice which creature to return ${card.name}?`, creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+      fodder = creatures[pick[0] ?? 0];
+    }
+    this.commitPayment(p, plan);
+    p.life -= use.cost.life;
+    if (fodder) {
+      this.removePerm(fodder, 'graveyard');
+      this.sacrificed(p);
+    }
+    if (!p.graveyard.includes(card)) return true;
+    p.graveyard.splice(p.graveyard.indexOf(card), 1);
+    if (use.to === 'hand') {
+      p.hand.push(card);
+      this.say(`${p.name} returns ${card.name} from their graveyard to their hand.`);
+      return true;
+    }
+    if (use.token) {
+      // Embalm, eternalize: the card is exiled and a token copy enters (rule 702.128).
+      p.exile.push(card);
+      this.say(`${p.name} ${use.label}s ${card.name}.`);
+      const copy = use.size ? sized(card, use.size) : card;
+      const perm = yield* this.enter(p, copy, false, 0, null);
+      if (perm) perm.token = true;
+      return true;
+    }
+    this.say(`${p.name} ${use.label === 'unearth' ? 'unearths' : 'returns'} ${card.name}${use.label === 'unearth' ? '' : ' from their graveyard to the battlefield'}.`);
+    const perm = yield* this.enter(p, card, p.deck.commanders.includes(card), 0, null);
+    if (perm) {
+      if (use.tapped) perm.tapped = true;
+      if (use.haste) perm.tempKw.push('haste');
+      if (use.exileAtEnd) this.unearthed.add(perm.id);
+    }
+    return true;
+  }
+
+  /**
+   * The cards a recursion effect could return for `p`, with the player whose graveyard each is in.
+   * Empty when Grafdigger's Cage stops it.
+   */
+  recursionPool(p: PlayerState, e: Extract<Effect, { kind: 'recursion' }>): { card: SimCard; owner: PlayerState }[] {
+    const owners = e.from === 'any' ? this.alivePlayers() : e.from === 'opponents' ? this.opponents(p) : [p];
+    const out: { card: SimCard; owner: PlayerState }[] = [];
+    const locked = e.toBattlefield && this.graveyardLocked();
+    for (const owner of owners) {
+      for (const card of owner.graveyard) {
+        if (!recursionMatches(e.what, card)) continue;
+        if (e.maxCmc !== undefined && card.cmc > e.maxCmc) continue;
+        if (e.toBattlefield && (card.isInstant || card.isSorcery || (card.isLand && e.what !== 'land' && e.what !== 'permanent'))) continue;
+        if (locked && !card.isLand) continue;
+        out.push({ card, owner });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Mill: `count` cards from the top of `v`'s library into their graveyard, made bigger by Bruvac and The Water Crystal
+   * when an opponent of theirs controls one. Returns how many were milled.
+   */
+  private millCards(v: PlayerState, count: number, untilLands = 0): number {
+    if (!v.alive) return 0;
+    if (untilLands > 0) {
+      let lands = 0;
+      count = 0;
+      while (count < v.library.length && lands < untilLands) if (v.library[count++].isLand) lands++;
+    } else if (this.kindsInGame.has('millBoost')) {
+      for (const q of this.opponents(v)) {
+        for (const perm of q.battlefield) for (const e of perm.card.effects) if (e.kind === 'millBoost' && e.when === 'static') count = count * e.mult + e.plus;
+      }
+    }
+    count = Math.min(v.library.length, count);
+    if (count <= 0) return 0;
+    const milled = v.library.splice(0, count);
+    for (const card of milled) this.toGraveyard(v, card, false);
+    this.say(`${v.name} mills ${count} card${count > 1 ? 's' : ''} (${v.library.length} left).`);
+    // "Whenever an opponent mills one or more cards" (Lo and Li), "whenever you mill" (Devourer of Memory).
+    if (this.kindsInGame.has('when:milled')) {
+      const creature = milled.some((c) => c.isCreature);
+      for (const q of this.alivePlayers()) {
+        for (const perm of q.battlefield) {
+          const hits = perm.card.effects.filter((e) => e.when === 'milled' && (e.castFilter !== 'creature' || creature) && (e.scope === 'all' || (e.scope === 'self' ? q === v : q !== v)));
+          if (hits.length) this.trigger(q, perm.card, perm.id, hits);
+        }
+      }
+    }
+    return count;
+  }
+
+  /** The Mindskinner: damage `p`'s sources would deal to an opponent is prevented and that player mills that many cards. */
+  private damageMills(p: PlayerState, victim: PlayerState, amount: number): boolean {
+    if (victim === p || !this.kindsInGame.has('damageToMill') || this.statics(p, 'damageToMill') === 0) return false;
+    this.say(`${p.name}'s damage to ${victim.name} is prevented.`);
+    this.millCards(victim, amount);
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -942,7 +1131,7 @@ export class Game {
       alt = from === 'crewed'
         ? { ...card, isCreature: true }
         : from === 'graveyard'
-        ? { ...card, cost: card.flashback ?? card.cost }
+        ? { ...card, cost: card.flashback ?? (card.graveyard?.how === 'cast' ? card.graveyard.cost : card.cost) }
         : { ...card, cost: card.overload?.cost ?? card.cost, effects: card.overload?.effects ?? card.effects };
       cache.set(card, alt);
     }
@@ -952,7 +1141,10 @@ export class Game {
   private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' = 'hand'): Flow<boolean> {
     const flashback = from === 'graveyard';
     const zone = fromCommand ? p.commandZone : flashback ? p.graveyard : p.hand;
-    if (!zone.includes(card) || (flashback && !card.flashback) || (from === 'overload' && !card.overload)) return false;
+    if (!zone.includes(card) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
+    /** How it is cast from the graveyard: flashback, the card's own keyword (escape, retrace, disturb), or a permission (Muldrotha). */
+    const graveyardWay = !flashback ? null : card.flashback ? 'flashback' : card.graveyard?.how === 'cast' ? card.graveyard.label : 'permission';
+    let finality = false;
     const priced = this.castCard(card, from);
     const permanent = !card.isInstant && !card.isSorcery;
     const effects = permanent ? [] : priced.effects.filter((e) => e.when === 'resolve');
@@ -1004,6 +1196,31 @@ export class Game {
         }
       }
     }
+    if (graveyardWay && graveyardWay !== 'flashback' && graveyardWay !== 'permission') {
+      const use = card.graveyard!;
+      // Escape: exile other cards from your graveyard. Retrace: discard a land card.
+      if (use.exileOthers) {
+        const others = p.graveyard.filter((c) => c !== card);
+        const picks = yield* this.choose(p, 'exileCard', `Exile ${use.exileOthers} other cards from your graveyard to escape ${card.name}.`, others.map((c) => ({ label: c.name, card: c })), use.exileOthers, use.exileOthers);
+        const gone = picks.map((i) => others[i]);
+        for (const c of gone) p.graveyard.splice(p.graveyard.indexOf(c), 1);
+        p.exile.push(...gone);
+      }
+      if (use.discardLand) {
+        const lands = p.hand.filter((c) => c.isLand);
+        const pick = lands.length === 1 ? [0] : yield* this.choose(p, 'discard', `Discard a land card to retrace ${card.name}.`, lands.map((c) => ({ label: c.name, card: c })), 1, 1);
+        const land = lands[pick[0] ?? 0];
+        if (land) {
+          p.hand.splice(p.hand.indexOf(land), 1);
+          this.toGraveyard(p, land, false);
+        }
+      }
+    } else if (graveyardWay === 'permission') {
+      const permission = this.graveyardPermission(p, card);
+      p.life -= permission?.life ?? 0;
+      if (permission?.finality) finality = true;
+      this.useGraveyardPermission(p, card);
+    }
     this.commitPayment(p, plan);
     p.life -= priced.cost.life + (card.xFromLife ? x : 0);
 
@@ -1019,10 +1236,11 @@ export class Game {
       id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
       isCommander: p.deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
     };
-    if (flashback) item.flashback = true;
+    if (graveyardWay === 'flashback' || (graveyardWay !== 'permission' && card.graveyard?.exiled && flashback)) item.flashback = true;
+    if (finality) item.finality = true;
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
-    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : from === 'overload' ? ' with overload' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : graveyardWay === 'permission' ? ' from their graveyard' : graveyardWay ? ` with ${graveyardWay}` : from === 'overload' ? ' with overload' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
 
     // Storm: a copy for each spell cast before this one this turn (rule 702.40).
     if (card.storm) {
@@ -1099,6 +1317,11 @@ export class Game {
     this.commitPayment(p, plan);
     p.life -= act.cost.life;
     if (act.tap) perm.tapped = true;
+    if (act.tapCreatures) {
+      // Tap the creatures that matter least (summoning sickness doesn't stop this, rule 302.6).
+      const crew = p.battlefield.filter((q) => q.card.isCreature && !q.tapped).sort((a, b) => this.power(a) - this.power(b)).slice(0, act.tapCreatures);
+      for (const q of crew) q.tapped = true;
+    }
     perm.activations++;
     this.say(`${p.name} activates ${perm.card.name}${fodder ? `, sacrificing ${fodder.card.name}` : ''}${target ? ` targeting ${this.describeTarget(target)}` : ''}.`);
     if (fodder) {
@@ -1215,7 +1438,8 @@ export class Game {
     }
 
     if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
-      yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo);
+      const perm = yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo);
+      if (perm && item.finality) this.finality.add(perm.id);
       return;
     }
 
@@ -1229,7 +1453,7 @@ export class Game {
     }
     for (let i = 0; i < item.effects.length; i++) {
       if (!legal[i] || !p.alive) continue;
-      yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i]);
+      yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i], item.card);
     }
     if (item.kind === 'spell') {
       if (this.tuckSpell) p.library.splice(Math.min(6, p.library.length), 0, item.card);
@@ -1246,9 +1470,19 @@ export class Game {
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
     // Rest in Peace: exiled instead.
-    const to = this.statics(null, 'graveyardHate') > 0 ? 'exile' : 'graveyard';
+    const to = this.exiledInstead(p) ? 'exile' : 'graveyard';
     p[to].push(card);
     if (isCommander) this.pendingCommander.push({ seat: p.seat, card, to });
+  }
+
+  /** Rest in Peace (anyone's cards), Dauthi Voidwalker (its controller's opponents' cards): cards `owner` owns are exiled instead of going to their graveyard. */
+  private exiledInstead(owner: PlayerState): boolean {
+    if (!this.kindsInGame.has('graveyardHate')) return false;
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) for (const e of perm.card.effects) if (e.kind === 'graveyardHate' && e.when === 'static' && (!e.opponents || q !== owner)) return true;
+    }
+    return false;
   }
 
   /** `p` takes control of a permanent. Its owner gets it back when it leaves the battlefield. */
@@ -1283,7 +1517,7 @@ export class Game {
   }
 
   /** Put a permanent card onto the battlefield and note its enters triggers. */
-  private *enter(p: PlayerState, card: SimCard, isCommander: boolean, x: number, attachTo: Target | null, owner?: PlayerState): Flow<void> {
+  private *enter(p: PlayerState, card: SimCard, isCommander: boolean, x: number, attachTo: Target | null, owner?: PlayerState): Flow<Perm | null> {
     const perm = this.makePerm(p, card, false);
     perm.isCommander = isCommander;
     if (owner && owner !== p) perm.owner = owner.seat;
@@ -1304,7 +1538,7 @@ export class Game {
       // An Aura with nothing legal to enchant goes to the graveyard instead (rule 608.3b).
       if (!host || !this.canTarget(p, host)) {
         this.toGraveyard(p, card, isCommander);
-        return;
+        return null;
       }
       perm.attachedTo = host.id;
       this.anyAttached = true;
@@ -1328,6 +1562,7 @@ export class Game {
         if (hits.length) this.trigger(p, other.card, other.id, hits);
       }
     }
+    return perm;
   }
 
   /**
@@ -1377,7 +1612,8 @@ export class Game {
     return picks;
   }
 
-  private *resolveEffect(p: PlayerState, e: Effect, src: Perm | null, x: number, target: Target | null): Flow<void> {
+  /** `card`: the card the spell or ability comes from. */
+  private *resolveEffect(p: PlayerState, e: Effect, src: Perm | null, x: number, target: Target | null, card?: SimCard): Flow<void> {
     const n = (v: number) => (v === -1 ? x : v);
 
     switch (e.kind) {
@@ -1513,6 +1749,7 @@ export class Game {
         const victim = target?.kind === 'player' ? this.players[target.seat] : null;
         if (!victim?.alive) break;
         const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        if (this.damageMills(p, victim, amount)) break;
         this.loseLife(victim, amount, p, 'noncombat');
         this.say(`${p.name} hits ${victim.name} for ${amount} (life ${victim.life}).`);
         break;
@@ -1556,23 +1793,72 @@ export class Game {
         break;
       }
       case 'recursion': {
-        const creatures = p.graveyard.filter((c) => recursionMatches(e.what, c) && (!e.toBattlefield || (!c.isInstant && !c.isSorcery && !c.isLand)));
-        if (!creatures.length) break;
+        const pool = this.recursionPool(p, e);
+        if (!pool.length) break;
         const where = e.toBattlefield ? 'the battlefield' : e.toTop ? 'the top of your library' : 'your hand';
-        const picks = yield* this.choose(p, 'recursion', `Return up to ${e.n} card${e.n > 1 ? 's' : ''} from your graveyard to ${where}.`, creatures.map((card) => ({ label: card.name, card })), 1, e.n);
-        for (const card of picks.map((i) => creatures[i])) {
-          p.graveyard.splice(p.graveyard.indexOf(card), 1);
+        const elsewhere = pool.some((c) => c.owner !== p);
+        const picks = e.all
+          ? pool.map((_, i) => i)
+          : yield* this.choose(p, 'recursion', `Return up to ${e.n} card${e.n > 1 ? 's' : ''} from ${elsewhere ? 'a graveyard' : 'your graveyard'} to ${where}.`, pool.map(({ card, owner }) => ({ label: owner === p ? card.name : `${card.name} (${owner.name})`, card })), 1, e.n);
+        const chosen = picks.map((i) => pool[i]);
+        if (e.all && chosen.length) this.say(`${p.name} returns ${chosen.length} card${chosen.length > 1 ? 's' : ''} from ${e.from ? 'graveyards' : 'their graveyard'} to ${where.replace('your', 'their')}: ${chosen.map((c) => c.card.name).join(', ')}.`);
+        for (const { card, owner } of chosen) {
+          if (!owner.graveyard.includes(card)) continue;
+          owner.graveyard.splice(owner.graveyard.indexOf(card), 1);
+          const from = owner === p ? '' : ` from ${owner.name}'s graveyard`;
           if (e.toTop) {
             this.say(`${p.name} puts ${card.name} on top of their library.`);
-            p.library.unshift(card);
+            owner.library.unshift(card);
           } else if (e.toBattlefield) {
-            this.say(`${p.name} returns ${card.name} to the battlefield.`);
-            yield* this.enter(p, card, p.deck.commanders.includes(card), 0, null);
+            if (!e.all) this.say(`${p.name} returns ${card.name}${from} to the battlefield.`);
+            if (card.isLand && card.land) {
+              this.putLand(p, card, card.land, !!e.tapped);
+              continue;
+            }
+            const perm = yield* this.enter(p, card, owner === p && p.deck.commanders.includes(card), 0, null, owner);
+            if (perm && e.tapped) perm.tapped = true;
           } else {
-            this.say(`${p.name} returns ${card.name} to their hand.`);
-            p.hand.push(card);
+            if (!e.all) this.say(`${p.name} returns ${card.name}${from} to their hand.`);
+            // A card always goes to its owner's hand.
+            owner.hand.push(card);
           }
         }
+        break;
+      }
+      case 'entomb': {
+        const options = [...new Set(p.library.filter((c) => e.what === 'any' || c.isCreature))];
+        if (!options.length) break;
+        const picks = yield* this.choose(p, 'entomb', `Put up to ${e.n} card${e.n > 1 ? 's' : ''} from your library into your graveyard.`, options.map((c) => ({ label: c.name, card: c })), 0, e.n);
+        const cards = picks.map((i) => options[i]);
+        for (const c of cards) {
+          p.library.splice(p.library.indexOf(c), 1);
+          this.toGraveyard(p, c, false);
+        }
+        this.rng.shuffle(p.library);
+        if (cards.length) this.say(`${p.name} puts ${cards.map((c) => c.name).join(', ')} into their graveyard.`);
+        break;
+      }
+      case 'millReanimate': {
+        const c = e.fromBottom ? p.library.pop() : p.library.shift();
+        if (!c) break;
+        this.toGraveyard(p, c, false);
+        const limit = src ? this.power(src) : 3;
+        if (c.isCreature && c.power <= limit && p.graveyard.includes(c) && !this.graveyardLocked()) {
+          p.graveyard.splice(p.graveyard.indexOf(c), 1);
+          this.say(`${p.name} puts ${c.name} from their library onto the battlefield.`);
+          yield* this.enter(p, c, false, 0, null);
+        } else {
+          this.say(`${p.name} mills ${c.name}.`);
+        }
+        break;
+      }
+      case 'returnSelf': {
+        // Persist and undying: the card comes back from its owner's graveyard with a counter (rule 702.79, 702.93).
+        if (!card || !p.graveyard.includes(card) || this.graveyardLocked()) break;
+        p.graveyard.splice(p.graveyard.indexOf(card), 1);
+        this.say(`${card.name} returns to the battlefield with a ${e.counters > 0 ? '+1/+1' : '-1/-1'} counter.`);
+        const perm = yield* this.enter(p, card, false, 0, null);
+        if (perm) perm.counters += e.counters;
         break;
       }
       case 'counters': {
@@ -1591,6 +1877,19 @@ export class Game {
         break;
       }
       case 'exileGraveyards':
+        if (e.cards) {
+          // Soul-Guide Lantern, Kozilek's Command: the best cards in opponents' graveyards.
+          const pool = this.opponents(p).flatMap((q) => q.graveyard.map((c) => ({ card: c, owner: q })));
+          if (!pool.length) break;
+          const picks = yield* this.choose(p, 'exileCard', `Exile up to ${e.cards} card${e.cards > 1 ? 's' : ''} from opponents' graveyards.`, pool.map(({ card: c, owner }) => ({ label: `${c.name} (${owner.name})`, card: c })), 1, e.cards);
+          for (const { card: c, owner } of picks.map((i) => pool[i])) {
+            if (!owner.graveyard.includes(c)) continue;
+            owner.graveyard.splice(owner.graveyard.indexOf(c), 1);
+            owner.exile.push(c);
+            this.say(`${p.name} exiles ${c.name} from ${owner.name}'s graveyard.`);
+          }
+          break;
+        }
         for (const q of e.all ? this.alivePlayers() : this.opponents(p)) {
           q.exile.push(...q.graveyard);
           q.graveyard.length = 0;
@@ -1643,9 +1942,8 @@ export class Game {
       case 'mill': {
         const victims = e.who === 'you' ? [p] : e.who === 'opponents' ? this.opponents(p) : e.who === 'all' ? this.alivePlayers() : target?.kind === 'player' && this.players[target.seat].alive ? [this.players[target.seat]] : [];
         for (const v of victims) {
-          const count = Math.min(v.library.length, e.n === -2 ? Math.ceil(v.library.length / 2) : e.n === -1 ? Math.max(x, 1) * 2 : e.n);
-          for (const card of v.library.splice(0, count)) this.toGraveyard(v, card, false);
-          if (count) this.say(`${v.name} mills ${count} card${count > 1 ? 's' : ''} (${v.library.length} left).`);
+          const count = e.n === -2 ? Math.ceil(v.library.length / 2) : e.n === -1 ? Math.max(x, 1) : e.n === -3 ? Math.max(x, 1) * 2 : e.n;
+          this.millCards(v, count, e.untilLands);
         }
         break;
       }
@@ -1885,8 +2183,10 @@ export class Game {
     if (idx === -1) return;
     const worn = to === 'graveyard' && perm.card.isCreature ? this.attachments(perm) : NONE;
     controller.battlefield.splice(idx, 1);
-    // Rest in Peace: exiled instead, so nothing "dies".
-    if (to === 'graveyard' && this.statics(null, 'graveyardHate') > 0) to = 'exile';
+    // Rest in Peace: exiled instead, so nothing "dies". An unearthed creature is exiled if it would leave.
+    if (to === 'graveyard' && this.exiledInstead(owner)) to = 'exile';
+    if (this.unearthed.delete(perm.id)) to = 'exile';
+    if (this.finality.delete(perm.id) && to === 'graveyard') to = 'exile';
 
     // Tokens cease to exist once they leave the battlefield (rule 704.5d). A copy goes back to being its own card.
     if (!perm.token && owner.alive) {
@@ -1895,6 +2195,11 @@ export class Game {
       else if (to === 'exile') owner.exile.push(card);
       else owner.hand.push(card);
       if (perm.isCommander) this.pendingCommander.push({ seat: owner.seat, card, to });
+      // Persist (no -1/-1 counter on it) and undying (no +1/+1 counter): it returns (rules 702.79, 702.93).
+      const persist = card.persist;
+      if (persist && to === 'graveyard' && card.isCreature && (persist === 'persist' ? perm.counters >= 0 : perm.counters <= 0)) {
+        this.trigger(owner, card, null, [{ kind: 'returnSelf', counters: persist === 'persist' ? -1 : 1, when: 'creatureDies', scope: 'self' }]);
+      }
     }
 
     if (perm.card.isCreature && to === 'graveyard' && controller.alive) {
@@ -2244,6 +2549,8 @@ export class Game {
       if (this.hasKw(d.from, 'lifelink')) this.gainLife(this.players[d.from.seat], d.amount);
     }
     for (const d of toPlayer) {
+      // The Mindskinner: prevented, and the player mills that many instead.
+      if (this.damageMills(p, d.to, d.amount)) continue;
       if (!before.has(d.to)) before.set(d.to, d.to.life);
       // Infect: poison counters instead of life loss (rule 702.90).
       if (this.hasKw(d.from, 'infect')) {
@@ -2320,14 +2627,43 @@ export function counterMatches(target: 'any' | 'noncreature' | 'creature', card:
   return target === 'creature' ? card.isCreature : !card.isCreature;
 }
 
-export function recursionMatches(what: 'any' | 'artifact' | 'enchantment' | 'instantSorcery' | undefined, card: SimCard): boolean {
+export function recursionMatches(what: RecursionWhat | undefined, card: SimCard): boolean {
   switch (what) {
     case 'any': return !card.isLand;
     case 'artifact': return card.isArtifact;
     case 'enchantment': return card.isEnchantment;
     case 'instantSorcery': return card.isInstant || card.isSorcery;
+    case 'land': return card.isLand;
+    case 'planeswalker': return card.isPlaneswalker;
+    case 'creatureOrPlaneswalker': return card.isCreature || card.isPlaneswalker;
+    case 'artifactOrCreature': return card.isArtifact || card.isCreature;
+    case 'artifactOrEnchantment': return card.isArtifact || card.isEnchantment;
+    case 'permanent': return !card.isInstant && !card.isSorcery;
+    case 'legendary': return card.isLegendary && !card.isInstant && !card.isSorcery;
     default: return card.isCreature;
   }
+}
+
+/** The permanent types of a card, for Muldrotha. */
+export function permanentTypes(card: SimCard): string[] {
+  const out: string[] = [];
+  if (card.isCreature) out.push('creature');
+  if (card.isArtifact) out.push('artifact');
+  if (card.isEnchantment) out.push('enchantment');
+  if (card.isPlaneswalker) out.push('planeswalker');
+  if (card.isLand) out.push('land');
+  if (!out.length && /battle/i.test(card.typeLine)) out.push('battle');
+  return out;
+}
+
+const sizedCache = new WeakMap<SimCard, Map<number, SimCard>>();
+/** The card as a P/P token copy (eternalize makes 4/4s). */
+function sized(card: SimCard, size: number): SimCard {
+  let byCard = sizedCache.get(card);
+  if (!byCard) sizedCache.set(card, (byCard = new Map()));
+  let out = byCard.get(size);
+  if (!out) byCard.set(size, (out = { ...card, power: size, toughness: size }));
+  return out;
 }
 
 export function removalMatches(target: string, card: SimCard): boolean {
