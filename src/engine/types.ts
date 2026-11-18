@@ -117,7 +117,7 @@ export type EffectBody =
   /** Ankh of Mishra, Zo-Zu: a land entering costs its controller life. */
   | { kind: 'landPunish'; n: number }
   /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
-  | { kind: 'toughnessMatters'; defenders: boolean }
+  | { kind: 'toughnessMatters'; defenders: boolean; /** Only your creatures. */ yours?: boolean }
   /** Reveal from the top of your library until a nonland permanent card, and put it onto the battlefield. */
   | { kind: 'digPermanent' }
   /** Opponents can't cast their commanders from the command zone. */

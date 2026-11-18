@@ -458,7 +458,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'landPunish', n: parseInt(m[1], 10) }, note: `A land entering costs its controller ${m[1]} life` });
   }
   if ((m = line.match(/^each creature (you control )?(with defender )?assigns combat damage equal to its toughness rather than its power/))) {
-    out.push({ body: { kind: 'toughnessMatters', defenders: !!m[2] }, note: m[2] ? 'Your defenders attack and deal damage with their toughness' : 'Creatures deal combat damage with their toughness' });
+    out.push({ body: { kind: 'toughnessMatters', defenders: !!m[2], ...(m[1] ? { yours: true } : {}) }, note: m[2] ? 'Your defenders attack and deal damage with their toughness' : 'Creatures deal combat damage with their toughness' });
   }
   if (/^creatures you control with power or toughness 1 or less can't be blocked/.test(line)) {
     out.push({ body: { kind: 'anthem', p: 0, t: 0, keywords: ['unblockable'], small: true }, note: "Your creatures with power or toughness 1 or less can't be blocked" });
@@ -706,7 +706,7 @@ export function classifyCard(raw: RawCard): SimCard {
     }
     if (/only once each turn/.test(line)) ctx.oncePerTurn = true;
     // "Their second spell each turn", "your second card": at most once a turn, and often not at all.
-    if (/^[^,]*\b(second|third)\b[^,]*,/.test(line) && ctx.when !== 'draw') {
+    if (/^whenever [^,]*\b(second|third)\b[^,]*,/.test(line) && ctx.when !== 'draw') {
       ctx.oncePerTurn = true;
       ctx.chance = 0.5;
     }

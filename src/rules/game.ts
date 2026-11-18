@@ -912,7 +912,6 @@ export class Game {
   // -------------------------------------------------------------------------
 
   /** Returns false if the cast was taken back before anything was paid. */
-  /** The same card priced at its flashback cost, for the cost and payment helpers. */
   /** The cheapest untapped creatures that can crew this Vehicle (rule 702.122), or null. */
   crewFor(p: PlayerState, vehicle: Perm): Perm[] | null {
     const need = vehicle.card.crew;
@@ -1823,7 +1822,8 @@ export class Game {
       if (!q.alive) continue;
       for (const src of q.battlefield) for (const e of src.card.effects) {
         if (e.kind !== 'toughnessMatters') continue;
-        if (e.defenders ? q.seat === perm.seat && perm.card.keywords.includes('defender') : true) return true;
+        if (e.yours && q.seat !== perm.seat) continue;
+        if (!e.defenders || perm.card.keywords.includes('defender')) return true;
       }
     }
     return false;
