@@ -195,7 +195,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const permState = (perm: Perm): { cls: string; onClick?: () => void } => {
     if (!d) return { cls: '' };
     if (d.kind === 'priority') {
-      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'turnFaceUp' || a.type === 'level') && a.permId === perm.id);
+      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'station' || a.type === 'turnFaceUp' || a.type === 'level') && a.permId === perm.id);
       return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
     }
     if (d.kind === 'target' && isTarget({ kind: 'perm', id: perm.id })) return { cls: 'target', onClick: () => answer({ kind: 'perm', id: perm.id }) };
@@ -571,6 +571,7 @@ function effectLabel(e: Effect): string {
     case 'untap': return 'untap';
     case 'copySpell': return 'copy';
     case 'hours': return 'add an hour counter';
+    case 'extraCombat': return 'take an additional combat';
     default: return e.kind;
   }
 }
@@ -604,6 +605,7 @@ function actionLabel(g: Game, a: Action): string {
       return `${perm?.card.name ?? 'Class'}: level ${next?.level ?? ''} ${next ? costText({ cost: next.cost } as SimCard) : ''}`;
     }
     case 'crew': return `Crew ${g.findPerm(a.permId)?.card.name ?? 'Vehicle'}`;
+    case 'station': return `Station ${g.findPerm(a.permId)?.card.name ?? 'Spacecraft'}`;
     case 'ninjutsu': return `Ninjutsu ${a.card.name} ${costText({ cost: a.card.ninjutsu!.cost } as SimCard)} for ${g.findPerm(a.permId)?.card.name ?? 'an attacker'}`;
     case 'turnFaceUp': {
       const perm = g.findPerm(a.permId);
@@ -712,7 +714,7 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     perm.sick && card.isCreature && 'Summoning sick',
     keywords.length && keywords.join(', '),
     perm.counters > 0 && `${perm.counters} +1/+1 counter${perm.counters > 1 ? 's' : ''}`,
-    perm.charge && `${perm.charge} charge counter${perm.charge > 1 ? 's' : ''}`,
+    perm.charge && `${perm.charge} ${(perm.printed ?? card).counterName ?? 'charge'} counter${perm.charge > 1 ? 's' : ''}`,
     perm.fogged && 'Combat damage to and from it is prevented this turn',
     perm.lore && `Lore ${perm.lore} of ${card.saga}`,
     perm.hours && `${perm.hours} hour counter${perm.hours > 1 ? 's' : ''}`,
@@ -731,7 +733,7 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
       {perm.isCommander && <span className="cmdr-badge">CMDR</span>}
       {perm.sick && card.isCreature && !g.hasKw(perm, 'haste') && <span className="sick-badge" title="Summoning sick">zZ</span>}
       {perm.counters > 0 && <span className="count-badge">+{perm.counters}</span>}
-      {!!perm.charge && <span className="count-badge" title="Charge counters">⚙{perm.charge}</span>}
+      {!!perm.charge && <span className="count-badge" title={`${(perm.printed ?? card).counterName ?? 'Charge'} counters`}>⚙{perm.charge}</span>}
       {!!perm.hours && <span className="count-badge" title="Hour counters">🕛{perm.hours}</span>}
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
       {(badge || host || attached.length > 0) && <span className="zone-badge">{badge ?? (host ? `on ${host.card.name}` : `⚙ ${attached.join(', ')}`)}</span>}

@@ -298,6 +298,9 @@ export class Bot implements Agent {
         return vehicle.card.power > lost;
       });
       if (crew) return pick(crew);
+      // Station a Spacecraft or Planet with a creature that isn't going to attack.
+      const station = actions.find((a) => a.type === 'station' && this.stationDriver(g, p, a.permId));
+      if (station) return pick(station);
       // Classes: gain the next level once there is nothing better to spend the mana on.
       const level = actions.find((a) => a.type === 'level');
       if (level) return pick(level);
@@ -763,6 +766,19 @@ export class Bot implements Agent {
       if (best < 2.5) return null;
       score = Math.max(score, 35 + best);
     }
+    // Additional combats: worth it when there is enough power to swing again.
+    const extra = card.effects.find((e): e is Extract<Effect, { kind: 'extraCombat' }> => e.kind === 'extraCombat' && e.when === 'resolve');
+    if (extra && spell) {
+      if (g.activeSeat !== p.seat || extra.inCombat) return null;
+      const untapsNow = card.effects.find((e) => e.kind === 'untap' && e.when === 'resolve');
+      // Untapping before anyone attacked is wasted: Relentless Assault waits for the second main phase.
+      if (g.step === 'main1' && untapsNow && !extra.untapAttacked) return null;
+      const ready = this.readyAttackers(g, p);
+      const attacked = p.battlefield.filter((q) => q.card.isCreature && q.tapped && q.attackedTurn === g.turnNumber && !q.stun);
+      const back = untapsNow?.kind === 'untap' && untapsNow.what === 'permanent' ? attacked.sort((a, b) => g.power(b) - g.power(a)).slice(0, untapsNow.n) : untapsNow || extra.untapAttacked ? attacked : [];
+      const power = [...ready, ...back].reduce((n, q) => n + g.power(q), 0) * Math.max(1, extra.n);
+      return power >= 4 ? 50 + power : null;
+    }
     const untap = card.effects.find((e) => e.kind === 'untap' && e.when === 'resolve');
     if (untap && untap.kind === 'untap' && spell) {
       // Dramatic Reversal and friends: worth it when they give back more mana than they cost.
@@ -865,6 +881,10 @@ export class Bot implements Agent {
       }
       // "Pay X {E}": only with a few energy saved up.
       if (e.activation?.energy === -1 && p.energy < 3) return false;
+      // Discarding as a cost: only from a full hand, or with lands to spare.
+      if (e.activation?.discard && p.hand.length < 4 && !(p.hand.filter((c) => c.isLand).length >= 2 && g.landCount(p) >= 5)) return false;
+      // Removing counters from our other permanents: only with some to spare.
+      if (e.activation?.removeCounters?.from === 'any' && g.counterPool(p, perm, 'any') < e.activation.removeCounters.n + 2) return false;
       switch (e.kind) {
         case 'draw': return p.library.length > 8 || winsOnEmptyDraw(p);
         case 'energy': case 'digPermanent': case 'extraTurn': return true;
@@ -895,6 +915,8 @@ export class Bot implements Agent {
         case 'recursion': return !e.toTop && g.recursionPool(p, e).length > 0;
         case 'exileGraveyards': return e.cards ? g.opponents(p).some((o) => o.graveyard.some((c) => c.value >= 5)) : g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'entomb': return true;
+        case 'stun': case 'bounty': case 'poison': return true;
+        case 'kwCounter': return e.on !== 'self' || !perm.kwCounters?.includes(e.kw);
         // Midnight Clock: wind it forward when a fresh hand of seven beats what we hold, and not if the graveyard is our engine.
         case 'hours': return p.hand.length <= 2 && !this.leansOnGraveyard(p) && (perm.hours ?? 0) >= 6;
         case 'millReanimate': return p.library.length > 10;
@@ -1057,6 +1079,13 @@ export class Bot implements Agent {
         const best = (seat: number) => Math.max(0, ...g.players[seat].battlefield.filter((q) => q.card.isCreature).map((q) => threat(g, q)));
         return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (best(b) > best(a) ? b : a)) } : d.candidates[0];
       }
+      case 'poison': {
+        // The opponent closest to ten poison counters.
+        const seats = d.candidates.flatMap((t) => (t.kind === 'player' && t.seat !== p.seat ? [t.seat] : []));
+        return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (g.players[b].poison > g.players[a].poison ? b : a)) } : d.candidates[0];
+      }
+      case 'kwCounter':
+        return asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'lore':
         // The Saga closest to its last chapter, so its best chapter comes sooner.
         return asTarget(bestOf(perms, (q) => q.lore ?? 0)) ?? d.candidates[0];
@@ -1327,6 +1356,8 @@ export class Bot implements Agent {
     const affects = (perm: Perm) => {
       if (perm.card.isLand) return false;
       if (creaturesOnly && !perm.card.isCreature) return false;
+      // Wrath of the Skies: up to the energy we will have.
+      if (e.byEnergy && perm.card.cmc > Math.max(0, x) + p.energy) return false;
       if (e.mode === 'damage') return perm.card.isCreature && (e.amount === -1 ? x : e.amount) >= g.toughness(perm) && (!!e.shrink || !g.hasKw(perm, 'indestructible'));
       if (e.mode === 'destroy' && g.hasKw(perm, 'indestructible')) return false;
       return true;
@@ -1349,6 +1380,19 @@ export class Bot implements Agent {
   // -------------------------------------------------------------------------
   // Combat
   // -------------------------------------------------------------------------
+
+  /**
+   * The creature to tap to station a Spacecraft or Planet, or null to wait: before combat only one that can't
+   * attack anyway, after combat the strongest one left, but never a creature whose own tap ability matters.
+   */
+  stationDriver(g: Game, p: PlayerState, permId: number): Perm | null {
+    const host = g.findPerm(permId);
+    if (!host || g.activeSeat !== p.seat) return null;
+    const attackers = new Set(g.attackCandidates(p));
+    const ok = g.stationCrew(p, host).filter((q) => !q.card.effects.some((e) => e.when === 'activated' && e.activation?.tap) && !q.isCommander);
+    const pool = g.step === 'main1' ? ok.filter((q) => !attackers.has(q)) : ok;
+    return pool[0] ?? null;
+  }
 
   private readyAttackers(g: Game, p: PlayerState): Perm[] {
     return g.attackCandidates(p).filter((c) => g.power(c) > 0);
@@ -1527,6 +1571,13 @@ export class Bot implements Agent {
     const perm = (i: number) => g.findPerm(d.options[i].permId ?? null);
 
     switch (d.reason) {
+      case 'station': {
+        // The choice doesn't name the Spacecraft; any of ours with room left picks the same driver.
+        const host = p.battlefield.find((q) => g.stationRoom(q));
+        const best = host ? this.stationDriver(g, p, host.id) : null;
+        const at = best ? indexes.find((i) => d.options[i].permId === best.id) : undefined;
+        return [at ?? 0];
+      }
       case 'bottom':
       case 'discard': {
         const lands = p.hand.filter((c) => c.isLand).length;

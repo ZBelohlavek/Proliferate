@@ -64,7 +64,7 @@ export const COMBOS: Combo[] = [
     name: 'Mindcrank + Bloodchief Ascension',
     pieces: [['Mindcrank'], ['Bloodchief Ascension']],
     kind: 'drain',
-    ready: (_g, p) => (p.battlefield.some((q) => q.card.name === 'Bloodchief Ascension' && q.counters >= 3) ? 'drain' : null),
+    ready: (_g, p) => (p.battlefield.some((q) => q.card.name === 'Bloodchief Ascension' && (q.charge ?? 0) >= 3) ? 'drain' : null),
   },
   // Dramatic Reversal on Isochron Scepter with three mana of rocks: infinite mana and untaps, which needs something to spend them on.
   {

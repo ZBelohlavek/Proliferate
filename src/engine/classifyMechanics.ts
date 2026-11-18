@@ -53,10 +53,20 @@ export function mechanicTrigger(l: string): { when: Trigger; body: string; chanc
 }
 
 /** "Pay {E}{E}", "pay six {E}", "pay X {E}" and "remove three charge counters from ~" in an activation cost. */
-export const MECHANIC_COST = 'pay (?:(?:\\{e\\})+|\\w+ \\{e\\})|remove (?:a|an|one|two|three|four|five|six|ten|twenty|fifty|x|\\d+) charge counters? from ~|exile ~';
+export const MECHANIC_COST = 'pay (?:(?:\\{e\\})+|\\w+ \\{e\\})|remove (?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|fifty|x|\\d+) charge counters? from ~|exile ~'
+  // Counters as costs (see classifyCounters.ts): discard, -1/-1 counters on itself, +1/+1 or any counters removed.
+  + '|discard (?:a|two) cards?|put (?:a|two) -1/-1 counters? on ~|remove (?:a|an|one|two|three|four|five|x|\\d+) \\+1/\\+1 counters? from ~'
+  + '|remove (?:a|an|one|two|three|x) counters? from (?:among )?(?:an? |other )?[a-z, ]+ you control';
 
-export function mechanicCost(costText: string): { energy?: number; charge?: number; exileSelf?: boolean } {
-  const out: { energy?: number; charge?: number; exileSelf?: boolean } = {};
+export type ExtraCost = { energy?: number; charge?: number; exileSelf?: boolean; discard?: number; shrinkSelf?: number; removeCounters?: { n: number; from: 'self' | 'any' } };
+
+export function mechanicCost(costText: string): ExtraCost {
+  const out: ExtraCost = {};
+  let m: RegExpMatchArray | null;
+  if ((m = costText.match(/discard (a|two) cards?/))) out.discard = count(m[1], 1);
+  if ((m = costText.match(/put (a|two) -1\/-1 counters? on ~/))) out.shrinkSelf = count(m[1], 1);
+  if ((m = costText.match(/remove (\w+) \+1\/\+1 counters? from ~/))) out.removeCounters = { n: Math.max(1, count(m[1], 1)), from: 'self' };
+  else if ((m = costText.match(/remove (\w+) counters? from (?:among )?(?:an? |other )?[a-z, ]+ you control/))) out.removeCounters = { n: Math.max(1, count(m[1], 1)), from: 'any' };
   const energy = costText.match(/pay ((?:\{e\})+|\w+ \{e\})/);
   if (energy) out.energy = energyCount(energy[1]);
   const charge = costText.match(/remove (\w+) charge counters? from ~/);

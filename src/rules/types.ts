@@ -68,8 +68,12 @@ export interface Perm {
   level?: number;
   /** Cast with dash: returns to its owner's hand at the beginning of the next end step (rule 702.109). */
   dashed?: boolean;
-  /** Mathas's bounty counter. */
+  /** A bounty counter. */
   bounty?: boolean;
+  /** Mathas: "for as long as it has a bounty counter, it has 'when this creature dies, each opponent draws a card and gains 2 life'". */
+  bountyGrant?: boolean;
+  /** Keyword counters (rule 122.1b): indestructible, flying ... */
+  kwCounters?: string[];
   /** A temporary token copy (Satya): sacrificed at the next end step unless its controller pays energy. */
   temporary?: boolean;
   /**
@@ -250,6 +254,8 @@ export type Action =
   | { type: 'ninjutsu'; card: SimCard; permId: number }
   /** Crew a Vehicle: tap creatures to make it a creature until end of turn. */
   | { type: 'crew'; permId: number }
+  /** Station (rule 702.184a): tap another untapped creature to put charge counters equal to its power on this permanent. */
+  | { type: 'station'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
   | { type: 'cycle'; card: SimCard }
   /** Use a card's ability from your graveyard: unearth, embalm, "{1}{B}: return ~ from your graveyard". */
@@ -263,7 +269,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =
