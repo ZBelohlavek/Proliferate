@@ -616,6 +616,9 @@ export class Bot implements Agent {
       const fromCommand = a.from === 'command';
       const kick = a.kick ? this.kickWorth(g, p, a.card, a.kick, a.maxX) : 0;
       if (kick === null) continue;
+      // A kicked instant or sorcery that is much better (Maddening Cacophony mills half a library instead of eight):
+      // hold it for the kicker until late in the game.
+      if (!a.kick && a.card.kicker && !a.card.kicker.multi && !a.card.kicker.offspring && !a.card.kicker.cost.x && (a.card.isInstant || a.card.isSorcery) && g.round < 8) continue;
       // Everflowing Chalice: worth nothing without a kick.
       if (!a.kick && a.card.kicker?.charge) continue;
       // Retrace costs a land card from hand: only once there are lands to spare.
