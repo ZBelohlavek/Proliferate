@@ -89,6 +89,10 @@ export interface Perm {
   unlocked?: SimCard;
   /** The Aura that locks it down. */
   lockedBy?: number;
+  /** Charge counters. */
+  charge?: number;
+  /** Combat damage to and from it is prevented this turn (Maze of Ith). */
+  fogged?: boolean;
   /** The turn number on which it last attacked (boast, rule 702.142). */
   attackedTurn?: number;
   /** A Curse: the seat of the player it enchants (rule 303.4). */
@@ -142,8 +146,12 @@ export interface PlayerState {
   lostLifeTurn: number;
   /** Experience counters (Meren, Kratos). */
   experience: number;
-  /** Energy counters (Satya). */
+  /** Energy counters (rule 122.1). */
   energy: number;
+  /** Energy paid this turn (Blaster Hulk). */
+  energyPaid?: number;
+  /** Combat damage dealt to this player is prevented this turn; `tokens`: and makes that many 2/1 flyers (Inkshield). */
+  fogged?: { tokens: boolean };
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;

@@ -48,6 +48,7 @@ export type Trigger =
   | 'dieRoll' // you roll a die (see Effect.minRoll)
   | 'opponentMonarch' // an opponent becomes the monarch
   | 'ringTempts' // the Ring tempts you (rule 701.54)
+  | 'energy' // you get one or more energy counters (x: how many)
   | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
   | 'turnedFaceUp' // this face-down permanent is turned face up
   | 'lore' // you put a lore counter on a Saga you control (Sigurd)
@@ -59,7 +60,7 @@ export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | '
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate';
 
-export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker';
+export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
 
 /** -1 anywhere a number is expected means "X" (the X paid for the spell). */
@@ -87,16 +88,33 @@ export type Effect = EffectBody & {
   turn?: 'own' | 'others';
   /** Dies triggers: "this creature or another creature" also triggers on its own death. */
   selfToo?: boolean;
+  /** "You may pay {E}{E}{E}. When you do, ...": paid in energy as it resolves, or nothing happens (rule 107.14). */
+  energyCost?: number;
   /** For activated abilities: the mana cost and whether it taps the source. */
-  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number; /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */ boast?: boolean };
+  activation?: {
+    cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number;
+    /** "Pay {E}{E}": energy counters paid (rule 107.14). -1: "pay X {E}", any amount, and X is what was paid. */
+    energy?: number;
+    /** "Remove three charge counters from ~": charge counters removed from the source. */
+    charge?: number;
+    /** "Activate only as a sorcery." */
+    sorcery?: boolean;
+    /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
+    boast?: boolean;
+  };
 };
 
 export type EffectBody =
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
-  | { kind: 'mana'; amount: number; colors: Mana[] | 'any' }
+  /**
+   * energy: each use also costs this many energy counters (Solar Transformer).
+   * charge: the amount is the source's charge counters ('tap': Astral Cornucopia; 'grow': a counter is added first,
+   * Empowered Autogenerator) or each counter can be removed for one mana without tapping ('spend': Pentad Prism).
+   */
+  | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend' }
   | { kind: 'costReduction'; amount: number; filter: CastFilter }
   /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
-  | { kind: 'treasure'; n: number; ritual?: boolean }
+  | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
   /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
@@ -104,7 +122,9 @@ export type EffectBody =
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters' }
+  /** replace: a destroyed land's controller may search for a basic land to put onto the battlefield (Ghost Quarter). */
+  /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean }
@@ -182,7 +202,8 @@ export type EffectBody =
   | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
   /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
-  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean }
+  /** payEnergy: Confiscation Coup gives this much energy, then the steal costs energy equal to the target's mana value. */
+  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
@@ -220,8 +241,40 @@ export type EffectBody =
   | { kind: 'enterCounters'; n: number }
   /** Kudo: other creatures have this base power and toughness. */
   | { kind: 'baseSize'; p: number; t: number }
-  /** You get this many energy counters. */
+  /** You get this many energy counters (rule 122.1, 107.14). -1: "that many" / X. */
   | { kind: 'energy'; n: number }
+  /** Energy you would get is doubled (Aether Refinery: mult 2) or increased (Izzet Generatorium: plus 1). */
+  | { kind: 'energyBoost'; mult: number; plus: number }
+  /** Charge counters: on the source, or on another target artifact you control. */
+  | { kind: 'charge'; n: number; target?: 'artifact' }
+  /** Darksteel Reactor: you win the game once the source has this many charge counters. */
+  | { kind: 'chargeWin'; n: number }
+  /**
+   * Static rules about lands (rule 305.7: setting a land's subtype removes its old land types and abilities).
+   * nonbasicMountains / nonbasicIslands: Blood Moon, Harbinger of the Seas. nonbasicNoUntap: Back to Basics.
+   * untapOneNonbasic: Winter Moon. untapOneLand: Winter Orb. oppNonbasicTapped: Archon of Emeria.
+   * everyType: Dryad of the Ilysian Grove (your lands tap for any color).
+   */
+  | { kind: 'landRule'; rule: 'nonbasicMountains' | 'nonbasicIslands' | 'nonbasicNoUntap' | 'untapOneNonbasic' | 'untapOneLand' | 'oppNonbasicTapped' | 'everyType' }
+  /**
+   * Whenever a player taps a land for mana: it deals `n` damage to them (Manabarbs; Burning Earth: only nonbasic lands),
+   * all their lands become tapped ('tapAll', War's Toll and Mana Web: opponents only), or the land is destroyed
+   * if it isn't their turn ('destroyOffTurn', Price of Glory).
+   */
+  | { kind: 'tapPunish'; what: 'damage' | 'tapAll' | 'destroyOffTurn'; n: number; nonbasic?: boolean; opponents?: boolean }
+  /** Destroy all lands, or all nonbasic lands; with `replace` each player may fetch a basic land for each (From the Ashes). */
+  | { kind: 'landWipe'; nonbasic: boolean; replace?: boolean }
+  /** Each player (or each opponent) sacrifices `n` lands, or all but `keep` of them (Keldon Firebombers). */
+  | { kind: 'landSac'; n: number; who: 'each' | 'opponents'; keep?: number }
+  /** Damage to each player for each nonbasic land they control (Price of Progress: 2, Sunspine Lynx: 1). */
+  | { kind: 'nonbasicBurn'; per: number }
+  /** Dingus Egg: whenever a land goes to a graveyard from the battlefield, its controller takes this much damage. */
+  | { kind: 'landDiesPunish'; n: number }
+  /**
+   * Prevent combat damage this turn (rule 615): all of it ('all', Fog), the damage dealt to you ('you', Inkshield,
+   * which makes a 2/1 flyer for each 1 prevented: `tokens`), or the damage dealt to and by one target attacking creature ('creature', Maze of Ith).
+   */
+  | { kind: 'fog'; who: 'all' | 'you' | 'creature'; tokens?: boolean; untap?: boolean }
   /**
    * Manifest (rule 701.40): put the top card of a library onto the battlefield face down as a 2/2.
    * who: 'you'; 'targetController', the controller of what the previous part of the ability hit
@@ -426,6 +479,10 @@ export interface SimCard {
     evoke?: boolean;
     dash?: boolean;
   };
+  /** Enters with this many charge counters (-1: X; sunburst: one for each color of mana spent, rule 702.44). */
+  charge?: number;
+  /** Sunburst (rule 702.44): a creature gets +1/+1 counters, anything else charge counters, one for each color spent. */
+  sunburst?: boolean;
   /** A Curse: an Aura with "Enchant player" (rule 303.4) and what it does to that player. */
   curse?: CurseAbility[];
   /** A nonland permanent that enters tapped. */

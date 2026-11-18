@@ -86,8 +86,8 @@ describe('classifyCard', () => {
   });
 
   it('flags cards it cannot understand', () => {
-    const orb = card({ name: 'Winter Orb', manaCost: '{2}', cmc: 2, types: ['Artifact'], text: "As long as this artifact is untapped, players can't untap more than one land during their untap steps." });
-    expect(orb.modeled).toBe(false);
+    const odd = card({ name: 'Odd Relic', manaCost: '{2}', cmc: 2, types: ['Artifact'], text: 'Players play with the top card of their libraries revealed.' });
+    expect(odd.modeled).toBe(false);
   });
 });
 
@@ -99,7 +99,7 @@ describe('coverage of widely played Commander cards', () => {
   it('understands nearly all of the sample', () => {
     const blank = cards.filter((c) => !c.modeled).map((c) => c.name);
     expect(cards.length).toBeGreaterThan(160);
-    expect(blank.sort()).toEqual(['Winter Orb']);
+    expect(blank.sort()).toEqual([]);
   });
 
   it('reads cards that used to slip past on wording', () => {
@@ -172,12 +172,12 @@ describe('commander abilities from real decks', () => {
     expect(cards[7].effects.find((e) => e.kind === 'counters')?.activation?.sacCreature).toBe(true);
   });
 
-  it('keeps "it" pumps off other creatures and energy off cards that spend it', () => {
+  it('keeps "it" pumps off other creatures, and makes energy steals cost energy', () => {
     const treason = card({ name: 'Act of Treason', types: ['Sorcery'], text: 'Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.' });
     expect(treason.effects).toEqual([]);
     const courage = card({ name: 'Brave Herald', types: ['Enchantment'], text: 'Whenever another creature you control enters, it gains haste until end of turn.' });
     expect(courage.unread).toHaveLength(1);
     const coup = card({ name: 'Confiscation Coup', types: ['Sorcery'], text: 'Choose target artifact or creature. You get {E}{E}{E}{E}, then you may pay an amount of {E} equal to that permanent\'s mana value. If you do, gain control of it.' });
-    expect(kinds(coup)).not.toContain('energy');
+    expect(coup.effects).toMatchObject([{ kind: 'energy', n: 4 }, { kind: 'steal', payEnergy: 4 }]);
   });
 });
