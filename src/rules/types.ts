@@ -223,6 +223,8 @@ export type Action =
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
   | { type: 'turnFaceUp'; permId: number }
+  /** Ninjutsu: return the unblocked attacker `permId` to hand and put `card` onto the battlefield attacking in its place (rule 702.49a). */
+  | { type: 'ninjutsu'; card: SimCard; permId: number }
   /** Crew a Vehicle: tap creatures to make it a creature until end of turn. */
   | { type: 'crew'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
