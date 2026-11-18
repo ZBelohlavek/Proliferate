@@ -103,6 +103,23 @@ export function boardThreat(g: Game, p: PlayerState, creaturesOnly = false): num
   return t;
 }
 
+/**
+ * How far ahead of the table a player is, by board and life together. A table
+ * of people gangs up on the leader; bots that only chase the lowest life total
+ * let a lifegain deck run away with the game.
+ */
+export function standing(g: Game, p: PlayerState): number {
+  return boardThreat(g, p) + p.life * 0.4 + p.hand.length;
+}
+
+/** How much `o` leads the other opponents of `seat` (0 if not ahead). */
+export function archenemyLead(g: Game, o: PlayerState, seat: number): number {
+  const others = g.players.filter((q) => q.alive && q !== o && q.seat !== seat);
+  if (!others.length) return 0;
+  const avg = others.reduce((s, q) => s + standing(g, q), 0) / others.length;
+  return Math.max(0, standing(g, o) - avg);
+}
+
 /** Damage `a` deals in one combat (double strike counts twice). */
 function hitDamage(g: Game, a: Perm): number {
   return g.power(a) * (g.hasKw(a, 'double strike') ? 2 : 1);
@@ -1124,7 +1141,10 @@ export class Bot implements Agent {
     if (unblockable >= o.life) score += 100;
     else if (total - blockers.length * 2 >= o.life) score += 25;
     score += boardThreat(g, o) * 0.4;
-    score += (40 - o.life) * 0.4;
+    // Gang up on whoever is running away with the game, rather than on whoever is lowest.
+    score += archenemyLead(g, o, this.seat) * 0.5;
+    // Combat damage to the monarch takes the crown (rule 724.2), and with it a card every turn.
+    if (g.monarch === o.seat) score += 6;
     score -= blockers.reduce((s, b) => s + g.power(b), 0) * 0.3;
     return score;
   }
@@ -1157,7 +1177,9 @@ export class Bot implements Agent {
         total += hitDamage(g, a);
         if (!blockers.some((b) => g.canBlock(b, a))) unblockable += hitDamage(g, a);
       }
-      const score = this.attackScore(g, o, blockers, unblockable, total) + this.rng.next() * 8;
+      const tax = g.attackTax(o);
+      const payable = tax ? Math.min(candidates.length, Math.floor(g.availableMana(p) / tax)) : candidates.length;
+      const score = this.attackScore(g, o, blockers, unblockable * (payable / candidates.length), total * (payable / candidates.length)) - (candidates.length - payable) * 4 + this.rng.next() * 8;
       if (score > mainScore) {
         main = o;
         mainScore = score;
@@ -1181,8 +1203,12 @@ export class Bot implements Agent {
     const totalDamage = candidates.reduce((s, a) => s + hitDamage(g, a), 0);
     const order = [main, ...opps.filter((o) => o !== main).sort((a, b) => a.life - b.life)];
     const out: AttackDeclaration[] = [];
+    // Attack taxes (Propaganda, Ghostly Prison) are paid per creature; one we can't pay for stays home, so send it elsewhere.
+    let budget = g.availableMana(p);
     for (const a of candidates) {
       for (const o of order) {
+        const tax = g.attackTax(o);
+        if (tax > budget) continue;
         const isMain = o === main;
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
         // A lethal-looking alpha strike, or so many attackers that most get through.
@@ -1195,6 +1221,7 @@ export class Bot implements Agent {
         if (!go && isMain && this.rng.chance(0.1 * this.aggression)) go = true;
         if (go) {
           out.push({ attacker: a.id, defender: o.seat });
+          budget -= tax;
           break;
         }
       }

@@ -575,3 +575,38 @@ describe('control changes and copies', () => {
     expect(juri.counters).toBe(2);
   });
 });
+
+describe('amass and the monarch', () => {
+  it('amass grows the one Army you control instead of making another (rule 701.47a)', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 2);
+    a.hand.push(spell('Orc Call', '{G}', 1, 'Sorcery', 'Amass Orcs 2.'), spell('Orc Call Again', '{G}', 1, 'Sorcery', 'Amass Orcs 1.'));
+    const first = castOnce('Orc Call');
+    const second = castOnce('Orc Call Again');
+    t.handlers[0] = (g, d) => first(g, d) ?? second(g, d);
+    t.finishTurn();
+    const armies = a.battlefield.filter((q) => q.card.isCreature);
+    expect(armies).toHaveLength(1);
+    expect(t.game.power(armies[0])).toBe(3);
+  });
+
+  it('Garland keeps a creature only while that player is the monarch (rule 611.2b)', () => {
+    const t = new Table(3);
+    const [a, b, c] = t.game.players;
+    const target = t.game.put(1, bears());
+    t.game.put(2, bears());
+    t.lands(0, 4);
+    a.hand.push(creature('Garland, Royal Kidnapper', '{2}{G}{G}', 4, 3, 4, { superTypes: ['Legendary'], text: "When Garland enters, target opponent becomes the monarch.\nWhenever an opponent becomes the monarch, gain control of target creature that player controls for as long as they're the monarch.\nCreatures you control but don't own get +2/+2 and can't be sacrificed." }));
+    const cast = castOnce('Garland, Royal Kidnapper');
+    // The monarch goes to seat 1; the stolen creature must be one of seat 1's.
+    t.handlers[0] = (g, d) => (d.kind === 'target' ? (d.candidates.find((x) => x.kind === 'player' && x.seat === 1) ?? d.candidates[0]) : cast(g, d));
+    t.finishTurn();
+    expect(t.game.monarch).toBe(1);
+    expect(target.seat).toBe(0);
+    // Seat 2 takes the crown: the creature goes home, and Garland takes one of seat 2's instead.
+    (t.game as unknown as { setMonarch(p: unknown): void }).setMonarch(c);
+    expect(target.seat).toBe(1);
+    expect(b.battlefield).toContain(target);
+  });
+});
