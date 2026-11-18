@@ -83,6 +83,8 @@ export interface Perm {
   faceDown?: SimCard;
   /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
   heldBy?: number;
+  /** Taken "for as long as that player is the monarch" (Garland, Royal Kidnapper): control ends when that seat stops being the monarch. */
+  heldWhileMonarch?: number;
   /** Under a lockdown Aura (Amphibian Downpour, Imprisoned in the Moon): its real card. `card` is then the vanilla version. */
   unlocked?: SimCard;
   /** The Aura that locks it down. */

@@ -337,7 +337,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
   if ((m = line.match(/\bamass (?:\w+ )?(\d+)/))) {
     const n = parseInt(m[1], 10);
-    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [] }, note: `Amass ${n} (≈ a ${n}/${n} Army token)` });
+    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [], army: true }, note: `Amass ${n} (+${n}/+${n} counters on your Army)` });
   }
   if (/create (a|an|one|two) food tokens?/.test(line) && !/treasure/.test(line)) out.push({ body: { kind: 'gainLife', n: 3 }, note: 'Food (≈ gain 3 life)' });
 

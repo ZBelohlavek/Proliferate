@@ -103,6 +103,23 @@ export function boardThreat(g: Game, p: PlayerState, creaturesOnly = false): num
   return t;
 }
 
+/**
+ * How far ahead of the table a player is, by board and life together. A table
+ * of people gangs up on the leader; bots that only chase the lowest life total
+ * let a lifegain deck run away with the game.
+ */
+export function standing(g: Game, p: PlayerState): number {
+  return boardThreat(g, p) + p.life * 0.4 + p.hand.length;
+}
+
+/** How much `o` leads the other opponents of `seat` (0 if not ahead). */
+export function archenemyLead(g: Game, o: PlayerState, seat: number): number {
+  const others = g.players.filter((q) => q.alive && q !== o && q.seat !== seat);
+  if (!others.length) return 0;
+  const avg = others.reduce((s, q) => s + standing(g, q), 0) / others.length;
+  return Math.max(0, standing(g, o) - avg);
+}
+
 /** Damage `a` deals in one combat (double strike counts twice). */
 function hitDamage(g: Game, a: Perm): number {
   return g.power(a) * (g.hasKw(a, 'double strike') ? 2 : 1);
@@ -1057,7 +1074,10 @@ export class Bot implements Agent {
     if (unblockable >= o.life) score += 100;
     else if (total - blockers.length * 2 >= o.life) score += 25;
     score += boardThreat(g, o) * 0.4;
-    score += (40 - o.life) * 0.4;
+    // Gang up on whoever is running away with the game, rather than on whoever is lowest.
+    score += archenemyLead(g, o, this.seat) * 0.5;
+    // Combat damage to the monarch takes the crown (rule 724.2), and with it a card every turn.
+    if (g.monarch === o.seat) score += 6;
     score -= blockers.reduce((s, b) => s + g.power(b), 0) * 0.3;
     return score;
   }
