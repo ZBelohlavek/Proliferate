@@ -63,6 +63,7 @@ const BASIC_LAND_TYPES: Record<string, Mana> = {
 const KNOWN_KEYWORDS = [
   'flying', 'trample', 'haste', 'vigilance', 'deathtouch', 'lifelink', 'menace', 'first strike',
   'double strike', 'indestructible', 'hexproof', 'shroud', 'reach', 'defender', 'flash', 'ward', 'infect', 'wither',
+  'shadow', 'fear',
 ];
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ function parseKeywords(raw: RawCard, text: string): string[] {
     }
   }
   if (/~ can't be blocked(\.|$)/m.test(text)) kws.add('unblockable');
+  if (/^~ can't block\.?$/m.test(text)) kws.add("can't block");
   if (/^~ can't be countered/m.test(text)) kws.add('uncounterable');
   return [...kws];
 }
@@ -240,7 +242,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
   if (/if you would draw a card while your library has no cards in it, you win the game instead/.test(line)) out.push({ body: { kind: 'winOnEmptyDraw' }, note: 'Win the game instead of drawing from an empty library' });
   if (/you become the monarch/.test(line)) out.push({ body: { kind: 'monarch' }, note: 'You become the monarch (draw a card each end step)' });
-  if (/^you have no maximum hand size/.test(line)) out.push({ body: { kind: 'noMaxHand' }, note: 'No maximum hand size' });
+  if (/^(you have|players have) no maximum hand size/.test(line)) out.push({ body: { kind: 'noMaxHand' }, note: 'No maximum hand size' });
 
   // --- Board wipes ---------------------------------------------------------
   m = line.match(/(destroy|exile) all (other |non-?\w+ )?(creatures|nonland permanents|artifacts, creatures|creatures and planeswalkers|artifacts and creatures|creatures your opponents control|creatures you don't control|nonland permanents your opponents control)/);
@@ -393,6 +395,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const grant = m[3].startsWith("can't") ? ['unblockable'] : KNOWN_KEYWORDS.filter((k) => m![4].includes(k));
     const protect = grant.includes('indestructible') || grant.includes('hexproof');
     out.push({ body: { kind: 'pump', p: m[1] ? num(m[1], 1) : 0, t: m[2] ? num(m[2], 1) : 0, protect, grant, self: true }, note: `It gains ${grant.join(', ').replace('unblockable', "can't be blocked")} this turn` });
+  } else if (card.isPermanent && (m = line.match(/^~ gets \+(\d+)\/\+(\d+) until end of turn\.?$/))) {
+    out.push({ body: { kind: 'pump', p: num(m[1], 1), t: num(m[2], 1), protect: false, grant: [], self: true }, note: `It gets +${m[1]}/+${m[2]} this turn` });
   } else if (/^regenerate ~\.?$/.test(line)) {
     out.push({ body: { kind: 'pump', p: 0, t: 0, protect: false, grant: ['indestructible'], self: true }, note: 'Regenerate (≈ indestructible this turn)' });
   } else if (!card.isPermanent && /target (creature|permanent) can't be the target of spells or abilities your opponents control/.test(line)) {
@@ -460,7 +464,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   // --- Rule-changing permanents ----------------------------------------------
-  if (/it creates twice that many/.test(line)) out.push({ body: { kind: 'doubler', tokens: true, counters: false }, note: 'Doubles the tokens you make' });
+  if (/it creates twice that many|^if one or more tokens would be created under your control, twice that many of those tokens are created instead/.test(line)) out.push({ body: { kind: 'doubler', tokens: true, counters: false }, note: 'Doubles the tokens you make' });
   if (/it puts twice that many of those counters/.test(line)) out.push({ body: { kind: 'doubler', tokens: false, counters: true }, note: 'Doubles the +1/+1 counters you place' });
   if ((m = line.match(/^if (an artifact or creature entering|a permanent entering|a creature entering|a creature attacking|a creature dying|you casting or copying an instant or sorcery spell)(?: the battlefield)? causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time/))) {
     const event = /attacking/.test(m[1]) ? 'attack' as const : /dying/.test(m[1]) ? 'dies' as const : /casting/.test(m[1]) ? 'magecraft' as const : /permanent/.test(m[1]) ? 'permanentEnters' as const : 'enters' as const;
@@ -545,6 +549,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   if (/^(?:metalcraft — )?if you control three or more artifacts, exile that creature/.test(line)) out.push({ body: { kind: 'removal', target: 'creature', mode: 'exile', amount: 0 }, note: 'Exile a creature (with metalcraft)', chance: 0.5 });
   // Herald's Horn: a creature of the chosen type on top goes to hand.
   if (/^if it's a creature card of the chosen type, you may reveal it and put it into your hand/.test(line)) out.push({ body: { kind: 'draw', n: 1 }, note: 'Draw 1 (if the top card is the chosen type)', chance: 0.35 });
+  if ((m = line.match(/^annihilator (\d+)$/))) {
+    const n = parseInt(m[1], 10);
+    for (let i = 0; i < n; i++) out.push({ body: { kind: 'removal', target: 'permanent', mode: 'edict', amount: 0, each: 'opponents' }, note: i ? '' : `Annihilator ${n}: opponents sacrifice ${n} permanent${n > 1 ? 's' : ''}` });
+  }
   if ((m = line.match(/^firebending (\d+|x)$/))) {
     const n = m[1] === 'x' ? 3 : parseInt(m[1], 10);
     out.push({ body: { kind: 'treasure', n, ritual: true }, note: `Firebending: ${m[1] === 'x' ? 'X' : n} red mana when it attacks` });
@@ -718,6 +726,12 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if (milled) return { when: milled.when, scope: milled.scope, body: milled.body, ...(milled.creature ? { castFilter: 'creature' as const } : {}) };
   if (/^whenever a land enters[^,]*, [^.]* damage to that land's controller/.test(l)) return { when: 'static', body: l };
   if (/^whenever an opponent loses life, that player mills that many cards/.test(l)) return { when: 'static', body: l };
+  // Prowess (rule 702.108): +1/+1 whenever you cast a noncreature spell.
+  if (/^prowess$/.test(l)) return { when: 'cast', castFilter: 'noncreature', body: '~ gets +1/+1 until end of turn' };
+  // Annihilator N (rule 702.86): the defending player sacrifices N permanents.
+  if ((m = l.match(/^annihilator (\d+)$/))) return { when: 'attack', scope: 'self', body: `annihilator ${m[1]}` };
+  // Constellation and the like: "whenever ~ or another enchantment you control enters".
+  if ((m = l.match(/^whenever ~ or another (artifact|enchantment) you control enters,\s*(.*)$/))) return { when: 'permEnters', castFilter: m[1] as 'artifact' | 'enchantment', body: m[2] };
   // Firebending N (Avatar): whenever this creature attacks, add N {R} for the rest of combat. Kept as one-shot mana.
   if ((m = l.match(/^firebending (\d+|x)/))) return { when: 'attack', scope: 'self', body: `firebending ${m[1]}` };
   // Baeloth: only goaded creatures, so about a third of the deaths at the table.
@@ -1119,6 +1133,11 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
   }
   graveyardKeywords(text, card);
+  const toxic = isCreature && text.match(/^toxic (\d+)$/m);
+  if (toxic) {
+    card.toxic = parseInt(toxic[1], 10);
+    card.notes.push(`Toxic ${toxic[1]}: poison counters on combat damage to a player`);
+  }
   const cumulative = isPermanent && text.match(/^cumulative upkeep ((?:\{[^}]+\})+)$/m);
   if (cumulative) {
     card.cumulativeUpkeep = parseManaCost(cumulative[1]);
@@ -1252,6 +1271,8 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (parts.every((p) => keywords.includes(p) || (p.startsWith('ward') && keywords.includes('ward')))) return true;
   if (/^(enchant |equip\b|choose (one|two|one or both|one or more|up to \w+)\b)/.test(line) || /choose (one|two|one or both|one or more|up to one|up to two) —$/.test(line)) return true;
   if (/^~ can't be blocked\.?$/.test(line) && keywords.includes('unblockable')) return true;
+  if (/^~ can't block\.?$/.test(line)) return true;
+  if (/^toxic \d+$/.test(line)) return true;
   if (/enters with (x|\w+) \+1\/\+1 counters?/.test(line)) return true;
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
@@ -1261,7 +1282,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (graveyardLineHandled(line)) return true;
-  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
+  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
 

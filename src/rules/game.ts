@@ -3436,6 +3436,10 @@ export class Game {
     if (!blocker.card.isCreature || blocker.tapped) return false;
     if (this.hasKw(attacker, 'unblockable')) return false;
     if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
+    if (this.hasKw(blocker, "can't block")) return false;
+    // Shadow blocks and is blocked only by shadow (702.28b). Fear: only artifact or black creatures block it (702.36b).
+    if (this.hasKw(attacker, 'shadow') !== this.hasKw(blocker, 'shadow')) return false;
+    if (this.hasKw(attacker, 'fear') && !blocker.card.isArtifact && !blocker.card.cost.pips.some((pip) => pip.includes('B'))) return false;
     // The Ring, first ability: the ring-bearer can't be blocked by creatures with greater power.
     if (this.ringLevel(attacker) >= 1 && this.power(blocker) > this.power(attacker)) return false;
     return true;
@@ -3673,6 +3677,13 @@ export class Game {
           this.say(`${d.to.name} gets ${d.amount} poison (${d.to.poison} of 10).`);
         }
       } else this.loseLife(d.to, d.amount, p, 'combat');
+      // Toxic: poison counters as well (rule 702.164).
+      if (d.from.card.toxic && !d.to.shielded) {
+        d.to.poison += d.from.card.toxic;
+        d.to.lastHitBy = p.seat;
+        d.to.lastHitKind = 'combat';
+        this.say(`${d.to.name} gets ${d.from.card.toxic} poison from toxic (${d.to.poison} of 10).`);
+      }
       if (d.from.isCommander && !d.to.shielded) {
         // Commander damage counts per commander, whoever controls it now (rule 903.10a).
         const key = `${d.from.owner ?? d.from.seat}:${commanderName(d.from)}`;
