@@ -234,7 +234,7 @@ describe('ninjutsu', () => {
     expect(ninja.unread).toBeUndefined();
     const life = b.life;
     let used = false;
-    t.handlers[0] = (g, d) => {
+    t.handlers[0] = (_g, d) => {
       if (d.kind === 'attackers') return [{ attacker: scout.id, defender: 1 }];
       if (d.kind === 'priority' && !used) {
         const i = d.actions.findIndex((x) => x.type === 'ninjutsu');
