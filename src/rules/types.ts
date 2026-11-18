@@ -87,6 +87,10 @@ export interface Perm {
   unlocked?: SimCard;
   /** The Aura that locks it down. */
   lockedBy?: number;
+  /** The turn number on which it last attacked (boast, rule 702.142). */
+  attackedTurn?: number;
+  /** A Curse: the seat of the player it enchants (rule 303.4). */
+  cursing?: number;
   /** Age counters (cumulative upkeep). */
   age?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
@@ -240,7 +244,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =
