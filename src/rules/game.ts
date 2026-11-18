@@ -1613,6 +1613,11 @@ export class Game {
     if (kept.length) this.pending.push({ controller: controller.seat, card, sourceId, effects: kept, x, ...(subject !== undefined ? { subject } : {}) });
   }
 
+  /** Abilities of `p`'s opponents' permanents that trigger on something that happened to `p` (x = how much). */
+  private fireOpponents(p: PlayerState, when: Trigger, x = 0) {
+    for (const o of this.opponents(p)) this.fire(o, when, x);
+  }
+
   /** Abilities of `p`'s permanents that trigger on a simple event. */
   private fire(p: PlayerState, when: Trigger, x = 0) {
     for (const perm of p.battlefield) {
@@ -2633,6 +2638,8 @@ export class Game {
             this.toGraveyard(v, card, false);
           }
           this.say(`${v.name} discards ${gone.map((c) => c.name).join(', ')}.`);
+          // Megrim, Waste Not: once for each card discarded.
+          if (this.kindsInGame.has('when:opponentDiscard')) for (let i = 0; i < gone.length; i++) this.fireOpponents(v, 'opponentDiscard', 1);
         }
         break;
       }
@@ -2888,6 +2895,8 @@ export class Game {
       p.lastHitBy = source.seat;
       p.lastHitKind = kind;
     }
+    // Exquisite Blood: "whenever an opponent loses life" (x = how much).
+    if (this.kindsInGame.has('when:opponentLoseLife')) this.fireOpponents(p, 'opponentLoseLife', amount);
     // Mindcrank: mill that many.
     if (this.kindsInGame.has('lifeLossMill')) {
       for (const o of this.opponents(p)) {

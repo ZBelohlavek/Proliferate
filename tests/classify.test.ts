@@ -99,7 +99,7 @@ describe('coverage of widely played Commander cards', () => {
   it('understands nearly all of the sample', () => {
     const blank = cards.filter((c) => !c.modeled).map((c) => c.name);
     expect(cards.length).toBeGreaterThan(160);
-    expect(blank.sort()).toEqual(['Deflecting Swat', 'Isochron Scepter', 'Winter Orb']);
+    expect(blank.sort()).toEqual(['Winter Orb']);
   });
 
   it('reads cards that used to slip past on wording', () => {

@@ -33,6 +33,8 @@ export type Trigger =
   | 'landfall' // a land enters under your control
   | 'opponentCast' // an opponent casts a spell (see castFilter)
   | 'opponentDraw' // an opponent draws a card
+  | 'opponentDiscard' // an opponent discards a card (once for each card)
+  | 'opponentLoseLife' // an opponent loses life (x = how much)
   | 'sacrifice' // you sacrifice a permanent
   | 'draw' // you draw a card
   | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
