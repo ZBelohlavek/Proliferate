@@ -668,7 +668,7 @@ function detectTriggers(line: string, isPermanent: boolean): LineContext[] {
   const twice = line.match(/^whenever ([^,]*?) and whenever ([^,]*),\s*(.*)$/);
   if (twice) return [detectTrigger(`whenever ${twice[1]}, ${twice[3]}`, isPermanent), detectTrigger(`whenever ${twice[2]}, ${twice[3]}`, isPermanent)];
   const selfOrOther = line.match(/^whenever ~ or another ([\w ]+?) you control enters,\s*(.*)$/);
-  if (selfOrOther) return [detectTrigger(`when ~ enters, ${selfOrOther[2]}`, isPermanent), detectTrigger(`whenever another ${selfOrOther[1]} you control enters, ${selfOrOther[2]}`, isPermanent)];
+  if (selfOrOther) return [detectTrigger(`when ~ enters, ${selfOrOther[2]}`, isPermanent), detectTrigger(`whenever another nontoken ${selfOrOther[1]} you control enters, ${selfOrOther[2]}`, isPermanent)];
   const both = line.match(/^(.*?whenever [^,]*?)\benters or attacks\b([^,]*,.*)$/);
   if (both) return [detectTrigger(`${both[1]}enters${both[2]}`, isPermanent), detectTrigger(`${both[1]}attacks${both[2]}`, isPermanent)];
   return [detectTrigger(line, isPermanent)];
