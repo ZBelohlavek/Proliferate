@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { counterMatches, isAura, isInstantSpeed, recursionMatches, removalMatches, type Game } from './game';
+import { commanderName, counterMatches, isAura, isInstantSpeed, recursionMatches, removalMatches, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -158,6 +158,9 @@ export class Bot implements Agent {
       if (land) return pick(land);
       const equip = this.chooseEquip(g, actions);
       if (equip) return pick(equip);
+      // Turn face-down creatures face up before combat: it is like casting them, but they can attack now.
+      const up = this.chooseFaceUp(g, actions);
+      if (up) return pick(up);
       const spell = this.chooseSpell(g, p, casts, false);
       if (spell) return pick(spell.action, spell.x);
       // Crew a Vehicle when it hits harder than the creatures that would drive it.
@@ -179,11 +182,28 @@ export class Bot implements Agent {
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
+      const up = this.chooseFaceUp(g, actions);
+      if (up) return pick(up);
       const spell = this.chooseSpell(g, p, casts, true);
       if (spell) return pick(spell.action, spell.x);
       return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
     }
     return pick(undefined);
+  }
+
+  /** The face-down creature whose real card is best, if it can be turned face up. */
+  private chooseFaceUp(g: Game, actions: Action[]): Action | undefined {
+    let best: Action | undefined;
+    let bestValue = 2;
+    for (const a of actions) {
+      if (a.type !== 'turnFaceUp') continue;
+      const real = g.findPerm(a.permId)?.faceDown;
+      if (real && real.value > bestValue) {
+        best = a;
+        bestValue = real.value;
+      }
+    }
+    return best;
   }
 
   /** Cycle cards that are no use where the game stands: land searches when short of lands, spells too dear to cast soon, spare lands late. */
@@ -288,7 +308,7 @@ export class Bot implements Agent {
     let best: { action: CastAction; x: number } | undefined;
     let bestScore = -Infinity;
     for (const a of casts) {
-      const card = g.castCard(a.card, a.from);
+      const card = g.castCard(a.card, a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
       const fromCommand = a.from === 'command';
       let x = a.maxX;
       if (card.xFromLife) {
@@ -303,6 +323,10 @@ export class Bot implements Agent {
       // Keep mana up for counterspells and protection unless this play matters.
       if (reserve > 0 && score < 90 && available - g.effectiveCost(p, card, fromCommand, x) < reserve) continue;
       score += card.cmc * 0.1;
+      // Mutating builds one bigger threat and sets off every "whenever this creature mutates" in it.
+      if (a.mutate) score += 3 + card.effects.filter((e) => e.when === 'mutates').length * 6;
+      // Face down only when the card itself is out of reach: it is a plain 2/2 until turned up.
+      if (a.faceDown) score -= 10;
       if (score > bestScore) {
         best = { action: a, x };
         bestScore = score;
@@ -747,7 +771,7 @@ export class Bot implements Agent {
           continue;
         }
         total += hitDamage(g, a);
-        if (a.isCommander && (d.commanderDamage.get(`${a.seat}:${a.card.name}`) ?? 0) + hitDamage(g, a) >= 21) commanderLethal = true;
+        if (a.isCommander && (d.commanderDamage.get(`${a.seat}:${commanderName(a)}`) ?? 0) + hitDamage(g, a) >= 21) commanderLethal = true;
       }
       return { total, commanderLethal };
     };
@@ -830,6 +854,14 @@ export class Bot implements Agent {
       case 'cheat':
       case 'take':
         return top((i) => card(i).value + card(i).cmc, 1);
+      case 'manifest':
+        // Manifest dread: a creature card can be turned face up later.
+        return top((i) => (card(i).isCreature ? 10 : 0) + card(i).value, 1);
+      case 'mutate': {
+        // On top when the new card brings the better body: power counts double, evasion helps.
+        const body = (c: SimCard) => c.power * 2 + c.toughness + (c.keywords.includes('flying') || c.keywords.includes('unblockable') ? c.power : 0);
+        return [body(card(0)) > body(card(1)) ? 0 : 1];
+      }
     }
     return top(() => 0, d.min);
   }

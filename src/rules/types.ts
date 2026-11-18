@@ -60,6 +60,13 @@ export interface Perm {
   loyaltyUsed?: boolean;
   /** Stun counters: each replaces one untap. */
   stun?: number;
+  /**
+   * A merged permanent (mutate, rule 721): its cards from top to bottom. `card` is then the
+   * top card's characteristics plus every card's abilities. `real` is null for a token.
+   */
+  parts?: { real: SimCard | null; face: SimCard; commander: boolean }[];
+  /** Face down (morph, manifest, rule 708): the real card. `card` is then a nameless 2/2. */
+  faceDown?: SimCard;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
@@ -149,6 +156,10 @@ export interface StackItem {
   label: string;
   /** Cast with flashback: exiled when it leaves the stack. */
   flashback?: boolean;
+  /** Cast face down for {3} (morph, disguise): the real card. `card` is then the nameless 2/2 everyone sees. */
+  faceDown?: SimCard;
+  /** Cast for its mutate cost: the permanent it merges with (rule 702.140). */
+  mutateOnto?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +172,10 @@ export type Action =
   /** Play a land from hand. `back` plays the land side of a modal double-faced card. */
   | { type: 'land'; card: SimCard; back: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload'; maxX: number }
+  /** `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload'; maxX: number; mutate?: boolean; faceDown?: boolean }
+  /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
+  | { type: 'turnFaceUp'; permId: number }
   /** Crew a Vehicle: tap creatures to make it a creature until end of turn. */
   | { type: 'crew'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
@@ -175,7 +189,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =
