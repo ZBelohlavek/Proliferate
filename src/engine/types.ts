@@ -39,6 +39,7 @@ export type Trigger =
   | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
   | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
+  | 'chapter' // Saga chapter ability (see Effect.chapters)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -61,6 +62,8 @@ export type Effect = EffectBody & {
   chance?: number;
   /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
   loyalty?: number;
+  /** Saga chapter abilities: the chapters (lore counts) this ability triggers on. */
+  chapters?: number[];
   /** Creature-enters triggers that only watch nontoken creatures. */
   nontoken?: boolean;
   /** "Do this only once each turn." */
@@ -145,7 +148,24 @@ export type EffectBody =
   /** You become the monarch: draw a card at each of your end steps until someone takes it by combat damage. */
   | { kind: 'monarch' }
   /** Approach of the Second Sun: gain 7 the first time, win the second. */
-  | { kind: 'approach' };
+  | { kind: 'approach' }
+  /**
+   * Goad (rule 701.15): the creature attacks each combat if able, and attacks a player other
+   * than you if able, until your next turn. all: every creature your opponents control.
+   * weaker: static, only creatures with less power than the source (Baeloth Barrityl).
+   */
+  | { kind: 'goad'; all: boolean; weaker?: boolean }
+  /** Exile your own permanents and return them at once, so their enters abilities happen again. */
+  | { kind: 'blink'; n: number; what: 'creature' | 'permanent' }
+  /** Untap your permanents: up to n lands, all your creatures, all your nonland permanents, one permanent, or the source itself. */
+  | { kind: 'untap'; what: 'lands' | 'creatures' | 'nonland' | 'artifacts' | 'permanent' | 'self'; n: number }
+  /** Static: untap these permanents of yours during each other player's untap step too (Seedborn Muster, Unwinding Clock). */
+  | { kind: 'untapAlways'; what: 'all' | 'artifacts' | 'self' }
+  /**
+   * Copy a spell or ability on the stack. 'spell': target instant or sorcery spell; 'trigger': the spell
+   * that set off this ability ("whenever you cast ..., copy that spell"); 'ability': target ability you control.
+   */
+  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability'; /** Only spells you control. */ yours?: boolean };
 
 export type EffectKind = EffectBody['kind'];
 
@@ -197,6 +217,30 @@ export interface SimCard {
   flashback?: ManaCost;
   /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
   extraCost?: { sacrifice?: 'creature' | 'artifact' | 'artifactOrCreature'; discard?: number; either?: boolean };
+  /** Saga: the last chapter. It is sacrificed once that chapter has resolved (rule 714.4). */
+  saga?: number;
+  /** Class: the cost of each level after the first and the abilities it adds (rule 716). */
+  levels?: { level: number; cost: ManaCost; effects: Effect[] }[];
+  /**
+   * An alternative cost (rule 118.9): cast it by paying this instead of its mana cost.
+   * evoke: sacrificed when it enters. dash: gains haste and returns to hand at end of turn.
+   */
+  altCost?: {
+    mana: ManaCost;
+    life?: number;
+    /** Exile a card of this color from your hand (Force of Will). */
+    pitch?: Color;
+    /** Return this many Islands you control to their owner's hand (Daze, Gush). */
+    returnIslands?: number;
+    /** Only if it isn't your turn (Force of Negation). */
+    notYourTurn?: boolean;
+    /** Only if an opponent cast this many spells this turn (Mindbreak Trap). */
+    opponentSpells?: number;
+    /** Only if there are this many creatures on the battlefield (Blasphemous Edict). */
+    creatures?: number;
+    evoke?: boolean;
+    dash?: boolean;
+  };
   /** A nonland permanent that enters tapped. */
   entersTapped?: boolean;
   /** X is paid in life instead of mana (Toxic Deluge). */

@@ -13,7 +13,7 @@ import type {
 } from './types';
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell']);
 
 export interface BotOptions {
   /** How eagerly it attacks: about 0.6 (careful) to 1.5 (reckless). Default: random 0.8–1.3. */
@@ -74,6 +74,54 @@ function kills(g: Game, attacker: Perm, defender: Perm): boolean {
   return g.hasKw(attacker, 'deathtouch') ? g.power(attacker) > 0 : hitDamage(g, attacker) >= g.toughness(defender) - defender.damage;
 }
 
+/** Roughly how much a spell or ability on the stack gains its controller, to judge whether copying it is worth it. */
+function stackWorth(item: StackItem): number {
+  let v = 0;
+  for (const e of item.effects) {
+    switch (e.kind) {
+      case 'draw': v += 1.5 * (e.n === -1 ? Math.max(item.x, 1) : e.n); break;
+      case 'removal': case 'tutor': case 'steal': v += 3; break;
+      case 'extraTurn': v += 6; break;
+      case 'tokens': v += Math.max(e.n, 1) * (e.power + e.toughness) * 0.4; break;
+      case 'treasure': case 'ramp': v += 1.5 * ('n' in e ? e.n : e.lands); break;
+      case 'drain': v += 1.5 * (e.n === -1 ? Math.max(item.x, 1) : e.n); break;
+      case 'recursion': v += 2 * e.n; break;
+      case 'counters': v += e.all ? 2 : 1; break;
+      case 'damagePlayer': v += 0.5 * (e.n === -1 ? Math.max(item.x, 1) : e.n); break;
+      case 'wipe': case 'counter': case 'copySpell': break;
+      default: v += 0.5;
+    }
+  }
+  return v;
+}
+
+/** How much a permanent's enters abilities are worth doing again (blink). */
+export function etbWorth(perm: Perm): number {
+  const card = perm.printed ?? perm.card;
+  let v = 0;
+  for (const e of card.effects) {
+    if (e.when !== 'resolve') continue;
+    switch (e.kind) {
+      case 'removal': v += 4; break;
+      case 'steal': v += 6; break;
+      case 'draw': v += 1.5 * Math.max(e.n, 1); break;
+      case 'tokens': v += Math.max(e.n, 1) * (e.power + e.toughness) * 0.4; break;
+      case 'treasure': v += e.n; break;
+      case 'ramp': v += 2.5 * Math.max(e.lands, 1); break;
+      case 'tutor': v += 3; break;
+      case 'recursion': v += 2 * e.n; break;
+      case 'drain': v += 1.5 * Math.max(e.n, 1); break;
+      case 'untap': v += e.what === 'lands' ? Math.min(e.n, 5) : 1; break;
+      case 'wipe': v -= 5; break;
+      default: v += 0.5;
+    }
+  }
+  // What it loses by leaving: counters, and Sagas start over (a good thing only for their first chapters).
+  v -= perm.counters * 0.8;
+  if (perm.isCommander && v < 3) v -= 1;
+  return v;
+}
+
 function survives(g: Game, creature: Perm, from: Perm): boolean {
   if (g.hasKw(creature, 'indestructible')) return true;
   if (g.hasKw(creature, 'first strike') && !g.hasKw(from, 'first strike') && !g.hasKw(from, 'double strike') && kills(g, creature, from)) return true;
@@ -102,7 +150,7 @@ export class Bot implements Agent {
     switch (d.kind) {
       case 'priority': return this.priority(g, p, d.actions);
       case 'target': return this.target(g, p, d);
-      case 'attackers': return this.attack(g, p, d.candidates, d.defenders);
+      case 'attackers': return this.attack(g, p, d.candidates, d.defenders, d.goaded ?? []);
       case 'blockers': return this.block(g, p, d.attackers, d.candidates);
       case 'choose': return this.choose(g, p, d);
       case 'confirm':
@@ -147,8 +195,9 @@ export class Bot implements Agent {
 
     // Something is on the stack: answer it or let it resolve.
     if (top) {
-      if (top.controller === p.seat || this.considered.has(top.id)) return pick(undefined);
+      if (this.considered.has(top.id)) return pick(undefined);
       this.considered.add(top.id);
+      if (top.controller === p.seat) return pick(this.copyOwn(top, actions));
       return pick(this.response(g, p, top, casts));
     }
 
@@ -170,6 +219,9 @@ export class Bot implements Agent {
         return vehicle.card.power > lost;
       });
       if (crew) return pick(crew);
+      // Classes: gain the next level once there is nothing better to spend the mana on.
+      const level = actions.find((a) => a.type === 'level');
+      if (level) return pick(level);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       return pick(undefined);
     }
@@ -198,11 +250,29 @@ export class Bot implements Agent {
     });
   }
 
-  /** Counter an opponent's spell, or protect a permanent it targets. */
+  /** Copy our own spell or triggered ability when it is worth having twice (Strionic Resonator, Twincast). */
+  private copyOwn(top: StackItem, actions: Action[]): Action | undefined {
+    if (top.copy || stackWorth(top) < (top.kind === 'ability' ? 1.5 : 3)) return undefined;
+    const isSpell = top.kind === 'spell' && (top.card.isInstant || top.card.isSorcery);
+    return actions.find((a) => {
+      const e = a.type === 'activate' ? a.effect : a.type === 'cast' ? a.card.effects.find((f) => f.kind === 'copySpell') : undefined;
+      if (!e || e.kind !== 'copySpell' || (a.type === 'cast' && a.from === 'alt')) return false;
+      return e.what === 'ability' ? top.kind === 'ability' && top.sourceId !== (a.type === 'activate' ? a.permId : null) : e.what === 'spell' && isSpell;
+    });
+  }
+
+  /** Counter an opponent's spell, copy it, or protect a permanent it targets. */
   private response(g: Game, p: PlayerState, top: StackItem, casts: CastAction[]): Action | undefined {
     if (top.kind === 'spell') {
-      const counter = casts.find((a) => a.card.effects.some((e) => e.kind === 'counter' && counterMatches(e.target, top.card)));
+      const counters = casts.filter((a) => a.card.effects.some((e) => e.kind === 'counter' && counterMatches(e.target, top.card)));
+      // Pay with mana when possible; a free counter costs a card, so it is kept for what really matters.
+      const counter = counters.find((a) => a.from !== 'alt') ?? counters.find(() => this.urgent(g, p, top));
       if (counter && this.wantsToCounter(g, p, top)) return counter;
+      // Copy a good instant or sorcery for ourselves (Narset's Reversal, Twincast).
+      if ((top.card.isInstant || top.card.isSorcery) && stackWorth(top) >= 3) {
+        const copy = casts.find((a) => a.from !== 'alt' && a.card.effects.some((e) => e.kind === 'copySpell' && e.what === 'spell' && !e.yours));
+        if (copy) return copy;
+      }
     }
     // A board wipe that would cost us a real board: protect all of it if we can.
     if (top.controller !== p.seat && top.effects.some((e) => e.kind === 'wipe') && boardThreat(g, p, true) > 6) {
@@ -216,10 +286,23 @@ export class Bot implements Agent {
       if (e.kind !== 'removal' || !t || t.kind !== 'perm') continue;
       const perm = g.findPerm(t.id);
       if (!perm || perm.seat !== p.seat || threat(g, perm) < 5) continue;
-      const save = casts.find((a) => isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' || (f.kind === 'pump' && f.protect)));
+      // Protection, or a blink that makes the removal lose its target.
+      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
       if (save) return save;
     }
     return undefined;
+  }
+
+  /** Worth spending a card on (Force of Will): a commander, a bomb, or a spell that wrecks our board. */
+  private urgent(g: Game, p: PlayerState, top: StackItem): boolean {
+    if (top.isCommander || top.card.value >= 9 || top.effects.some((e) => e.kind === 'extraTurn')) return true;
+    const wipe = top.effects.find((e): e is Wipe => e.kind === 'wipe');
+    if (wipe && boardThreat(g, p, wipe.target === 'creatures') > 10) return true;
+    return top.effects.some((e, i) => {
+      const t = top.targets[i];
+      const perm = t?.kind === 'perm' ? g.findPerm(t.id) : null;
+      return e.kind === 'removal' && perm?.seat === p.seat && threat(g, perm) >= 9;
+    });
   }
 
   private wantsToCounter(g: Game, p: PlayerState, top: StackItem): boolean {
@@ -288,6 +371,13 @@ export class Bot implements Agent {
     let best: { action: CastAction; x: number } | undefined;
     let bestScore = -Infinity;
     for (const a of casts) {
+      if (a.from === 'alt') {
+        // Alternative costs: only when the card can't be cast normally. Cards that cost a card to cast are kept for answers,
+        // and evoke is only worth it for what the creature does as it enters.
+        const alt = a.card.altCost!;
+        if (alt.pitch || alt.returnIslands || casts.some((b) => b.card === a.card && b.from === 'hand')) continue;
+        if (alt.evoke && !a.card.effects.some((e) => e.when === 'resolve')) continue;
+      }
       const card = g.castCard(a.card, a.from);
       const fromCommand = a.from === 'command';
       let x = a.maxX;
@@ -356,6 +446,27 @@ export class Bot implements Agent {
     if (isAura(card) && !p.battlefield.some((q) => q.card.isCreature)) return null;
     if (kinds.has('cheat') && spell && !p.hand.some((c) => c.isCreature)) return null;
     if (kinds.has('exileGraveyards') && spell && kinds.size === 1) return g.opponents(p).some((o) => o.graveyard.length >= 6) ? 15 : null;
+    const goad = card.effects.find((e) => e.kind === 'goad' && e.when === 'resolve');
+    if (goad && goad.kind === 'goad' && spell) {
+      // Goad is worth most when opponents have creatures that will now hit each other.
+      const theirs = g.opponents(p).flatMap((o) => o.battlefield.filter((q) => q.card.isCreature));
+      const power = goad.all ? theirs.reduce((n, q) => n + g.power(q), 0) : Math.max(0, ...theirs.filter((q) => g.canTarget(p, q)).map((q) => g.power(q)));
+      if (power < (goad.all ? 8 : 4) || g.opponents(p).length < 2) return null;
+      score = Math.max(score, 45 + power * 0.5);
+    }
+    const blink = card.effects.find((e) => e.kind === 'blink' && e.when === 'resolve');
+    if (blink && blink.kind === 'blink' && spell) {
+      const best = Math.max(0, ...p.battlefield.filter((q) => !q.token && !q.landInfo && (blink.what === 'permanent' || q.card.isCreature)).map((q) => etbWorth(q)));
+      if (best < 2.5) return null;
+      score = Math.max(score, 35 + best);
+    }
+    const untap = card.effects.find((e) => e.kind === 'untap' && e.when === 'resolve');
+    if (untap && untap.kind === 'untap' && spell) {
+      // Dramatic Reversal and friends: worth it when they give back more mana than they cost.
+      const back = p.battlefield.filter((q) => q.tapped && (untap.what === 'lands' ? !!q.landInfo : untap.what === 'nonland' || untap.what === 'artifacts' ? !q.landInfo && q.card.effects.some((e) => e.kind === 'mana') : !!q.landInfo)).length;
+      if (Math.min(back, untap.n) <= card.cmc) return null;
+      score = Math.max(score, 30);
+    }
     if (kinds.has('extraTurn') || kinds.has('approach') || kinds.has('steal') || kinds.has('cheat')) score = Math.max(score, 55 + card.value);
     if (spell && kinds.has('counters') && !p.battlefield.some((q) => q.card.isCreature)) return null;
 
@@ -422,6 +533,8 @@ export class Bot implements Agent {
         case 'recursion': return !e.toTop && p.graveyard.some((c) => recursionMatches(e.what, c));
         case 'exileGraveyards': return g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'cheat': return p.hand.some((c) => c.isCreature);
+        case 'goad': return e.all || g.opponents(p).length >= 2;
+        case 'blink': return p.battlefield.some((q) => q !== perm && !q.token && (e.what === 'permanent' || q.card.isCreature) && etbWorth(q) >= 2.5);
         default: return false;
       }
     });
@@ -504,6 +617,23 @@ export class Bot implements Agent {
         return asTarget(this.trickTarget(g, p, d.card)) ?? asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'protect':
         return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'goad': {
+        // The opponent's biggest creature, best of all one whose controller has plenty of other opponents to hit.
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0))) ?? d.candidates[0];
+      }
+      case 'blink': {
+        const saved = this.threatened(g, p, mine);
+        if (saved) return asTarget(saved);
+        const best = bestOf(mine, (q) => this.blinkWorth(g, p, q));
+        // An optional blink trigger with nothing worth blinking: decline.
+        if (d.cancellable && !g.stack.some((s) => s.controller === p.seat && s.kind === 'spell' && s.card === d.card) && (!best || this.blinkWorth(g, p, best) < 0)) return null;
+        return asTarget(best) ?? d.candidates[0];
+      }
+      case 'copySpell': {
+        const items = d.candidates.flatMap((t) => (t.kind === 'stack' ? g.stack.filter((s) => s.id === t.id) : []));
+        const top = items.reduce<StackItem | null>((a, b) => (!a || stackWorth(b) > stackWorth(a) ? b : a), null);
+        return top ? { kind: 'stack', id: top.id } : d.candidates[0];
+      }
       case 'steal': {
         if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q))) ?? d.candidates[0];
         // The library with the best creature in it.
@@ -527,6 +657,16 @@ export class Bot implements Agent {
       default:
         return d.candidates[0];
     }
+  }
+
+  /** Blinking `perm` now: its enters abilities, less the attack it loses to summoning sickness before our combat. */
+  private blinkWorth(g: Game, p: PlayerState, perm: Perm): number {
+    let v = etbWorth(perm);
+    const beforeCombat = g.activeSeat === p.seat && ['untap', 'upkeep', 'draw', 'main1', 'beginCombat'].includes(g.step);
+    if (beforeCombat && perm.card.isCreature && !perm.sick && !g.hasKw(perm, 'haste') && g.power(perm) > 0) v -= 2 + g.power(perm) * 0.5;
+    // A tapped mana rock comes back untapped.
+    if (perm.tapped && perm.card.effects.some((e) => e.kind === 'mana')) v += 1;
+    return v;
   }
 
   /** One of `mine` that a removal spell on the stack is aimed at. */
@@ -637,7 +777,19 @@ export class Bot implements Agent {
     return score;
   }
 
-  private attack(g: Game, p: PlayerState, candidateIds: number[], defenderSeats: number[]): AttackDeclaration[] {
+  private attack(g: Game, p: PlayerState, candidateIds: number[], defenderSeats: number[], goaded: { attacker: number; defenders: number[] }[] = []): AttackDeclaration[] {
+    // Goaded creatures must attack; they go where they do the most good among the players they may attack.
+    const forced: AttackDeclaration[] = [];
+    for (const gd of goaded) {
+      const perm = g.findPerm(gd.attacker);
+      if (!perm) continue;
+      const allowed = gd.defenders.map((s) => g.players[s]).filter((o) => o.alive);
+      if (!allowed.length) continue;
+      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, hitDamage(g, perm));
+      forced.push({ attacker: perm.id, defender: allowed.reduce((a, b) => (score(b) > score(a) ? b : a)).seat });
+    }
+    candidateIds = candidateIds.filter((id) => !forced.some((f) => f.attacker === id));
+    if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats)];
     let candidates = candidateIds.map((id) => g.findPerm(id)).filter((q): q is Perm => q !== null && g.power(q) > 0);
     const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive);
     if (!candidates.length || !opps.length) return [];
@@ -830,6 +982,15 @@ export class Bot implements Agent {
       case 'cheat':
       case 'take':
         return top((i) => card(i).value + card(i).cmc, 1);
+      case 'blink':
+        return indexes.filter((i) => perm(i) && this.blinkWorth(g, p, perm(i)!) >= 2).slice(0, d.max);
+      case 'pitch':
+        return top((i) => -card(i).value, 1);
+      case 'untap': {
+        // Mana first: lands and mana rocks, then creatures.
+        const worth = (q: Perm | null) => (!q ? 0 : q.landInfo ? 3 : q.card.effects.some((e) => e.kind === 'mana') ? 4 : q.card.isCreature ? 1 : 0.5);
+        return top((i) => worth(perm(i)), d.max);
+      }
     }
     return top(() => 0, d.min);
   }
