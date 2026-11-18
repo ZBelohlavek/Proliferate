@@ -190,3 +190,36 @@ describe('one-line cards from the real decks', () => {
   });
 });
 
+describe('keywords from the partly read cards', () => {
+  it('toxic gives poison on combat damage', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    t.game.put(0, creature('Blightbelly Rat', '{1}{G}', 2, 2, 2, { text: 'Toxic 1\nWhen this creature dies, proliferate.' }));
+    t.handlers[0] = attackAll(1);
+    t.finishTurn();
+    expect(b.poison).toBe(1);
+  });
+
+  it("shadow, fear and \"can't block\" limit blocks", () => {
+    const t = new Table();
+    const shade = t.game.put(0, creature('Dauthi Slayer', '{B}{B}', 2, 2, 2, { keywords: ['Shadow'], text: 'Shadow' }));
+    const fearful = t.game.put(0, creature('Shriekmaw', '{4}{B}', 5, 3, 2, { keywords: ['Fear'], text: 'Fear' }));
+    const bear = t.game.put(1, creature('Grizzly Bears', '{1}{G}', 2, 2, 2));
+    const champ = t.game.put(1, creature('Bloodsoaked Champion', '{B}', 1, 1, 1, { text: "Bloodsoaked Champion can't block." }));
+    expect(t.game.canBlock(bear, shade)).toBe(false);
+    expect(t.game.canBlock(bear, fearful)).toBe(false);
+    expect(t.game.canBlock(champ, t.game.put(0, creature('Ox', '{1}{G}', 2, 2, 2)))).toBe(false);
+    expect(champ.card.unread).toBeUndefined();
+  });
+
+  it('reads prowess, annihilator and constellation', () => {
+    const prodigy = creature('Swiftspear', '{R}', 1, 1, 2, { text: 'Haste\nProwess' });
+    const artisan = creature('Artisan of Kozilek', '{9}', 9, 10, 9, { text: 'Annihilator 2' });
+    const eidolon = creature('Eidolon of Blossoms', '{2}{G}{G}', 4, 2, 2, { types: ['Enchantment', 'Creature'], text: 'Constellation — Whenever this creature or another enchantment you control enters, draw a card.' });
+    for (const c of [prodigy, artisan, eidolon]) expect(c.unread, c.name).toBeUndefined();
+    expect(prodigy.effects.some((e) => e.kind === 'pump' && e.when === 'cast')).toBe(true);
+    expect(artisan.effects.filter((e) => e.kind === 'removal' && e.mode === 'edict' && e.when === 'attack').length).toBe(2);
+    expect(eidolon.effects.some((e) => e.kind === 'draw' && e.when === 'permEnters')).toBe(true);
+  });
+});
+

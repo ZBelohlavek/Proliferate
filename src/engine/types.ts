@@ -324,6 +324,8 @@ export interface SimCard {
   cycling?: { cost: ManaCost; land?: boolean };
   /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
   cumulativeUpkeep?: ManaCost;
+  /** Toxic N (rule 702.164): combat damage to a player also gives that many poison counters. */
+  toxic?: number;
   /** Overload: for this cost the spell hits everything it could target instead of one target. */
   overload?: { cost: ManaCost; effects: Effect[] };
   /** Storm: copied for each spell cast before it this turn. */
