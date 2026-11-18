@@ -167,6 +167,8 @@ export type EffectBody =
   | { kind: 'selfKeyword'; keyword: string; cond: 'halfLife' | 'yourTurn' }
   /** Satya: a token copy of another nontoken creature you control, tapped and attacking; sacrificed at the next end step unless you pay energy equal to its mana value. */
   | { kind: 'copyCreature'; temporary: boolean }
+  /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
+  | { kind: 'enterCounters'; n: number }
   /** Kudo: other creatures have this base power and toughness. */
   | { kind: 'baseSize'; p: number; t: number }
   /** You get this many energy counters. */

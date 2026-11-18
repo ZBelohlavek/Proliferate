@@ -126,6 +126,7 @@ export class Game {
       treasures: 0,
       experience: 0,
       energy: 0,
+      lostLifeTurn: -1,
       alive: true,
       drewFromEmpty: false,
       landsPlayed: 0,
@@ -1346,6 +1347,10 @@ export class Game {
       if (host.seat !== p.seat && card.effects.some((e) => e.kind === 'equip' && e.steal)) this.takeControl(host, p);
     }
     if (card.entersWithX) perm.counters = x;
+    if (card.isCreature && this.kindsInGame.has('enterCounters')) {
+      const hurt = this.opponents(p).filter((o) => o.lostLifeTurn === this.turnNumber).length;
+      for (const q of p.battlefield) for (const e of q.card.effects) if (e.kind === 'enterCounters') perm.counters += e.n * hurt;
+    }
     if (card.entersTapped) perm.tapped = true;
     p.battlefield.push(perm);
     // Panharmonicon: enters abilities trigger an additional time.
@@ -1888,6 +1893,7 @@ export class Game {
   loseLife(p: PlayerState, amount: number, source: PlayerState | null, kind: LossReason) {
     if (amount <= 0 || p.shielded) return;
     p.life -= amount;
+    p.lostLifeTurn = this.turnNumber;
     if (source && source !== p) {
       p.lastHitBy = source.seat;
       p.lastHitKind = kind;

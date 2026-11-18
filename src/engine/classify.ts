@@ -508,6 +508,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   // --- Commander abilities -------------------------------------------------------
+  if ((m = line.match(/^other creatures you control enter with an additional (?:(\w+) )?\+1\/\+1 counters? on them for each opponent who lost life this turn/))) {
+    out.push({ body: { kind: 'enterCounters', n: num(m[1], 1) }, note: 'Your other creatures enter with an extra +1/+1 counter per opponent who lost life this turn' });
+  }
   if ((m = line.match(/^other creatures have base power and toughness (\d+)\/(\d+)/))) {
     out.push({ body: { kind: 'baseSize', p: num(m[1], 2), t: num(m[2], 2) }, note: `Other creatures are ${m[1]}/${m[2]} before bonuses` });
   }
@@ -1034,7 +1037,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     effect.activation = { cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}) };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1144,6 +1147,7 @@ export function cardValue(card: SimCard): number {
       case 'selfKeyword': v += 1; break;
       case 'copyCreature': v += 3 * mult; break;
       case 'baseSize': v += 2; break;
+      case 'enterCounters': v += 1.5; break;
     }
   }
   return Math.max(v, card.cmc * 0.4);
