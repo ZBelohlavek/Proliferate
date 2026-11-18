@@ -1036,3 +1036,103 @@ describe('playing against bots', () => {
     expect(a.life).toBe(38);
   });
 });
+
+describe('rules engine: commander abilities', () => {
+  const legend = (name: string, p: number, t: number, text: string) => creature(name, '{G}', 1, p, t, { superTypes: ['Legendary'], text });
+
+  it('Korvold sacrifices another permanent when it enters, then grows and draws', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    t.lands(0, 2);
+    const fodder = t.game.put(0, bears());
+    a.hand.push(legend('Korvold, Fae-Cursed King', 4, 4, 'Flying\nWhenever Korvold enters or attacks, sacrifice another permanent.\nWhenever you sacrifice a permanent, put a +1/+1 counter on Korvold and draw a card.'));
+    const hand = a.hand.length;
+    t.handlers[0] = castOnce('Korvold, Fae-Cursed King');
+    t.finishTurn();
+    const korvold = a.battlefield.find((q) => q.card.name.startsWith('Korvold'))!;
+    expect(a.battlefield.filter((q) => q !== korvold && q !== fodder).length + (a.battlefield.includes(fodder) ? 1 : 0)).toBe(2); // two lands and a bear, minus one sacrificed
+    expect(korvold.counters).toBe(1);
+    expect(a.hand.length).toBe(hand); // Korvold left the hand, the sacrifice drew one
+  });
+
+  it('Kudo makes every other creature a 2/2 before bonuses', () => {
+    const t = new Table();
+    const wurm = t.game.put(1, vanilla('Craw Wurm', 6, 4));
+    const kudo = t.game.put(0, legend('Kudo, King Among Bears', 2, 2, 'Other creatures have base power and toughness 2/2 and are Bears in addition to their other types.'));
+    wurm.counters = 1;
+    expect(t.game.power(wurm)).toBe(3);
+    expect(t.game.toughness(wurm)).toBe(3);
+    expect(t.game.power(kudo)).toBe(2);
+  });
+
+  it("Mathas's bounty pays the other players when the creature dies", () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.put(0, legend('Mathas, Fiend Seeker', 3, 3, 'Menace\nAt the beginning of your end step, put a bounty counter on target creature an opponent controls. For as long as that creature has a bounty counter on it, it has "When this creature dies, each opponent draws a card and gains 2 life."'));
+    const victim = t.game.put(1, bears());
+    t.until((g) => victim.bounty === true && g.step === 'main1' && g.activeSeat === 0 && g.stack.length === 0);
+    expect(victim.bounty).toBe(true);
+    const hand = a.hand.length;
+    victim.damage = 5;
+    t.until((g) => !b.battlefield.includes(victim) && g.stack.length === 0);
+    expect(a.life).toBe(42);
+    expect(a.hand.length).toBe(hand + 1);
+  });
+
+  it('Garland hands an opponent the crown and takes their creature', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 1);
+    const wurm = t.game.put(1, vanilla('Craw Wurm', 6, 4));
+    a.hand.push(legend('Garland, Royal Kidnapper', 3, 4, "When Garland enters, target opponent becomes the monarch.\nWhenever an opponent becomes the monarch, gain control of target creature that player controls for as long as they're the monarch.\nCreatures you control but don't own get +2/+2 and can't be sacrificed."));
+    t.handlers[0] = castOnce('Garland, Royal Kidnapper');
+    t.until(() => a.battlefield.includes(wurm));
+    expect(t.game.monarch).toBe(b.seat);
+    expect(t.game.power(wurm)).toBe(8);
+  });
+
+  it('Tinybones only drains opponents with no cards in hand', () => {
+    const tiny = legend('Tinybones, Trinket Thief', 1, 2, '{4}{B}{B}: Each opponent with no cards in hand loses 10 life.');
+    const drain = tiny.effects.find((e) => e.kind === 'drain');
+    expect(drain).toMatchObject({ n: 10, emptyHand: true, when: 'activated' });
+  });
+
+  it('Kratos and Meren use experience counters', () => {
+    const kratos = legend('Kratos, Stoic Father', 4, 4, 'Whenever you attack with one or more Gods and whenever a God dies, you get an experience counter.\nAt the beginning of your end step, put a number of +1/+1 counters on target creature equal to the number of experience counters you have.');
+    expect(kratos.unread).toBeUndefined();
+    const t = new Table();
+    const [a] = t.game.players;
+    const perm = t.game.put(0, kratos);
+    a.experience = 3;
+    t.until(() => perm.counters > 0);
+    expect(perm.counters).toBe(3);
+  });
+
+  it('wither deals damage to creatures as -1/-1 counters', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    t.game.put(0, vanilla('Witherer', 2, 2, ['Wither']));
+    const wall = t.game.put(1, vanilla('Wall', 0, 5));
+    t.handlers[0] = attackAll(1);
+    t.handlers[1] = (_g, d) => (d.kind === 'blockers' && d.attackers.length ? [{ blocker: wall.id, attacker: d.attackers[0] }] : undefined);
+    t.finishTurn();
+    expect(b.battlefield).toContain(wall);
+    expect(wall.counters).toBe(-2);
+    expect(t.game.toughness(wall)).toBe(3);
+  });
+
+  it("Satya's attacking token copy goes away at the end step without enough energy", () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.put(0, legend('Satya, Aetherflux Genius', 3, 5, 'Menace, haste\nWhenever Satya attacks, create a tapped and attacking token that\'s a copy of up to one other target nontoken creature you control. You get {E}{E}. At the beginning of the next end step, sacrifice that token unless you pay an amount of {E} equal to its mana value.'));
+    const wurm = creature('Craw Wurm', '{4}{G}{G}', 6, 6, 4);
+    t.game.put(0, wurm, { sick: true });
+    t.handlers[0] = (_g, d) => (d.kind === 'attackers' ? d.candidates.filter((id) => t.game.findPerm(id)?.card.name.startsWith('Satya')).map((attacker) => ({ attacker, defender: 1 })) : undefined);
+    t.finishTurn();
+    // The copy hit for 6 alongside Satya, then went away at the end step: 2 energy can't keep a 6-drop.
+    expect(t.game.log!.some((l) => /makes a token copy of Craw Wurm, tapped and attacking/.test(l))).toBe(true);
+    expect(b.life).toBe(40 - 3 - 6);
+    expect(a.battlefield.filter((q) => q.card.name === 'Craw Wurm')).toHaveLength(1);
+    expect(a.energy).toBe(2);
+  });
+});

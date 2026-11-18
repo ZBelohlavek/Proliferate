@@ -149,7 +149,7 @@ export class Bot implements Agent {
     if (top) {
       if (top.controller === p.seat || this.considered.has(top.id)) return pick(undefined);
       this.considered.add(top.id);
-      return pick(this.response(g, p, top, casts));
+      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions));
     }
 
     const myTurn = g.activeSeat === p.seat;
@@ -171,11 +171,12 @@ export class Bot implements Agent {
       });
       if (crew) return pick(crew);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      return pick(undefined);
+      // Before combat: haste and evasion abilities.
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun'))));
     }
 
-    // Combat tricks once blockers are known.
-    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts));
+    // Combat tricks once blockers are known, then abilities that save or pump a creature in the fight.
+    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
@@ -220,6 +221,15 @@ export class Bot implements Agent {
       if (save) return save;
     }
     return undefined;
+  }
+
+  /** Regenerate-style "~ gains indestructible" in answer to destroy or damage removal aimed at it. */
+  private selfSave(p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
+    if (top.controller === p.seat) return undefined;
+    return actions.find((a) => {
+      if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !a.effect.grant?.includes('indestructible')) return false;
+      return top.effects.some((e, i) => e.kind === 'removal' && (e.mode === 'destroy' || e.mode === 'damage') && top.targets[i]?.kind === 'perm' && (top.targets[i] as { id: number }).id === a.permId);
+    });
   }
 
   private wantsToCounter(g: Game, p: PlayerState, top: StackItem): boolean {
@@ -411,10 +421,18 @@ export class Bot implements Agent {
       }
       switch (e.kind) {
         case 'draw': return p.library.length > 8;
+        case 'rollDice': return true;
+        case 'gainLife': return p.life < 30 && g.activeSeat !== p.seat;
+        // Tinybones: only when someone has an empty hand.
+        case 'drain': return !e.emptyHand || g.opponents(p).some((o) => o.hand.length === 0);
+        // "Creatures you control gain haste": before combat, with fresh creatures worth sending in.
+        case 'overrun': return !e.p && !!e.grant?.includes('haste') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && q.sick && !q.tapped && g.power(q) >= 2 && !g.hasKw(q, 'haste'));
         case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': case 'discard': case 'scry': return true;
         case 'mill': return e.who !== 'you';
         // "Can't be blocked this turn": before combat, with something worth sending in.
-        case 'pump': return !!e.grant?.includes('unblockable') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3);
+        case 'pump':
+          if (e.self) return this.selfPumpNow(g, p, perm, e);
+          return !!e.grant?.includes('unblockable') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3);
         case 'removal': {
           const t = this.removalTarget(g, p, e, 0, g.targetCandidates(p, e, perm) ?? []);
           return !!t && t.score >= 3 + g.round * 0.2;
@@ -425,6 +443,26 @@ export class Bot implements Agent {
         default: return false;
       }
     });
+  }
+
+  /** "~ gains haste / indestructible until end of turn": when that changes something. */
+  private selfPumpNow(g: Game, p: PlayerState, perm: Perm, e: Pump): boolean {
+    if (!perm.card.isCreature) return false;
+    const grant = e.grant ?? [];
+    if (grant.some((k) => perm.tempKw.includes(k))) return false;
+    // Haste: in the first main phase, so a summoning-sick creature can attack.
+    if (grant.includes('haste')) return perm.sick && !perm.tapped && g.step === 'main1' && g.activeSeat === p.seat && !g.hasKw(perm, 'haste');
+    // Indestructible / regenerate: when removal is aimed at it, or it is about to die in combat.
+    if (grant.includes('indestructible') || e.protect) {
+      if (this.threatened(g, p, [perm])) return true;
+      if (g.step !== 'declareBlockers') return false;
+      const foes = perm.attacking !== null ? g.blockersOf(perm) : perm.blocking !== null ? [g.findPerm(perm.blocking)].filter((q): q is Perm => !!q) : [];
+      return foes.reduce((n, q) => n + g.power(q), 0) >= g.toughness(perm) - perm.damage || foes.some((q) => g.hasKw(q, 'deathtouch'));
+    }
+    if (grant.includes('unblockable')) return g.step === 'main1' && g.activeSeat === p.seat && !perm.tapped && !perm.sick;
+    // Firebreathing-style +N/+0: an unblocked attacker with mana to spare.
+    if (e.p > 0) return g.step === 'declareBlockers' && perm.attacking !== null && !perm.blocked;
+    return false;
   }
 
   /** Pump a creature to win a fight, save an attacker, or finish a player. */
@@ -518,6 +556,15 @@ export class Bot implements Agent {
         if (!seats.length) return d.candidates[0];
         const score = (seat: number) => (e.kind === 'mill' ? -g.players[seat].library.length : g.players[seat].hand.length);
         return { kind: 'player', seat: seats.reduce((a, c) => (score(c) > score(a) ? c : a)) };
+      }
+      case 'stun':
+      case 'bounty':
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => threat(g, q) - (e.kind === 'stun' && q.tapped ? 0 : 1))) ?? d.candidates[0];
+      case 'monarch': {
+        // Garland: hand the crown to the opponent with the best creature to take.
+        const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
+        const best = (seat: number) => Math.max(0, ...g.players[seat].battlefield.filter((q) => q.card.isCreature).map((q) => threat(g, q)));
+        return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (best(b) > best(a) ? b : a)) } : d.candidates[0];
       }
       case 'damagePlayer': {
         const amount = e.n === -1 ? 3 : e.n;
@@ -790,7 +837,12 @@ export class Bot implements Agent {
       case 'recursion':
         return top((i) => card(i).value, d.max);
       case 'sacrifice':
-        return top((i) => -(perm(i) ? threat(g, perm(i)!) : 0), d.min);
+        // Treasures first, then tokens and the least useful permanents; lands only when there are plenty.
+        return top((i) => {
+          const q = perm(i);
+          if (!q) return d.options[i].label === 'Treasure' ? 100 : 0;
+          return -threat(g, q) - (q.landInfo ? (g.landCount(p) > 7 ? 1 : 6) : 0) + (q.token ? 1 : 0);
+        }, d.min);
       case 'ramp': {
         // Fetch the color we have the fewest sources of.
         const counts = new Map<Mana, number>();

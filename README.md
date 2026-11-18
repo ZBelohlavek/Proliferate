@@ -65,6 +65,7 @@ On a sample of 167 widely played Commander cards (`tests/staples.ts`) all but fo
 - Vehicles can be crewed in your first main phase only. Stun counters, spell taxes (Grand Arbiter, Thalia), Ankh of Mishra effects and toughness-as-damage (Arcades, Doran) are played. Kicker is never paid, votes always go to the last option, and mutate triggers happen about half the time.
 - Not yet read: ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, goad, the Ring, energy, cast-from-exile and copy effects, alternative costs such as exiling a card from hand, and redirecting targets.
 - "If" conditions it can't read are treated as true about half the time; ward costs {2}.
+- Commander abilities from real decks are read where the engine can play them: Korvold's sacrifices, Kudo's 2/2s, Mathas's bounties, Garland's monarch theft, Meren's and Kratos's experience counters, Mr. House's dice, Satya's temporary token copies (energy is spent only on those), Tinybones's empty-hand drain, wither, self-pumps such as "{B}: gains haste" and regenerate (played as indestructible until end of turn), Background abilities, and triggers on surveilling, countering a spell or an opponent becoming the monarch. A modal trigger always takes its best option.
 
 That makes the built-in simulator a quick estimate. Forge remains the reference for final numbers.
 

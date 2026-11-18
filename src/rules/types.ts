@@ -60,6 +60,10 @@ export interface Perm {
   loyaltyUsed?: boolean;
   /** Stun counters: each replaces one untap. */
   stun?: number;
+  /** Mathas's bounty counter. */
+  bounty?: boolean;
+  /** A temporary token copy (Satya): sacrificed at the next end step unless its controller pays energy. */
+  temporary?: boolean;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
@@ -103,6 +107,10 @@ export interface PlayerState {
   /** Combat damage taken from each commander, keyed by "seat:name" (rule 903.10a). */
   commanderDamage: Map<string, number>;
   treasures: number;
+  /** Experience counters (Meren, Kratos). */
+  experience: number;
+  /** Energy counters (Satya). */
+  energy: number;
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
