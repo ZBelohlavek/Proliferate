@@ -329,4 +329,107 @@ describe('face-down creatures', () => {
   });
 });
 
+const dfc = (name: string, front: Partial<Parameters<typeof card>[0]>, back: NonNullable<Parameters<typeof card>[0]['back']>) =>
+  card({ name: `${name} // ${back.name}`, layout: 'transform', colorIdentity: ['G'], ...front, back });
+
+describe('transforming double-faced cards', () => {
+  it('reads the back face, and a transforming land back is not a land you can play from hand', () => {
+    const ojer = dfc('Ojer Axonil, Deepest Might', { manaCost: '{2}{G}{G}', cmc: 4, types: ['Creature'], superTypes: ['Legendary'], power: '4', toughness: '4', text: 'Trample\nWhen Ojer Axonil dies, return it to the battlefield tapped and transformed under its owner\'s control.' },
+      { name: 'Temple of Power', types: ['Land'], subTypes: [], text: '{T}: Add {G}.' });
+    expect(ojer.backLand).toBeUndefined();
+    expect(ojer.back?.isLand).toBe(true);
+    expect(ojer.effects).toEqual([expect.objectContaining({ kind: 'transform', fromGraveyard: true, tapped: true, when: 'creatureDies' })]);
+    const mdfc = card({ name: 'Bridge // Land', layout: 'modal_dfc', manaCost: '{1}{G}', cmc: 2, types: ['Sorcery'], text: 'Draw a card.', back: { name: 'Land', types: ['Land'], subTypes: [], text: '{T}: Add {G}.' } });
+    expect(mdfc.backLand).toBeDefined();
+    expect(mdfc.back).toBeUndefined();
+  });
+
+  it('a "when this dies, return it transformed" creature comes back as its land', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(1, 1);
+    const ojer = dfc('Ojer Axonil, Deepest Might', { types: ['Creature'], power: '4', toughness: '4', text: 'When Ojer Axonil dies, return it to the battlefield tapped and transformed under its owner\'s control.' },
+      { name: 'Temple of Power', types: ['Land'], subTypes: [], text: '{T}: Add {G}.' });
+    const perm = t.game.put(0, ojer);
+    b.hand.push(spell('Murder', '{G}', 1, 'Instant', 'Destroy target creature.'));
+    t.handlers[1] = (g, d) => {
+      if (d.kind !== 'priority' || g.activeSeat !== 0 || g.stack.length) return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'cast' && x.card.name === 'Murder');
+      return i === -1 ? undefined : { action: i };
+    };
+    t.finishTurn();
+    expect(a.battlefield).not.toContain(perm);
+    const temple = a.battlefield.find((q) => q.card.name === 'Temple of Power');
+    expect(temple?.landInfo).toBeDefined();
+    expect(temple?.tapped).toBe(true);
+    expect(temple?.front).toBe(ojer);
+    expect(a.graveyard).not.toContain(ojer);
+  });
+
+  it('an upkeep transform waits for its condition, then flips in place', () => {
+    const t = new Table();
+    const captain = dfc('Hanweir Militia Captain', { types: ['Creature'], power: '2', toughness: '2', text: 'At the beginning of your upkeep, if you control four or more creatures, transform this creature.' },
+      { name: 'Westvale Cult Leader', types: ['Creature'], subTypes: ['Human', 'Cleric'], text: "Westvale Cult Leader's power and toughness are each equal to the number of creatures you control.", power: '*', toughness: '*' });
+    expect(captain.effects).toEqual([expect.objectContaining({ kind: 'transform', when: 'upkeep', cond: { count: 'creatures', n: 4 } })]);
+    expect(captain.effects[0].chance).toBeUndefined();
+    const perm = t.game.put(0, captain);
+    t.game.put(0, creature('Bear', '{G}', 1, 2, 2));
+    // Two creatures: no transform at the next upkeep.
+    t.until((g) => g.turnNumber === 3);
+    t.until((g) => g.activeSeat === 0 && g.step === 'main1');
+    expect(perm.card.name).toBe('Hanweir Militia Captain // Westvale Cult Leader');
+    t.game.put(0, creature('Bear', '{G}', 1, 2, 2));
+    t.game.put(0, creature('Bear', '{G}', 1, 2, 2));
+    const turn = t.game.turnNumber;
+    t.until((g) => g.turnNumber > turn + 1 && g.activeSeat === 0 && g.step === 'main1');
+    expect(perm.card.name).toBe('Westvale Cult Leader');
+    expect(perm.front).toBe(captain);
+    expect(t.game.power(perm)).toBe(4);
+  });
+
+  it('an activated "exile it, then return it transformed" brings back the other face as a new permanent', () => {
+    const t = new Table();
+    const a = t.game.players[0];
+    t.lands(0, 2);
+    const clive = dfc('Clive, Ifrit\'s Dominant', { types: ['Creature'], superTypes: ['Legendary'], power: '5', toughness: '5', text: '{1}{G}, {T}: Exile Clive, then return it to the battlefield transformed under its owner\'s control. Activate only as a sorcery.' },
+      { name: 'Ifrit, Warden of Inferno', types: ['Creature'], subTypes: ['Demon'], text: 'Flying\nWhen Ifrit enters, draw two cards.', power: '6', toughness: '6' });
+    const perm = t.game.put(0, clive, { commander: true });
+    const hand = a.hand.length;
+    t.handlers[0] = (g, d) => {
+      if (d.kind !== 'priority' || g.stack.length) return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'activate' && x.effect.kind === 'transform');
+      return i === -1 ? undefined : { action: i };
+    };
+    t.finishTurn();
+    expect(a.battlefield).not.toContain(perm);
+    const ifrit = a.battlefield.find((q) => q.card.name === 'Ifrit, Warden of Inferno');
+    expect(ifrit?.front).toBe(clive);
+    expect(ifrit?.isCommander).toBe(true);
+    expect(ifrit && t.game.power(ifrit)).toBe(6);
+    expect(a.hand.length).toBe(hand + 2);
+    expect(a.commandZone).not.toContain(clive);
+  });
+
+  it("a rider transform goes off with the ability it is part of (Jace, Vryn's Prodigy)", () => {
+    const t = new Table();
+    const a = t.game.players[0];
+    const jace = dfc('Jace, Vryn\'s Prodigy', { types: ['Creature'], power: '0', toughness: '2', text: '{T}: Draw a card, then discard a card. If there are five or more cards in your graveyard, exile Jace, then return him to the battlefield transformed under his owner\'s control.' },
+      { name: 'Jace, Telepath Unbound', types: ['Planeswalker'], subTypes: ['Jace'], text: '+1: Up to one target creature gets -2/-0 until your next turn.', loyalty: 5 });
+    const perm = t.game.put(0, jace);
+    let offered: Action[] = [];
+    t.handlers[0] = (g, d) => {
+      if (d.kind !== 'priority' || g.stack.length) return undefined;
+      offered = d.actions;
+      const i = d.actions.findIndex((x) => x.type === 'activate');
+      return i === -1 ? undefined : { action: i };
+    };
+    a.graveyard.push(...a.library.splice(0, 5));
+    t.finishTurn();
+    expect(offered.filter((x) => x.type === 'activate' && x.effect.kind === 'transform')).toHaveLength(0);
+    expect(a.battlefield).not.toContain(perm);
+    const walker = a.battlefield.find((q) => q.card.name === 'Jace, Telepath Unbound');
+    expect(walker?.loyalty).toBe(5);
+  });
+});
+
 void card;

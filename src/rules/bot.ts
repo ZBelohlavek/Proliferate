@@ -446,6 +446,8 @@ export class Bot implements Agent {
         case 'recursion': return !e.toTop && p.graveyard.some((c) => recursionMatches(e.what, c));
         case 'exileGraveyards': return g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'cheat': return p.hand.some((c) => c.isCreature);
+        // Transform when the other face is the better card.
+        case 'transform': return !!perm.card.back && perm.card.back.value >= perm.card.value * 0.8;
         default: return false;
       }
     });

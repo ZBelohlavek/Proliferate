@@ -90,6 +90,8 @@ export class Game {
   private struckFirst = new Set<number>();
   /** False while nothing is attached to anything, to skip the search for attachments. */
   private anyAttached = false;
+  /** While a spell or ability resolves: its card (the source of a "when this dies" trigger may be gone). */
+  private resolvingCard: SimCard | null = null;
   /** While a spell or ability resolves: the controller of the last thing it targeted. */
   private aimedSeat: number | null = null;
   /** Seats that take an extra turn after the current one (Time Warp). */
@@ -539,6 +541,7 @@ export class Game {
       return targets === null || targets.length > 0;
     }
     if (e.when !== 'activated' || !e.activation) return false;
+    if (e.kind === 'transform' && (e.rider || !sorcery || !perm.card.back)) return false;
     const act = e.activation;
     if (act.tap && (perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')))) return false;
     if (act.cost.life >= p.life && act.cost.life > 0) return false;
@@ -1149,8 +1152,10 @@ export class Game {
       this.removePerm(perm, 'graveyard');
       this.sacrificed(p);
     }
+    // Parts of the same ability that were read as separate effects (a transform after a loot).
+    const riders = perm.card.effects.filter((r) => r.kind === 'transform' && r.rider && r !== e && sameActivation(r, e));
     this.stack.push({
-      id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e], targets: [target], x: 0,
+      id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e, ...riders], targets: [target, ...riders.map(() => null)], x: 0,
       isCommander: false, sourceId: act.sacrifice || fodder === perm ? null : perm.id, attachTo: null, label: `${perm.card.name} ability`,
     });
     return true;
@@ -1281,6 +1286,7 @@ export class Game {
       }
     }
     this.aimedSeat = null;
+    this.resolvingCard = item.card;
     for (let i = 0; i < item.effects.length; i++) {
       // "Its controller" in a later sentence means whoever controlled what this part hit (Reality Shift).
       const aim = item.targets[i];
@@ -1347,8 +1353,9 @@ export class Game {
    * battlefield, so only "whenever this creature mutates" abilities trigger.
    */
   private *merge(p: PlayerState, host: Perm, card: SimCard, isCommander: boolean): Flow<void> {
-    const parts = host.parts ?? [{ real: host.token ? null : host.faceDown ?? host.printed ?? host.card, face: host.card, commander: host.isCommander }];
+    const parts = host.parts ?? [{ real: host.token ? null : host.faceDown ?? host.front ?? host.printed ?? host.card, face: host.card, commander: host.isCommander }];
     host.faceDown = undefined;
+    host.front = undefined;
     const current = parts[0].face;
     const pick = yield* this.choose(p, 'mutate', `Put ${card.name} on top of ${current.name} (its body and name), or underneath (only its abilities)?`, [
       { label: `On top: ${card.name} ${card.power}/${card.toughness}`, card },
@@ -1452,6 +1459,77 @@ export class Game {
     this.say(`${p.name} turns a face-down creature face up: it is ${real.name}.`);
     const up = real.effects.filter((e) => e.when === 'turnedFaceUp');
     if (up.length) this.trigger(p, real, perm.id, up);
+  }
+
+  // -------------------------------------------------------------------------
+  // Transforming double-faced cards (rules 701.28, 712)
+  // -------------------------------------------------------------------------
+
+  /** Does a transform's condition hold for `p`? ("If you control four or more Wizards", "seven or more cards in your graveyard".) */
+  private transformAllowed(p: PlayerState, e: Extract<Effect, { kind: 'transform' }>): boolean {
+    const c = e.cond;
+    if (!c) return true;
+    if (c.count === 'graveyard') return p.graveyard.length >= c.n;
+    // Tokens made by this engine carry no creature types, so they count toward any type.
+    const re = c.subtype ? new RegExp(`\\b${c.subtype}\\b`, 'i') : null;
+    return p.battlefield.filter((q) => q.card.isCreature && (!re || re.test(q.card.typeLine) || q.token)).length >= c.n;
+  }
+
+  private *transform(p: PlayerState, e: Extract<Effect, { kind: 'transform' }>, src: Perm | null): Flow<void> {
+    if (!this.transformAllowed(p, e)) return;
+    if (e.fromGraveyard) {
+      // "When this dies, return it to the battlefield transformed": only if it is still in its owner's graveyard.
+      const front = this.resolvingCard;
+      const owner = front?.back ? this.players.find((q) => q.alive && q.graveyard.includes(front)) : undefined;
+      if (!front || !owner) return;
+      owner.graveyard.splice(owner.graveyard.indexOf(front), 1);
+      this.say(`${front.name} returns to the battlefield transformed into ${front.back!.name}.`);
+      yield* this.enterTransformed(owner, front, !!e.tapped, false);
+      return;
+    }
+    if (!src || !this.players[src.seat].battlefield.includes(src) || src.parts || src.faceDown) return;
+    const front = src.front ?? src.card;
+    if (!front.back) return;
+    if (e.reenter) {
+      // Exiled and returned: a new object with no memory of the old one (rule 400.7), under its owner's control.
+      const controller = this.players[src.seat];
+      controller.battlefield.splice(controller.battlefield.indexOf(src), 1);
+      const owner = this.players[src.owner ?? src.seat];
+      const toBack = !src.front;
+      this.say(`${src.card.name} is exiled and returns ${toBack ? `transformed into ${front.back.name}` : `as ${front.name}`}.`);
+      if (toBack) yield* this.enterTransformed(owner, front, false, src.isCommander);
+      else yield* this.enter(owner, front, src.isCommander, 0, null);
+      return;
+    }
+    // Transforming in place keeps everything else about the permanent (rule 712.10).
+    const next = src.front ? src.front : front.back;
+    src.front = src.front ? undefined : front;
+    src.card = next;
+    src.landInfo = next.isLand ? next.land : undefined;
+    if (next.loyalty !== undefined) src.loyalty = next.loyalty;
+    for (const f of next.effects) {
+      this.kindsInGame.add(f.kind);
+      this.kindsInGame.add(`when:${f.when}`);
+    }
+    this.say(`${front.name} transforms into ${next.name}.`);
+  }
+
+  /** Put the back face of `front` onto the battlefield (it enters, so its enters abilities trigger). */
+  private *enterTransformed(p: PlayerState, front: SimCard, tapped: boolean, isCommander: boolean): Flow<void> {
+    const back = front.back!;
+    if (back.isLand && back.land) {
+      this.putLand(p, back, back.land, tapped);
+      const perm = p.battlefield[p.battlefield.length - 1];
+      perm.front = front;
+      perm.isCommander = isCommander;
+      return;
+    }
+    yield* this.enter(p, back, isCommander, 0, null);
+    const perm = p.battlefield.find((q) => q.card === back && !q.front);
+    if (perm) {
+      perm.front = front;
+      if (tapped) perm.tapped = true;
+    }
   }
 
   private makePerm(p: PlayerState, card: SimCard, token: boolean): Perm {
@@ -1627,6 +1705,9 @@ export class Game {
         }
         break;
       }
+      case 'transform':
+        yield* this.transform(p, e, src);
+        break;
       case 'manifest': {
         if (e.who === 'opponents') {
           for (const o of this.opponents(p)) yield* this.manifest(p, o, !!e.dread);
@@ -2088,7 +2169,7 @@ export class Game {
     if (owner.alive) {
       const cards = perm.parts
         ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-        : perm.token ? [] : [{ card: perm.faceDown ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+        : perm.token ? [] : [{ card: perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
       for (const { card, commander } of cards) {
         if (to === 'graveyard') owner.graveyard.push(card);
         else if (to === 'exile') owner.exile.push(card);
@@ -2506,7 +2587,7 @@ export function mergedCard(faces: SimCard[]): SimCard {
 
 /** Commander damage is counted per commander card, whatever the permanent is called now. */
 export function commanderName(perm: Perm): string {
-  return perm.parts?.find((x) => x.commander)?.real?.name ?? perm.printed?.name ?? perm.card.name;
+  return perm.parts?.find((x) => x.commander)?.real?.name ?? perm.front?.name ?? perm.printed?.name ?? perm.card.name;
 }
 
 const FACE_DOWN: SimCard[] = [];
@@ -2520,6 +2601,11 @@ export function faceDownCard(ward: boolean): SimCard {
     notes: ['Face down: a 2/2 with no name or abilities'],
   };
   return FACE_DOWN[i];
+}
+
+/** Two effects read from the same "cost: effect" line. */
+function sameActivation(a: Effect, b: Effect): boolean {
+  return !!a.activation && !!b.activation && a.activation.tap === b.activation.tap && JSON.stringify(a.activation.cost) === JSON.stringify(b.activation.cost);
 }
 
 export function isInstantSpeed(card: SimCard): boolean {

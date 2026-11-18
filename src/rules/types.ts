@@ -65,6 +65,8 @@ export interface Perm {
    * top card's characteristics plus every card's abilities. `real` is null for a token.
    */
   parts?: { real: SimCard | null; face: SimCard; commander: boolean }[];
+  /** Transformed (rule 712): its front face. `card` is then the back face. */
+  front?: SimCard;
   /** Face down (morph, manifest, rule 708): the real card. `card` is then a nameless 2/2. */
   faceDown?: SimCard;
   /** A crewed Vehicle: its card while it isn't a creature. */

@@ -153,6 +153,12 @@ export type EffectBody =
    * dread: look at the top two and manifest one, the other goes to the graveyard (rule 701.62).
    */
   | { kind: 'manifest'; who: 'you' | 'targetController' | 'opponents'; dread?: boolean }
+  /**
+   * Transform a double-faced permanent to its other face (rule 701.28). reenter: it is exiled and
+   * returns transformed, as a new object. fromGraveyard: "when this dies, return it transformed".
+   * cond: only if you have at least `n` creatures (of `subtype`) or cards in your graveyard.
+   */
+  | { kind: 'transform'; reenter?: boolean; fromGraveyard?: boolean; tapped?: boolean; cond?: { count: 'creatures' | 'graveyard'; n: number; subtype?: string }; /** Part of another activated ability on the same line (Jace, Vryn's Prodigy): not activated by itself. */ rider?: boolean }
   /** Approach of the Second Sun: gain 7 the first time, win the second. */
   | { kind: 'approach' };
 
@@ -216,6 +222,8 @@ export interface SimCard {
   mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
   /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */
   morph?: { cost: ManaCost; /** Megamorph: a +1/+1 counter when turned face up. */ counter?: boolean; /** Disguise: the face-down creature has ward {2}. */ ward?: boolean };
+  /** Transforming double-faced card: its back face (rule 712). */
+  back?: SimCard;
   /** Modal double-faced card whose back is a land. */
   backLand?: LandInfo & { name: string };
   /** Rough "how good is this card" score used by the AI. */

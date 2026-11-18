@@ -37,7 +37,7 @@ export interface RawCard {
   layout?: string;
   /** Printed loyalty of a planeswalker. */
   loyalty?: string | number | null;
-  back?: { name: string; types: string[]; subTypes: string[]; text: string } | null;
+  back?: { name: string; types: string[]; subTypes: string[]; text: string; superTypes?: string[]; power?: string | null; toughness?: string | null; loyalty?: string | number | null } | null;
   imageUrl?: string;
 }
 
@@ -490,6 +490,11 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
   if (/takes? an extra turn after this one/.test(line)) out.push({ body: { kind: 'extraTurn' }, note: 'Extra turn' });
 
+  // --- Transforming double-faced cards ---------------------------------------------
+  // "Activate only if ..." conditions aren't checked, so those transforms stay unread (Matzalantli, the Temples).
+  const transform = /activate only if/.test(fullLine) ? null : recogniseTransform(line);
+  if (transform) out.push(transform);
+
   // --- Face-down creatures (manifest, manifest dread) ------------------------------
   if ((m = line.match(/^(its controller|you|that player) manifests? (the top card of (?:your|their|that player's) library|dread)/))) {
     const dread = m[2] === 'dread';
@@ -508,6 +513,29 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   return out;
+}
+
+const BIG_NUMBERS: Record<string, number> = { eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, twenty: 20 };
+
+/** "Transform ~", "exile ~, then return it to the battlefield transformed", "when ~ dies, return it ... transformed". */
+function recogniseTransform(line: string): Found | null {
+  let cond: { count: 'creatures' | 'graveyard'; n: number; subtype?: string } | undefined;
+  const ifClause = line.match(/\bif (?:you control (\w+) or more (\w+)|there are (\w+) or more cards in your graveyard|you have (\w+) or more cards in your graveyard), /);
+  if (ifClause) {
+    const word = ifClause[1] ?? ifClause[3] ?? ifClause[4];
+    const n = BIG_NUMBERS[word] ?? num(word, 0);
+    if (n > 0) cond = ifClause[1] ? { count: 'creatures', n, ...(ifClause[2] !== 'creatures' ? { subtype: ifClause[2].replace(/s$/, '') } : {}) } : { count: 'graveyard', n };
+  }
+  const when = cond ? ` once you have ${cond.n} ${cond.count === 'graveyard' ? 'cards in your graveyard' : cond.subtype ? `${cond.subtype}s` : 'creatures'}` : '';
+  if (/(?:^|\bthen )(?:if [^,]+, )?(?:you may )?transform ~(?:, then untap it)?\.?$/.test(line)) {
+    return { body: { kind: 'transform', ...(cond ? { cond } : {}) }, note: `Transform${when}` };
+  }
+  if (/(?:^|, )exile ~, then return (?:it|him|her|~) to the battlefield transformed under (?:its owner's|his owner's|her owner's|your) control\.?$/.test(line) || /^exile this saga, then return it to the battlefield transformed under your control/.test(line)) {
+    return { body: { kind: 'transform', reenter: true, ...(cond ? { cond } : {}) }, note: `Exile it and return it transformed${when}` };
+  }
+  const back = line.match(/^return (?:it|~) to the battlefield (tapped and )?transformed under (?:its owner's|your) control\.?$/);
+  if (back) return { body: { kind: 'transform', fromGraveyard: true, ...(back[1] ? { tapped: true } : {}) }, note: `Returns to the battlefield transformed${back[1] ? ' and tapped' : ''}` };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -680,7 +708,21 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Land: ${card.land.produces === 'any' ? 'any color' : card.land.produces.join('')}${card.land.tapped ? ' (enters tapped)' : ''}`);
     card.modeled = true;
   }
-  if (raw.back && raw.back.types.map((t) => t.toLowerCase()).includes('land') && !isLand) {
+  // Transforming cards (rule 712) are cast front face up; only modal double-faced cards can be played as their back.
+  const transforms = raw.layout === 'transform' || raw.layout === 'meld';
+  if (raw.back && transforms) {
+    const b = raw.back;
+    const backTypes = b.types.map((t) => t.toLowerCase());
+    // Some data sources leave out the back face's power and toughness: use the front's.
+    const missing = backTypes.includes('creature') && (b.power === undefined || b.power === null);
+    card.back = classifyCard({
+      name: b.name, manaCost: '', cmc: raw.cmc, types: b.types, superTypes: b.superTypes ?? raw.superTypes, subTypes: b.subTypes, text: b.text,
+      power: missing ? raw.power ?? '2' : b.power, toughness: missing ? raw.toughness ?? '2' : b.toughness, keywords: [],
+      colorIdentity: raw.colorIdentity, loyalty: b.loyalty ?? null, imageUrl: raw.imageUrl,
+    });
+    card.notes.push(`Transforms into ${b.name}${card.back.isLand ? ' (a land)' : card.back.isCreature ? ` (${card.back.power}/${card.back.toughness})` : ''}`);
+  }
+  if (raw.back && !transforms && raw.back.types.map((t) => t.toLowerCase()).includes('land') && !isLand) {
     const info = landInfo(raw.back, undefined, raw.colorIdentity);
     card.backLand = { ...info, tapped: info.tapped || /enters tapped/.test(raw.back.text.toLowerCase()), name: raw.back.name };
     card.notes.push(`Back face is a land (${raw.back.name})`);
@@ -706,6 +748,7 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   for (const rawLine of lines) {
+    const effectsBefore = card.effects.length;
     const bullet = rawLine.startsWith('•');
     const line = rawLine.replace(/^•\s*/, '');
     if (isLand && (/: add /.test(line) || /sacrifice ~[^:]*: search/.test(line))) continue;
@@ -719,7 +762,7 @@ export function classifyCard(raw: RawCard): SimCard {
     // "Unless that player pays": assume opponents pay some of the time.
     if ((ctx.when === 'opponentCast' || ctx.when === 'opponentDraw') && /unless (that player|they) pays?|that player may pay/.test(ctx.body)) ctx.chance = 0.6;
     // Intervening "if" clauses: we can't check the condition, so assume it holds half the time.
-    if (ctx.when !== 'resolve' && ctx.when !== 'static' && /^if [^,]+, /.test(ctx.body)) {
+    if (ctx.when !== 'resolve' && ctx.when !== 'static' && /^if [^,]+, /.test(ctx.body) && !/^if [^,]+, (?:you may )?transform ~/.test(ctx.body)) {
       ctx.chance = 0.5;
       ctx.body = ctx.body.replace(/^if [^,]+, /, '');
     }
@@ -785,6 +828,9 @@ export function classifyCard(raw: RawCard): SimCard {
       }
     }
     }
+    // "{T}: Draw a card ... then return him to the battlefield transformed": the transform rides along with the ability.
+    const added = card.effects.slice(effectsBefore);
+    if (added.length > 1) for (const e of added) if (e.kind === 'transform' && e.when === 'activated') e.rider = true;
   }
   settle();
   if (unread.length) card.unread = unread;
@@ -1075,6 +1121,7 @@ export function cardValue(card: SimCard): number {
       case 'winOnEmptyDraw': v += 2; break;
       case 'monarch': v += 4; break;
       case 'manifest': v += e.who === 'targetController' ? -1 : 2 * mult; break;
+      case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
     }
   }
   return Math.max(v, card.cmc * 0.4);
