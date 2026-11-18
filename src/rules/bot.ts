@@ -285,6 +285,10 @@ export class Bot implements Agent {
     }
 
     // Combat tricks once blockers are known, then abilities that save or pump a creature in the fight.
+    if (g.step === 'declareBlockers' && myTurn) {
+      const ninja = this.chooseNinjutsu(g, actions);
+      if (ninja) return pick(ninja);
+    }
     if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
@@ -387,6 +391,27 @@ export class Bot implements Agent {
   }
 
   /** The face-down creature whose real card is best, if it can be turned face up. */
+  /**
+   * Ninjutsu: swap in the ninja whose card beats what it replaces, returning the least valuable
+   * unblocked attacker (it can be cast again). Ninjas that do something on a hit are worth more.
+   */
+  private chooseNinjutsu(g: Game, actions: Action[]): Action | undefined {
+    let best: Action | undefined;
+    let bestGain = 0;
+    for (const a of actions) {
+      if (a.type !== 'ninjutsu') continue;
+      const out = g.findPerm(a.permId);
+      if (!out) continue;
+      const onHit = a.card.effects.some((e) => e.when === 'combatDamage') ? 3 : 0;
+      const gain = a.card.value + onHit + a.card.power - out.card.value - g.power(out) + (out.card.effects.some((e) => e.when === 'resolve') ? 1.5 : 0) - (out.isCommander ? 3 : 0);
+      if (gain > bestGain) {
+        best = a;
+        bestGain = gain;
+      }
+    }
+    return best;
+  }
+
   private chooseFaceUp(g: Game, actions: Action[]): Action | undefined {
     let best: Action | undefined;
     let bestValue = 2;

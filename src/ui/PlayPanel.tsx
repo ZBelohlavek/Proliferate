@@ -598,6 +598,7 @@ function actionLabel(g: Game, a: Action): string {
       return `${perm?.card.name ?? 'Class'}: level ${next?.level ?? ''} ${next ? costText({ cost: next.cost } as SimCard) : ''}`;
     }
     case 'crew': return `Crew ${g.findPerm(a.permId)?.card.name ?? 'Vehicle'}`;
+    case 'ninjutsu': return `Ninjutsu ${a.card.name} ${costText({ cost: a.card.ninjutsu!.cost } as SimCard)} for ${g.findPerm(a.permId)?.card.name ?? 'an attacker'}`;
     case 'turnFaceUp': {
       const perm = g.findPerm(a.permId);
       return `Turn face up: ${perm?.faceDown?.name ?? 'creature'} ${costText({ cost: (perm && g.faceUpCost(perm)) ?? { generic: 0, pips: [], x: 0, life: 0 } } as SimCard)}`;

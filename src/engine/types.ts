@@ -376,6 +376,8 @@ export interface SimCard {
   cycling?: { cost: ManaCost; land?: boolean };
   /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
   cumulativeUpkeep?: ManaCost;
+  /** Toxic N (rule 702.164): combat damage to a player also gives that many poison counters. */
+  toxic?: number;
   /** Overload: for this cost the spell hits everything it could target instead of one target. */
   overload?: { cost: ManaCost; effects: Effect[] };
   /** Storm: copied for each spell cast before it this turn. */
@@ -429,6 +431,8 @@ export interface SimCard {
   /** Mutate (rule 702.140): cast for this cost onto a non-Human creature you own, merging with it. */
   mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
   /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */
+  /** Ninjutsu (rule 702.49): return an unblocked attacker you control to hand to put this onto the battlefield tapped and attacking. `commander`: also from the command zone. */
+  ninjutsu?: { cost: ManaCost; commander?: boolean };
   morph?: { cost: ManaCost; /** Megamorph: a +1/+1 counter when turned face up. */ counter?: boolean; /** Disguise: the face-down creature has ward {2}. */ ward?: boolean };
   /** Transforming double-faced card: its back face (rule 712). */
   back?: SimCard;

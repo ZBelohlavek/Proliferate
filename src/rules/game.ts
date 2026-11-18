@@ -679,6 +679,14 @@ export class Game {
       const next = sorcery ? this.nextLevel(perm) : undefined;
       if (next && this.planPayment(p, next.cost, 0, 0) !== null) actions.push({ type: 'level', permId: perm.id });
     }
+    // Ninjutsu: once blockers are declared, swap a ninja in for an unblocked attacker (rule 702.49a).
+    if (this.step === 'declareBlockers' && this.activeSeat === p.seat) {
+      const unblocked = p.battlefield.filter((q) => q.attacking !== null && !q.blocked);
+      if (unblocked.length) {
+        const ninjas = [...new Set(p.hand), ...p.commandZone.filter((c) => c.ninjutsu?.commander)].filter((c) => c.ninjutsu && this.planPayment(p, c.ninjutsu.cost, 0, 0) !== null);
+        for (const card of ninjas) for (const q of unblocked) actions.push({ type: 'ninjutsu', card, permId: q.id });
+      }
+    }
     return actions;
   }
 
@@ -807,6 +815,26 @@ export class Game {
         if (!perm || !next || !plan) return false;
         this.commitPayment(p, plan);
         this.setLevel(p, perm, next.level);
+        return true;
+      }
+      case 'ninjutsu': {
+        const attacker = p.battlefield.find((q) => q.id === action.permId);
+        const card = action.card;
+        const fromCommand = p.commandZone.includes(card) && !!card.ninjutsu?.commander;
+        const zone = fromCommand ? p.commandZone : p.hand;
+        const plan = card.ninjutsu ? this.planPayment(p, card.ninjutsu.cost, 0, 0) : null;
+        if (!attacker || attacker.attacking === null || attacker.blocked || !zone.includes(card) || !plan || this.step !== 'declareBlockers') return false;
+        this.commitPayment(p, plan);
+        const defender = attacker.attacking;
+        this.say(`${p.name} uses ninjutsu: ${attacker.card.name} returns to hand and ${card.name} attacks ${this.players[defender].name}.`);
+        this.removePerm(attacker, 'hand');
+        zone.splice(zone.indexOf(card), 1);
+        const perm = yield* this.enter(p, card, fromCommand || p.deck.commanders.includes(card), 0, null);
+        if (perm && p.battlefield.includes(perm) && perm.card.isCreature) {
+          perm.tapped = true;
+          perm.attacking = defender;
+          perm.blocked = false;
+        }
         return true;
       }
       case 'turnFaceUp': {
@@ -3859,6 +3887,10 @@ export class Game {
     if (!blocker.card.isCreature || blocker.tapped) return false;
     if (this.hasKw(attacker, 'unblockable')) return false;
     if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
+    if (this.hasKw(blocker, "can't block")) return false;
+    // Shadow blocks and is blocked only by shadow (702.28b). Fear: only artifact or black creatures block it (702.36b).
+    if (this.hasKw(attacker, 'shadow') !== this.hasKw(blocker, 'shadow')) return false;
+    if (this.hasKw(attacker, 'fear') && !blocker.card.isArtifact && !blocker.card.cost.pips.some((pip) => pip.includes('B'))) return false;
     // The Ring, first ability: the ring-bearer can't be blocked by creatures with greater power.
     if (this.ringLevel(attacker) >= 1 && this.power(blocker) > this.power(attacker)) return false;
     // Lord of the Nazgûl: Wraiths have protection from ring-bearers, so a ring-bearer can't block them (rule 702.16e).
@@ -4111,6 +4143,13 @@ export class Game {
           this.say(`${d.to.name} gets ${d.amount} poison (${d.to.poison} of 10).`);
         }
       } else this.loseLife(d.to, d.amount, p, 'combat');
+      // Toxic: poison counters as well (rule 702.164).
+      if (d.from.card.toxic && !d.to.shielded) {
+        d.to.poison += d.from.card.toxic;
+        d.to.lastHitBy = p.seat;
+        d.to.lastHitKind = 'combat';
+        this.say(`${d.to.name} gets ${d.from.card.toxic} poison from toxic (${d.to.poison} of 10).`);
+      }
       if (d.from.isCommander && !d.to.shielded) {
         // Commander damage counts per commander, whoever controls it now (rule 903.10a).
         const key = `${d.from.owner ?? d.from.seat}:${commanderName(d.from)}`;
