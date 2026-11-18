@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { commanderName, counterMatches, isAura, isInstantSpeed, recursionMatches, removalMatches, type Game } from './game';
+import { commanderName, counterMatches, isAura, isInstantSpeed, removalMatches, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -264,6 +264,8 @@ export class Bot implements Agent {
       if (up) return pick(up);
       const spell = this.chooseSpell(g, p, casts, false);
       if (spell) return pick(spell.action, spell.x);
+      const back = this.chooseGraveyard(g, p, actions);
+      if (back) return pick(back);
       // Crew a Vehicle when it hits harder than the creatures that would drive it.
       const crew = actions.find((a) => {
         if (a.type !== 'crew') return false;
@@ -291,9 +293,32 @@ export class Bot implements Agent {
       if (up) return pick(up);
       const spell = this.chooseSpell(g, p, casts, true);
       if (spell) return pick(spell.action, spell.x);
-      return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
+      return pick(this.chooseAbility(g, p, actions) ?? this.chooseGraveyard(g, p, actions) ?? this.chooseCycle(g, p, actions));
     }
     return pick(undefined);
+  }
+
+  /**
+   * Bring something back from the graveyard with mana that would otherwise go unused: unearth before combat,
+   * embalm and "return ~ from your graveyard" abilities, cards to hand when the hand is running low.
+   */
+  private chooseGraveyard(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    let best: Action | undefined;
+    let bestScore = 0;
+    for (const a of actions) {
+      if (a.type !== 'graveyard') continue;
+      const use = a.card.graveyard!;
+      let score = a.card.value;
+      if (use.to === 'hand') score = p.hand.length <= 2 ? a.card.value : 0;
+      // Unearth is a one-turn attacker: only before combat, and only if it hits.
+      if (use.exileAtEnd) score = g.step === 'main1' && a.card.power >= 2 ? a.card.power : 0;
+      if (use.sacCreature) score -= 3;
+      if (score > bestScore) {
+        best = a;
+        bestScore = score;
+      }
+    }
+    return best;
   }
 
   /** Triskaidekaphile on the battlefield and a hand close enough to thirteen to aim for it. */
@@ -473,6 +498,14 @@ export class Bot implements Agent {
     return false;
   }
 
+  /** Does this deck want its own graveyard (reanimation, flashback, escape and the like)? */
+  private leansOnGraveyard(p: PlayerState): boolean {
+    const uses = (c: SimCard) => !!c.flashback || !!c.graveyard || c.effects.some((e) => e.kind === 'recursion' || e.kind === 'entomb' || e.kind === 'graveyardPlay');
+    let n = 0;
+    for (const entry of p.deck.cards) if (uses(entry.card)) n += entry.count;
+    return n >= 6 || p.deck.commanders.some(uses);
+  }
+
   private chooseLand(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
     const options = actions.filter((a): a is Extract<Action, { type: 'land' }> => a.type === 'land');
     if (!options.length) return undefined;
@@ -489,6 +522,7 @@ export class Bot implements Agent {
       const info = o.back ? o.card.backLand! : o.card.land!;
       let score = 0;
       if (o.back) score -= g.landCount(p) >= 4 ? 8 : 3; // rather cast the spell side later
+      if (o.fromGraveyard) score += 1.5; // a land from the graveyard keeps the one in hand for later
       if (!info.tapped) score += 2;
       // If the extra mana can't be used this turn anyway, get tapped lands out of the way.
       else if (maxCost <= available) score += 3;
@@ -529,6 +563,13 @@ export class Bot implements Agent {
       }
       const card = g.castCard(a.card, a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
       const fromCommand = a.from === 'command';
+      // Retrace costs a land card from hand: only once there are lands to spare.
+      if (a.from === 'graveyard' && a.card.graveyard?.discardLand && !a.card.flashback && g.landCount(p) < 6) continue;
+      // Noctis: casting from the graveyard costs life. Only for cards worth it, and not when low.
+      if (a.from === 'graveyard' && !a.card.flashback && !a.card.graveyard) {
+        const life = g.graveyardPermission(p, a.card)?.life ?? 0;
+        if (life > 0 && (p.life - life < 20 || a.card.value < 3)) continue;
+      }
       let x = a.maxX;
       if (card.xFromLife) {
         // Pay only as much life as the biggest opposing creature needs, and never go low.
@@ -601,7 +642,9 @@ export class Bot implements Agent {
     }
     if (spell && card.effects.some((e) => e.kind === 'damagePlayer' && e.when === 'resolve') && !removal) score = Math.max(score, 30);
     const regrow = card.effects.find((e): e is Extract<Effect, { kind: 'recursion' }> => e.kind === 'recursion' && e.when === 'resolve');
-    if (regrow && !p.graveyard.some((c) => recursionMatches(regrow.what, c)) && !card.isCreature) return null;
+    if (regrow && !g.recursionPool(p, regrow).length && !card.isCreature) return null;
+    // Grafdigger's Cage and Rest in Peace: worth it against graveyard decks, and not if we are the graveyard deck.
+    if ((kinds.has('graveyardLock') || kinds.has('graveyardHate')) && !card.isCreature && this.leansOnGraveyard(p)) return null;
     const stealAura = card.effects.some((e) => e.kind === 'equip' && e.steal);
     if (stealAura) return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && g.canTarget(p, q) && threat(g, q) >= 4)) ? 75 : null;
     if (isAura(card) && !p.battlefield.some((q) => q.card.isCreature)) return null;
@@ -642,6 +685,18 @@ export class Bot implements Agent {
     if (kinds.has('tutor') || kinds.has('recursion') || kinds.has('tokens') || kinds.has('drain') || kinds.has('damagePlayer') || kinds.has('counters')) {
       score = Math.max(score, 40 + card.value);
     }
+    // Reanimation: as good as the best thing it brings back (all of them, for mass returns).
+    if (regrow?.toBattlefield && spell) {
+      const pool = g.recursionPool(p, regrow).map((c) => c.card.value + c.card.cmc * 0.5).sort((a, b) => b - a);
+      const got = regrow.all ? pool.reduce((a, b) => a + b, 0) : pool.slice(0, regrow.n).reduce((a, b) => a + b, 0);
+      if (got < 3) return null;
+      score = Math.max(score, 50 + got);
+    }
+    // Entomb: set up a reanimation spell in hand, or graveyard-casting cards.
+    if (kinds.has('entomb') && spell) {
+      const reanimate = p.hand.some((c) => c !== card && c.effects.some((e) => e.kind === 'recursion' && e.toBattlefield));
+      score = reanimate ? Math.max(score, 60) : this.leansOnGraveyard(p) ? Math.max(score, 35) : Math.max(score, 20);
+    }
     // Burn and drain decks: the engines that drain on every death or spell are the plan, not an extra.
     if ((this.plan?.drain ?? 0) >= 8 && card.effects.some((e) => (e.kind === 'drain' || e.kind === 'damagePlayer') && e.when !== 'resolve')) score = Math.max(score, 55 + card.value);
     if (kinds.has('gainLife')) score = Math.max(score, 10);
@@ -674,7 +729,7 @@ export class Bot implements Agent {
           return !!t && t.score >= 4;
         }
         if (e.kind === 'wipe') return this.wipeIsGood(g, p, e, 0);
-        if (e.kind === 'recursion') return p.graveyard.some((c) => recursionMatches(e.what, c));
+        if (e.kind === 'recursion') return g.recursionPool(p, e).length > 0;
         // Jace's -8: draw the rest of the library and win.
         if (e.kind === 'draw') return e.n < p.library.length || winsOnEmptyDraw(p);
         return e.kind !== 'gainLife' && e.kind !== 'scry';
@@ -721,8 +776,10 @@ export class Bot implements Agent {
           const t = this.removalTarget(g, p, e, 0, g.targetCandidates(p, e, perm) ?? []);
           return !!t && t.score >= 3 + g.round * 0.2;
         }
-        case 'recursion': return !e.toTop && p.graveyard.some((c) => recursionMatches(e.what, c));
-        case 'exileGraveyards': return g.opponents(p).some((o) => o.graveyard.length >= 8);
+        case 'recursion': return !e.toTop && g.recursionPool(p, e).length > 0;
+        case 'exileGraveyards': return e.cards ? g.opponents(p).some((o) => o.graveyard.some((c) => c.value >= 5)) : g.opponents(p).some((o) => o.graveyard.length >= 8);
+        case 'entomb': return true;
+        case 'millReanimate': return p.library.length > 10;
         case 'cheat': return p.hand.some((c) => c.isCreature);
         case 'goad': return e.all || g.opponents(p).length >= 2;
         case 'blink': return p.battlefield.some((q) => q !== perm && !q.token && (e.what === 'permanent' || q.card.isCreature) && etbWorth(q) >= 2.5);
@@ -1170,6 +1227,17 @@ export class Bot implements Agent {
       }
       case 'recursion':
         return top((i) => card(i).value, d.max);
+      case 'entomb': {
+        // Bin the cards the deck can use from the graveyard: big creatures for reanimation, flashback and escape cards.
+        const reanimates = [...p.hand, ...p.battlefield.map((q) => q.card), ...p.deck.commanders].some((c) => c.effects.some((e) => e.kind === 'recursion' && e.toBattlefield));
+        const score = (i: number) => card(i).value * (card(i).isCreature && reanimates ? 1.5 : 0.5) + (card(i).flashback || card(i).graveyard ? 4 : 0);
+        return top(score, d.max);
+      }
+      case 'exileCard': {
+        // Paying for escape: our least useful cards. Graveyard hate: their best.
+        const own = (i: number) => p.graveyard.includes(card(i));
+        return top((i) => (own(i) ? -card(i).value - (card(i).flashback || card(i).graveyard ? 5 : 0) : card(i).value), d.max);
+      }
       case 'sacrifice':
         // Treasures first, then tokens and the least useful permanents; lands only when there are plenty.
         return top((i) => {

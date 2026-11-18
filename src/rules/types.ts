@@ -141,6 +141,8 @@ export interface PlayerState {
   poison: number;
   /** Spells cast this turn (Rule of Law). */
   spellsThisTurn: number;
+  /** Permanent types already cast or played from the graveyard this turn (Muldrotha). */
+  graveyardTypes?: Set<string>;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
   shielded: boolean;
   lastHitBy: number | null;
@@ -178,8 +180,10 @@ export interface StackItem {
   attachTo: Target | null;
   /** Short description for the table and the log. */
   label: string;
-  /** Cast with flashback: exiled when it leaves the stack. */
+  /** Cast with flashback (or escape, disturb): exiled when it leaves the stack. */
   flashback?: boolean;
+  /** Cast from the graveyard with Noctis: the permanent enters with a finality counter (exiled instead of going to a graveyard). */
+  finality?: boolean;
   /** A copy of a spell (rule 707.10): it ceases to exist instead of going anywhere when it leaves the stack. */
   copy?: boolean;
   /** Cast with an alternative cost that changes what happens on resolution (evoke, dash). */
@@ -199,8 +203,8 @@ export interface StackItem {
 /** One thing a player may do when they have priority. */
 export type Action =
   | { type: 'pass' }
-  /** Play a land from hand. `back` plays the land side of a modal double-faced card. */
-  | { type: 'land'; card: SimCard; back: boolean }
+  /** Play a land from hand. `back` plays the land side of a modal double-faced card. `fromGraveyard`: Crucible of Worlds. */
+  | { type: 'land'; card: SimCard; back: boolean; fromGraveyard?: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
   | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean }
@@ -212,6 +216,8 @@ export type Action =
   | { type: 'crew'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
   | { type: 'cycle'; card: SimCard }
+  /** Use a card's ability from your graveyard: unearth, embalm, "{1}{B}: return ~ from your graveyard". */
+  | { type: 'graveyard'; card: SimCard }
   /** Activate an ability of a permanent (`effect` is one of its card's effects). */
   | { type: 'activate'; permId: number; effect: Effect };
 
@@ -221,7 +227,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

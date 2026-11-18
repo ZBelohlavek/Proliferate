@@ -420,8 +420,8 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
                 ? <>Your <strong>{STEP_NAMES[g.step].toLowerCase()}</strong>. Click a highlighted card to play it.</>
                 : <>{shortName(g.players[g.activeSeat])}&apos;s <strong>{STEP_NAMES[g.step].toLowerCase()}</strong>. You can act now, or continue.</>}
           </span>
-          {d.actions.map((a, i) => (a.type === 'cast' && a.from === 'graveyard'
-            ? <button key={i} onClick={() => (a.maxX > 0 ? setMenu([i]) : answer({ action: i }))}>{actionLabel(g, a)}</button>
+          {d.actions.map((a, i) => ((a.type === 'cast' && a.from === 'graveyard') || a.type === 'graveyard' || (a.type === 'land' && a.fromGraveyard)
+            ? <button key={i} onClick={() => (a.type === 'cast' && a.maxX > 0 ? setMenu([i]) : answer({ action: i }))}>{actionLabel(g, a)}</button>
             : null))}
           <button className="primary" onClick={() => answer({ action: 0 })}>{pass}</button>
         </div>
@@ -577,8 +577,21 @@ function effectLabel(e: Effect): string {
 function actionLabel(g: Game, a: Action): string {
   switch (a.type) {
     case 'pass': return 'Pass';
-    case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}`;
-    case 'cast': return a.faceDown ? `Cast ${a.card.name} face down {3}` : a.mutate ? `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}` : a.from === 'overload' ? `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}` : a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : a.from === 'alt' ? altLabel(a.card) : `Cast ${a.card.name} ${costText(a.card)}`;
+    case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}${a.fromGraveyard ? ' from your graveyard' : ''}`;
+    case 'cast': {
+      if (a.faceDown) return `Cast ${a.card.name} face down {3}`;
+      if (a.mutate) return `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}`;
+      if (a.from === 'overload') return `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}`;
+      if (a.from === 'alt') return altLabel(a.card);
+      if (a.from !== 'graveyard') return `Cast ${a.card.name} ${costText(a.card)}`;
+      const how = a.card.flashback ? 'Flashback' : a.card.graveyard?.how === 'cast' ? a.card.graveyard.label[0].toUpperCase() + a.card.graveyard.label.slice(1) : 'Cast from graveyard:';
+      return `${how} ${a.card.name} ${costText(g.castCard(a.card, 'graveyard'))}`;
+    }
+    case 'graveyard': {
+      const use = a.card.graveyard!;
+      const what = use.label === 'return' ? `Return ${a.card.name} from your graveyard` : `${use.label[0].toUpperCase()}${use.label.slice(1)} ${a.card.name}`;
+      return `${what} ${costText({ cost: use.cost } as SimCard)}`;
+    }
     case 'level': {
       const perm = g.findPerm(a.permId);
       const next = perm ? g.nextLevel(perm) : undefined;
