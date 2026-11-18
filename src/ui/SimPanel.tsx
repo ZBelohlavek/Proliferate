@@ -300,7 +300,7 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
                     <th>vs. fair <Help>Win rate divided by a fair share. 1.00× = wins exactly as often as chance would give it; 1.50× = 50% more often; 0.50× = half as often. Green above 1.1×, red below 0.9×.</Help></th>
                     <th>Avg place <Help>Average finishing position: 1 = won, 4 = first out in a 4-player game. Lower is better. Unlike win rate, this also rewards coming second.</Help></th>
                     <th>Win round <Help>Average round in which this deck won its games. Lower = faster deck.</Help></th>
-                    <th>Kills by <Help>How this deck knocked opponents out. <span className="legend-swatch k-combat" /> combat damage, <span className="legend-swatch k-commander" /> 21 commander damage, <span className="legend-swatch k-noncombat" /> drain / burn / other life loss. Hover the bar for exact numbers.</Help></th>
+                    <th>Kills by <Help>How this deck knocked opponents out. <span className="legend-swatch k-combat" /> combat damage, <span className="legend-swatch k-commander" /> 21 commander damage, <span className="legend-swatch k-noncombat" /> drain / burn / combos / other ways to win, <span className="legend-swatch k-decked" /> milled out. Hover the bar for exact numbers.</Help></th>
                     <th>Cmdr out <Help>Average round in which the commander was first cast.</Help></th>
                     <th>Mulligans <Help>Average number of mulligans per game, counting Commander&apos;s free first mulligan. High numbers point to a shaky mana base or too many expensive cards. (Games from before this was tracked may count slightly low.)</Help></th>
                     <th>Games <Help>Games this deck has played. More games = narrower win-rate band = more trustworthy numbers.</Help></th>
@@ -324,7 +324,8 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
               </span>
               <span className="item"><span className="legend-swatch k-combat" />combat</span>
               <span className="item"><span className="legend-swatch k-commander" />commander damage</span>
-              <span className="item"><span className="legend-swatch k-noncombat" />drain / burn</span>
+              <span className="item"><span className="legend-swatch k-noncombat" />drain / burn / combo</span>
+              <span className="item"><span className="legend-swatch k-decked" />mill</span>
             </div>
           </section>
 
@@ -363,7 +364,9 @@ function LeaderRow({ rank, deck, s, rating, color }: { rank: number; deck: SimDe
   const winRate = s.wins / s.games;
   const fair = s.expectedWins / s.games;
   const ratio = winRate / fair;
-  const kills = s.kills.combat + s.kills.commander + s.kills.noncombat;
+  // Stats saved before mill kills were credited lack the field's value.
+  const milled = s.kills.decked ?? 0;
+  const kills = s.kills.combat + s.kills.commander + s.kills.noncombat + milled;
   return (
     <tr>
       <td className="rank">{rank}</td>
@@ -385,10 +388,11 @@ function LeaderRow({ rank, deck, s, rating, color }: { rank: number; deck: SimDe
       <td className="num">{s.wins ? (s.winRoundSum / s.wins).toFixed(1) : '—'}</td>
       <td className="kills">
         {kills > 0 ? (
-          <div className="stack" title={`Combat ${s.kills.combat} · Commander damage ${s.kills.commander} · Drain/burn ${s.kills.noncombat}`}>
+          <div className="stack" title={`Combat ${s.kills.combat} · Commander damage ${s.kills.commander} · Drain/burn/combo ${s.kills.noncombat} · Mill ${milled}`}>
             <span className="k-combat" style={{ flex: s.kills.combat }} />
             <span className="k-commander" style={{ flex: s.kills.commander }} />
             <span className="k-noncombat" style={{ flex: s.kills.noncombat }} />
+            <span className="k-decked" style={{ flex: milled }} />
           </div>
         ) : '—'}
       </td>

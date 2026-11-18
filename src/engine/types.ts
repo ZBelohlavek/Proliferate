@@ -93,7 +93,8 @@ export type EffectBody =
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
   | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
-  | { kind: 'drain'; n: number; gain: number }
+  /** devotion: n is your devotion to this color instead (Gray Merchant). */
+  | { kind: 'drain'; n: number; gain: number; devotion?: Color }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */

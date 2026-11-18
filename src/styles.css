@@ -179,7 +179,7 @@ table.leaderboard, table.h2h { width: 100%; border-collapse: collapse; font-size
 .ci-fair { position: absolute; top: -3px; width: 1px; height: 12px; background: var(--muted); }
 .kills { width: 90px; }
 .stack { display: flex; height: 8px; border-radius: 4px; overflow: hidden; width: 80px; margin-left: auto; }
-.k-combat { background: #e8590c; } .k-commander { background: #6741d9; } .k-noncombat { background: #1c7ed6; }
+.k-combat { background: #e8590c; } .k-commander { background: #6741d9; } .k-noncombat { background: #1c7ed6; } .k-decked { background: #0ca678; }
 
 .h2h th, .h2h td { padding: 6px 8px; text-align: center; border: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .h2h th { font-size: 12px; font-weight: 600; background: var(--panel-2); }
