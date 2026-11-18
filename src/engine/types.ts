@@ -39,13 +39,19 @@ export type Trigger =
   | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
   | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
+  | 'surveil' // you surveil
+  | 'countered' // a spell or ability you control counters a spell
+  | 'dieRoll' // you roll a die (see Effect.minRoll)
+  | 'opponentMonarch' // an opponent becomes the monarch
+  | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
+  | 'turnedFaceUp' // this face-down permanent is turned face up
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
-/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. */
-export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all';
+/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
+export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate';
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
@@ -65,6 +71,14 @@ export type Effect = EffectBody & {
   nontoken?: boolean;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
+  /** Die-roll triggers: the lowest result that counts ("whenever you roll a 4 or higher"). */
+  minRoll?: number;
+  /** Cast triggers: only on the caster's first, second, ... spell of the turn ("their second spell each turn"). */
+  nth?: number;
+  /** Cast triggers: only during the caster's own turn, or only during someone else's ("during each opponent's turn"). */
+  turn?: 'own' | 'others';
+  /** Dies triggers: "this creature or another creature" also triggers on its own death. */
+  selfToo?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
   activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean };
 };
@@ -73,28 +87,31 @@ export type EffectBody =
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
   | { kind: 'mana'; amount: number; colors: Mana[] | 'any' }
   | { kind: 'costReduction'; amount: number; filter: CastFilter }
-  | { kind: 'treasure'; n: number }
+  /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
+  | { kind: 'treasure'; n: number; ritual?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all' }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean }
+  /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters' }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
-  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[] }
+  /** self: the source itself ("~ gains haste until end of turn"), no target. */
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
   | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
   | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   /** devotion: n is your devotion to this color instead (Gray Merchant). */
-  | { kind: 'drain'; n: number; gain: number; devotion?: Color }
+  | { kind: 'drain'; n: number; gain: number; devotion?: Color; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
@@ -102,13 +119,20 @@ export type EffectBody =
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
   /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
-  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean }
+  /** byExperience: onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean; byExperience?: boolean }
   /** proliferate: only creatures that already have a counter. */
-  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
+  /** byExperience: as many counters as you have experience counters (Kratos). */
+  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean; byExperience?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
-  /** Enters-the-battlefield abilities of your permanents trigger twice. */
-  | { kind: 'etbDoubler' }
+  /**
+   * Your permanents' triggered abilities trigger an additional time when the event is
+   * 'enters' (an artifact or creature entering: Panharmonicon, the default),
+   * 'permanentEnters' (any permanent: Elesh Norn, Yarok), 'attack' (a creature attacking: Isshin),
+   * 'dies' (a creature dying: Drivnod) or 'magecraft' (you casting an instant or sorcery: Veyran).
+   */
+  | { kind: 'etbDoubler'; event?: 'enters' | 'permanentEnters' | 'attack' | 'dies' | 'magecraft' }
   /** Creatures can't attack you unless their controller pays this much for each. */
   | { kind: 'attackTax'; amount: number }
   /** Each player can't cast more than one spell each turn. */
@@ -127,10 +151,11 @@ export type EffectBody =
   | { kind: 'graveyardHate' }
   /** Exile graveyards: every opponent's, or everyone's. */
   | { kind: 'exileGraveyards'; all: boolean }
-  /** Enters as a copy of a creature on the battlefield. */
-  | { kind: 'clone' }
+  /** Enters as a copy of a creature on the battlefield: any, only yours (Spark Double) or only an opponent's (Imposter Mech). */
+  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
-  | { kind: 'steal'; from: 'battlefield' | 'library' }
+  /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
+  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
@@ -144,7 +169,40 @@ export type EffectBody =
   /** Laboratory Maniac: drawing from an empty library wins the game instead. */
   | { kind: 'winOnEmptyDraw' }
   /** You become the monarch: draw a card at each of your end steps until someone takes it by combat damage. */
-  | { kind: 'monarch' }
+  | { kind: 'monarch'; /** Garland: a target opponent becomes the monarch instead. */ opponent?: boolean }
+  /** You get an experience counter. */
+  | { kind: 'experience' }
+  /** Put a stun counter on an opponent's nonland permanent (its next untap doesn't happen). */
+  | { kind: 'stun' }
+  /** Mathas: a bounty counter on an opponent's creature; when it dies, its controller's opponents each draw 1 and gain 2. */
+  | { kind: 'bounty' }
+  /** Korvold: sacrifice another permanent (part of the trigger, not optional). */
+  | { kind: 'sacrificeOther' }
+  /** Roll this many six-sided dice; each result fires your die-roll triggers. */
+  | { kind: 'rollDice'; n: number }
+  /** The source has a keyword while a condition holds. */
+  | { kind: 'selfKeyword'; keyword: string; cond: 'halfLife' | 'yourTurn' }
+  /** Satya: a token copy of another nontoken creature you control, tapped and attacking; sacrificed at the next end step unless you pay energy equal to its mana value. */
+  | { kind: 'copyCreature'; temporary: boolean }
+  /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
+  | { kind: 'enterCounters'; n: number }
+  /** Kudo: other creatures have this base power and toughness. */
+  | { kind: 'baseSize'; p: number; t: number }
+  /** You get this many energy counters. */
+  | { kind: 'energy'; n: number }
+  /**
+   * Manifest (rule 701.40): put the top card of a library onto the battlefield face down as a 2/2.
+   * who: 'you'; 'targetController', the controller of what the previous part of the ability hit
+   * (Reality Shift); 'opponents', the top card of each opponent's library, under your control.
+   * dread: look at the top two and manifest one, the other goes to the graveyard (rule 701.62).
+   */
+  | { kind: 'manifest'; who: 'you' | 'targetController' | 'opponents'; dread?: boolean }
+  /**
+   * Transform a double-faced permanent to its other face (rule 701.28). reenter: it is exiled and
+   * returns transformed, as a new object. fromGraveyard: "when this dies, return it transformed".
+   * cond: only if you have at least `n` creatures (of `subtype`) or cards in your graveyard.
+   */
+  | { kind: 'transform'; reenter?: boolean; fromGraveyard?: boolean; tapped?: boolean; cond?: { count: 'creatures' | 'graveyard'; n: number; subtype?: string }; /** Part of another activated ability on the same line (Jace, Vryn's Prodigy): not activated by itself. */ rider?: boolean }
   /** Approach of the Second Sun: gain 7 the first time, win the second. */
   | { kind: 'approach' };
 
@@ -204,6 +262,12 @@ export interface SimCard {
   xFromLife?: boolean;
   /** Costs {amount} less for each of something (affinity, improvise, convoke, "for each creature on the battlefield"). */
   discount?: { per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'; amount: number };
+  /** Mutate (rule 702.140): cast for this cost onto a non-Human creature you own, merging with it. */
+  mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
+  /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */
+  morph?: { cost: ManaCost; /** Megamorph: a +1/+1 counter when turned face up. */ counter?: boolean; /** Disguise: the face-down creature has ward {2}. */ ward?: boolean };
+  /** Transforming double-faced card: its back face (rule 712). */
+  back?: SimCard;
   /** Modal double-faced card whose back is a land. */
   backLand?: LandInfo & { name: string };
   /** Rough "how good is this card" score used by the AI. */

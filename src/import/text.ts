@@ -81,7 +81,7 @@ export function scryfallToRaw(card: any): RawCard {
     producedMana: card.type_line?.includes('Land') ? ((card.produced_mana ?? []) as Mana[]) : undefined,
     layout: card.layout,
     loyalty: front.loyalty ?? card.loyalty ?? null,
-    back: back && bt ? { name: back.name, types: bt.types, subTypes: bt.subTypes, text: back.oracle_text ?? '' } : null,
+    back: back && bt ? { name: back.name, types: bt.types, superTypes: bt.superTypes, subTypes: bt.subTypes, text: back.oracle_text ?? '', power: back.power ?? null, toughness: back.toughness ?? null, loyalty: back.loyalty ?? null } : null,
     imageUrl: card.image_uris?.normal ?? front.image_uris?.normal,
   };
 }

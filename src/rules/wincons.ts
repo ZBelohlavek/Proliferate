@@ -35,9 +35,6 @@ export const UPKEEP_WINS: Record<string, (p: PlayerState, perm: Perm) => boolean
 /** Permanents that put a counter on themselves at the beginning of your upkeep (before the win check). */
 export const UPKEEP_COUNTERS = new Set(['Darksteel Reactor']);
 
-/** Revel in Riches: a Treasure whenever a creature an opponent controls dies. */
-export const TREASURE_ON_OPPONENT_DEATH = new Set(['Revel in Riches']);
-
 // ---------------------------------------------------------------------------
 // Combos
 // ---------------------------------------------------------------------------
