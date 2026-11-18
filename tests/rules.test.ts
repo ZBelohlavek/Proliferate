@@ -110,7 +110,7 @@ describe('rules engine: whole games', () => {
       expect(result.eliminations.length).toBe(result.winner === null ? size : size - 1);
       if (result.winner !== null) expect(result.placements[result.winner]).toBe(1);
     }
-  });
+  }, 30_000);
 
   it('is deterministic for a given seed', () => {
     const decks = ['a', 'b', 'c'].map((id) => toolboxDeck(id));

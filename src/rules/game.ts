@@ -548,6 +548,8 @@ export class Game {
     if (this.monarch === p.seat) return;
     this.monarch = p.seat;
     this.say(`${p.name} becomes the monarch.`);
+    // "For as long as they're the monarch" ends now (rule 611.2b).
+    if (this.anyHeld) for (const q of this.allPerms()) if (q.heldWhileMonarch !== undefined && q.heldWhileMonarch !== p.seat) this.giveBack(q);
     if (this.kindsInGame.has('when:opponentMonarch')) for (const o of this.opponents(p)) this.fire(o, 'opponentMonarch');
   }
 
@@ -1328,6 +1330,8 @@ export class Game {
         return p.battlefield.filter((q) => q.card.isEnchantment && !q.card.isCreature && !q.unlocked && !isAura(q.card) && !q.card.curse && !/\bAura\b/.test(q.card.typeLine) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'steal':
         if (e.from === 'library') return this.opponents(p).filter((o) => o.library.some((c) => c.isCreature)).map((o) => ({ kind: 'player', seat: o.seat }));
+        // Garland: "a creature that player controls", the new monarch.
+        if (e.when === 'opponentMonarch') return this.allPerms().filter((q) => q.seat === this.monarch && q.seat !== p.seat && q.card.isCreature && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
         return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       default:
         return null;
@@ -1882,6 +1886,7 @@ export class Game {
     perm.owner ??= from.seat;
     perm.seat = p.seat;
     perm.heldBy = undefined;
+    perm.heldWhileMonarch = undefined;
     if (perm.owner === p.seat) perm.owner = undefined;
     perm.sick = true;
     perm.attacking = null;
@@ -2436,6 +2441,22 @@ export class Game {
         break;
       }
       case 'tokens': {
+        if (e.army) {
+          // Amass N (rule 701.47): N +1/+1 counters on an Army you control, making a 0/0 Army first if you have none.
+          const card = armyCard();
+          let army = p.battlefield.find((q) => q.card === card);
+          const made: Perm[] = [];
+          if (!army) {
+            const count = Math.min(2 ** this.doublers(p, 'tokens'), 40);
+            for (let i = 0; i < count; i++) made.push(this.makePerm(p, card, true));
+            p.battlefield.push(...made);
+            army = made[0];
+          }
+          army.counters += e.power * 2 ** this.doublers(p, 'counters');
+          for (const token of made) this.creatureEntered(p, token);
+          this.say(`${p.name} amasses ${e.power}${made.length ? ', making an Army token' : ''} (Army is ${this.power(army)}/${this.toughness(army)}).`);
+          break;
+        }
         const count = Math.min((e.n === -1 ? x : e.n) * 2 ** this.doublers(p, 'tokens'), 40);
         for (let i = 0; i < count; i++) {
           const token = this.makePerm(p, tokenCard(e.power, e.toughness, e.keywords), true);
@@ -2678,6 +2699,15 @@ export class Game {
             if (!src || src.seat !== p.seat || !p.battlefield.includes(src)) break;
             this.takeControl(perm, p);
             this.hold(perm, src);
+          } else if (e.when === 'opponentMonarch') {
+            // Garland: only while the player it came from is still the monarch.
+            if (this.monarch !== perm.seat) break;
+            const from = perm.seat;
+            this.takeControl(perm, p);
+            if (perm.owner !== undefined) {
+              perm.heldWhileMonarch = from;
+              this.anyHeld = true;
+            }
           } else this.takeControl(perm, p);
           break;
         }
@@ -3663,6 +3693,7 @@ export class Game {
   /** Control of a borrowed permanent goes back to its owner (rule 611.2b). */
   private giveBack(perm: Perm) {
     perm.heldBy = undefined;
+    perm.heldWhileMonarch = undefined;
     const owner = this.players[perm.owner ?? perm.seat];
     if (!owner.alive || perm.owner === undefined) return;
     this.takeControl(perm, owner);
@@ -4398,6 +4429,12 @@ function targetPrompt(card: SimCard, e: Effect): string {
 }
 
 const tokenCache = new Map<string, SimCard>();
+
+/** The Army token amass makes (rule 701.47a): a 0/0 that grows with +1/+1 counters. */
+let army: SimCard | null = null;
+function armyCard(): SimCard {
+  return (army ??= { ...tokenCard(0, 0, []), name: 'Army token', typeLine: 'Token Creature — Army' });
+}
 
 function tokenCard(power: number, toughness: number, keywords: string[]): SimCard {
   const key = `${power}/${toughness}/${keywords.join(',')}`;
