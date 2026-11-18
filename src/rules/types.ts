@@ -60,6 +60,8 @@ export interface Perm {
   loyaltyUsed?: boolean;
   /** Stun counters: each replaces one untap. */
   stun?: number;
+  /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
+  heldBy?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
