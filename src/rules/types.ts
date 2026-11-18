@@ -68,6 +68,21 @@ export interface Perm {
   level?: number;
   /** Cast with dash: returns to its owner's hand at the beginning of the next end step (rule 702.109). */
   dashed?: boolean;
+  /** Mathas's bounty counter. */
+  bounty?: boolean;
+  /** A temporary token copy (Satya): sacrificed at the next end step unless its controller pays energy. */
+  temporary?: boolean;
+  /**
+   * A merged permanent (mutate, rule 721): its cards from top to bottom. `card` is then the
+   * top card's characteristics plus every card's abilities. `real` is null for a token.
+   */
+  parts?: { real: SimCard | null; face: SimCard; commander: boolean }[];
+  /** Transformed (rule 712): its front face. `card` is then the back face. */
+  front?: SimCard;
+  /** Face down (morph, manifest, rule 708): the real card. `card` is then a nameless 2/2. */
+  faceDown?: SimCard;
+  /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
+  heldBy?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
@@ -111,9 +126,17 @@ export interface PlayerState {
   /** Combat damage taken from each commander, keyed by "seat:name" (rule 903.10a). */
   commanderDamage: Map<string, number>;
   treasures: number;
+  /** Turn number on which this player last lost life (Gev). */
+  lostLifeTurn: number;
+  /** Experience counters (Meren, Kratos). */
+  experience: number;
+  /** Energy counters (Satya). */
+  energy: number;
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
+  /** Seat of the last opponent who milled this player's cards, credited if they run out (null: nobody). */
+  milledBy: number | null;
   /** Poison counters; ten lose the game (rule 704.5c). */
   poison: number;
   /** Spells cast this turn (Rule of Law). */
@@ -163,6 +186,10 @@ export interface StackItem {
   alt?: 'evoke' | 'dash';
   /** Triggered abilities: the spell that set it off ("whenever you cast a spell, copy that spell"). */
   subject?: number;
+  /** Cast face down for {3} (morph, disguise): the real card. `card` is then the nameless 2/2 everyone sees. */
+  faceDown?: SimCard;
+  /** Cast for its mutate cost: the permanent it merges with (rule 702.140). */
+  mutateOnto?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,10 +202,12 @@ export type Action =
   /** Play a land from hand. `back` plays the land side of a modal double-faced card. */
   | { type: 'land'; card: SimCard; back: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
-  /** `alt` casts it for its alternative cost (see SimCard.altCost). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number }
+  /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
+  /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
+  | { type: 'turnFaceUp'; permId: number }
   /** Crew a Vehicle: tap creatures to make it a creature until end of turn. */
   | { type: 'crew'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
@@ -192,7 +221,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'blink' | 'pitch' | 'untap';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

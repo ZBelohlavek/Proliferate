@@ -195,7 +195,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const permState = (perm: Perm): { cls: string; onClick?: () => void } => {
     if (!d) return { cls: '' };
     if (d.kind === 'priority') {
-      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'level') && a.permId === perm.id);
+      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'turnFaceUp' || a.type === 'level') && a.permId === perm.id);
       return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
     }
     if (d.kind === 'target' && isTarget({ kind: 'perm', id: perm.id })) return { cls: 'target', onClick: () => answer({ kind: 'perm', id: perm.id }) };
@@ -578,13 +578,17 @@ function actionLabel(g: Game, a: Action): string {
   switch (a.type) {
     case 'pass': return 'Pass';
     case 'land': return a.back ? `Play as a land (${a.card.backLand!.name})` : `Play ${a.card.name}`;
-    case 'cast': return a.from === 'overload' ? `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}` : a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : a.from === 'alt' ? altLabel(a.card) : `Cast ${a.card.name} ${costText(a.card)}`;
+    case 'cast': return a.faceDown ? `Cast ${a.card.name} face down {3}` : a.mutate ? `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}` : a.from === 'overload' ? `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}` : a.from === 'graveyard' ? `Flashback ${a.card.name} ${costText({ cost: a.card.flashback } as SimCard)}` : a.from === 'alt' ? altLabel(a.card) : `Cast ${a.card.name} ${costText(a.card)}`;
     case 'level': {
       const perm = g.findPerm(a.permId);
       const next = perm ? g.nextLevel(perm) : undefined;
       return `${perm?.card.name ?? 'Class'}: level ${next?.level ?? ''} ${next ? costText({ cost: next.cost } as SimCard) : ''}`;
     }
     case 'crew': return `Crew ${g.findPerm(a.permId)?.card.name ?? 'Vehicle'}`;
+    case 'turnFaceUp': {
+      const perm = g.findPerm(a.permId);
+      return `Turn face up: ${perm?.faceDown?.name ?? 'creature'} ${costText({ cost: (perm && g.faceUpCost(perm)) ?? { generic: 0, pips: [], x: 0, life: 0 } } as SimCard)}`;
+    }
     case 'cycle': return `Cycle ${a.card.name} ${costText({ cost: a.card.cycling!.cost } as SimCard)}`;
     case 'activate': {
       const name = g.findPerm(a.permId)?.card.name ?? 'ability';
@@ -681,6 +685,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
   const title = [
     card.name,
     card.typeLine,
+    perm.faceDown && perm.seat === ME && `Face down: it is your ${perm.faceDown.name}`,
+    perm.parts && `Mutated: ${perm.parts.map((x) => x.face.name).join(' over ')}`,
     perm.tapped && 'Tapped',
     perm.sick && card.isCreature && 'Summoning sick',
     keywords.length && keywords.join(', '),
