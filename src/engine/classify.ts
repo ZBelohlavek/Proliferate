@@ -215,7 +215,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'draw', n }, note: `Draw ${n === -1 ? 'X' : n}` });
   } else if (/draw cards equal to|draws cards equal to/.test(line)) {
     out.push({ body: { kind: 'draw', n: 3 }, note: 'Draw (≈3)' });
-  } else if ((m = line.match(/put (two|three|four|\d) of (them|those cards) into your hand/))) {
+  } else if ((m = line.match(/put (one|two|three|four|\d) of (them|those cards) into your hand/))) {
     const n = num(m[1], 2);
     out.push({ body: { kind: 'draw', n }, note: `Dig for ${n}` });
   } else if (/exile the top (card|two cards|three cards) of your library[^.]*(you may play|you may cast)/.test(line)) {
@@ -330,7 +330,18 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const p = num(m[3], 1);
     const t = num(m[4], 1);
     const kws = KNOWN_KEYWORDS.filter((k) => (m![6] ?? '').includes(k));
-    out.push({ body: { kind: 'tokens', n, power: p === -1 ? 3 : p, toughness: t === -1 ? 3 : t, keywords: kws }, note: `Make ${n === -1 ? 'X' : n}× ${p === -1 ? 'X' : p}/${t === -1 ? 'X' : t} token${n === 1 ? '' : 's'}` });
+    // Jace's Illusions: "when this token becomes the target of a spell, sacrifice it".
+    const fragile = /~ becomes the target of a spell( or ability)?, sacrifice it/.test(fullLine) ? (/target of a spell or ability/.test(fullLine) ? 'any' as const : 'spell' as const) : undefined;
+    out.push({ body: { kind: 'tokens', n, power: p === -1 ? 3 : p, toughness: t === -1 ? 3 : t, keywords: kws, ...(fragile ? { fragile } : {}) }, note: `Make ${n === -1 ? 'X' : n}× ${p === -1 ? 'X' : p}/${t === -1 ? 'X' : t} token${n === 1 ? '' : 's'}${fragile ? ' (sacrificed when targeted)' : ''}` });
+  } else if ((m = line.match(new RegExp(`create ${NUM} (tapped )?tokens? (?:that'?s a copy|that are copies) of ~`)))) {
+    // Skyclave Relic, Jace, Mirror Mage, Jace, Cunning Castaway: token copies of the permanent itself.
+    const n = num(m[1], 1);
+    const loyalty = line.match(/starting loyalty is (\d+)/);
+    const nonlegendary = /(not|isn't|aren't) legendary/.test(line);
+    out.push({
+      body: { kind: 'copySelf', n, ...(m[2] ? { tapped: true } : {}), ...(nonlegendary ? { nonlegendary } : {}), ...(loyalty ? { loyalty: parseInt(loyalty[1], 10) } : {}) },
+      note: `${n === 1 ? 'A token copy' : `${n} token copies`} of itself${m[2] ? ', tapped' : ''}`,
+    });
   } else if (/^choose up to one other target enchantment or artifact\. if you're the monarch, you may create a token that's a copy of it/.test(fullLine)) {
     // Court of Vantress: copies only while you're the monarch; the "become a copy" half is left out.
     if (/^choose up to one/.test(line)) out.push({ body: { kind: 'copyPermanent', monarch: true }, note: "Token copy of another artifact or enchantment while you're the monarch" });
@@ -514,11 +525,15 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const nonlegendary = /(it isn't|it's not|isn't) legendary/.test(line);
     const extraCounter = /enters with an additional \+1\/\+1 counter/.test(line);
     out.push({
-      body: { kind: 'clone', ...(from ? { from } : {}), ...(nonlegendary ? { nonlegendary } : {}), ...(extraCounter ? { extraCounter } : {}) },
-      note: `Enters as a copy of the best creature ${from === 'yours' ? 'you control' : from ? 'an opponent controls' : 'on the battlefield'}${nonlegendary ? " (it isn't legendary)" : ''}`,
+      body: { kind: 'clone', ...(from ? { from } : {}), ...(nonlegendary ? { nonlegendary } : {}), ...(extraCounter ? { extraCounter } : {}), ...(/becomes the target of a spell or ability, sacrifice it/.test(fullLine) ? { fragile: true } : {}) },
+      note: `Enters as a copy of the best creature ${from === 'yours' ? 'you control' : from ? 'an opponent controls' : 'on the battlefield'}${nonlegendary ? " (it isn't legendary)" : ''}${/becomes the target of a spell or ability, sacrifice it/.test(fullLine) ? ' (sacrificed when targeted)' : ''}`,
     });
   }
-  if (/gain control of target (\w+ )?(creature|permanent|nonland permanent)/.test(line) && !/until end of turn/.test(fullLine)) {
+  if ((m = line.match(/gain control of target artifact( with mana value (x|\d+) or less)?/)) && !/until end of turn/.test(fullLine)) {
+    // Thieving Skydiver: an Equipment it takes is attached to it.
+    const maxCmc = m[2] === 'x' ? -1 : m[2] ? parseInt(m[2], 10) : undefined;
+    out.push({ body: { kind: 'steal', from: 'battlefield', what: 'artifact', ...(maxCmc !== undefined ? { maxCmc } : {}) }, note: `Take control of an artifact${maxCmc === -1 ? ' with mana value X or less' : maxCmc !== undefined ? ` with mana value ${maxCmc} or less` : ''}` });
+  } else if (/gain control of target (\w+ )?(creature|permanent|nonland permanent)/.test(line) && !/until end of turn/.test(fullLine)) {
     const whileSource = /for as long as (you control ~|~ remains on the battlefield)/.test(line);
     out.push({ body: { kind: 'steal', from: 'battlefield', ...(whileSource ? { whileSource } : {}) }, note: whileSource ? 'Take control of a creature while you keep this' : 'Take control of a creature' });
   }
@@ -678,6 +693,17 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   // Noble Heritage: opponents who take the counters can't touch you.
   if (/^for each opponent who does, you gain protection from that player/.test(line)) out.push({ body: { kind: 'protect', player: true }, note: 'Protection from opponents who took counters', chance: 0.5 });
 
+  // --- "Becomes the target" bodies and Midnight Clock ------------------------
+  if (/^shuffle ~ into its owner's library/.test(line)) out.push({ body: { kind: 'shuffleSelf' }, note: 'Shuffles itself into the library' });
+  if (/^sacrifice (it|~)\.?$/.test(line)) out.push({ body: { kind: 'sacrificeSelf' }, note: 'Sacrifices itself' });
+  if (/^reveal the top card of your library and put it into your hand, or onto the battlefield if it is a land/.test(line)) out.splice(0, out.length, { body: { kind: 'revealTop' }, note: 'Reveal the top card: a land onto the battlefield, else into your hand (twice a turn for each creature)' });
+  if ((m = line.match(new RegExp(`^put ${NUM} hour counters? on ~`)))) out.push({ body: { kind: 'hours', n: num(m[1], 1) }, note: 'An hour counter' });
+  if (/^shuffle your hand( and graveyard)? into your library, then draw seven cards/.test(line)) {
+    const graveyard = /hand and graveyard/.test(line);
+    const exileSelf = /exile ~/.test(fullLine);
+    // The wheel is the whole sentence: not a separate "draw seven".
+    out.splice(0, out.length, { body: { kind: 'wheel', n: 7, graveyard, ...(exileSelf ? { exileSelf } : {}) }, note: `Shuffle your hand${graveyard ? ' and graveyard' : ''} into your library and draw seven${exileSelf ? ', then exile it' : ''}` });
+  }
   // --- Rarer wordings nothing above read (classifyRare.ts) -----------------------
   if (!out.length) recogniseRare(line, out, card, fullLine);
 
@@ -737,6 +763,9 @@ interface LineContext {
   charge?: number;
   sorcery?: boolean;
   boast?: boolean;
+  targetedBy?: 'you' | 'opponents';
+  spellOnly?: boolean;
+  perTurn?: number;
 }
 
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
@@ -780,6 +809,19 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^boast — ((?:\{[^}]+\})+):\s*(.*)$/))) {
     const cost = parseManaCost(m[1]);
     return { when: 'activated', body: m[2], activationCost: cost, tap: false, sacrifice: false, boast: true };
+  }
+  // Midnight Clock: an hour counter at every player's upkeep, and the twelfth one sets off the wheel.
+  if ((m = l.match(/^at the beginning of each upkeep, (put an? \w+ counter on ~.*)$/))) return { when: 'eachUpkeep', body: m[1] };
+  if ((m = l.match(/^when the twelfth hour counter is put on ~,\s*(.*)$/))) return { when: 'hourTwelve', body: m[1] };
+  // "Becomes the target of a spell or ability" (rule 603.2): Nadu grants it to every creature you control.
+  if (/^creatures you control have "whenever ~ becomes the target of a spell or ability, reveal the top card of your library\. if it's a land card, put it onto the battlefield\. otherwise, put it into your hand\. this ability triggers only twice each turn\.?"\.?$/.test(l)) {
+    return { when: 'targeted', scope: 'any', castFilter: 'creature', perTurn: 2, body: 'reveal the top card of your library and put it into your hand, or onto the battlefield if it is a land' };
+  }
+  if ((m = l.match(/^whenever a (permanent|creature) you control becomes the target of a spell or ability( an opponent controls| you control)?,\s*(.*)$/))) {
+    return { when: 'targeted', scope: 'any', ...(m[1] === 'creature' ? { castFilter: 'creature' as const } : {}), ...(m[2] ? { targetedBy: m[2] === ' you control' ? 'you' as const : 'opponents' as const } : {}), body: m[3] };
+  }
+  if ((m = l.match(/^(?:when|whenever) ~ becomes the target of a spell( or ability)?( you control| an opponent controls)?( for the first time each turn)?,\s*(.*)$/))) {
+    return { when: 'targeted', scope: 'self', ...(m[1] ? {} : { spellOnly: true }), ...(m[2] ? { targetedBy: m[2] === ' you control' ? 'you' as const : 'opponents' as const } : {}), ...(m[3] ? { oncePerTurn: true } : {}), body: m[4] };
   }
   // Commander-specific trigger wordings.
   if ((m = l.match(/^whenever ~ becomes tapped,\s*(.*)$/))) return { when: 'attack', scope: 'self', body: m[1] };
@@ -883,6 +925,9 @@ function detectTriggers(line: string, isPermanent: boolean): LineContext[] {
   if (twice) return [detectTrigger(`whenever ${twice[1]}, ${twice[3]}`, isPermanent), detectTrigger(`whenever ${twice[2]}, ${twice[3]}`, isPermanent)];
   const selfOrOther = line.match(/^whenever ~ or another ([\w ]+?) you control enters,\s*(.*)$/);
   if (selfOrOther) return [detectTrigger(`when ~ enters, ${selfOrOther[2]}`, isPermanent), detectTrigger(`whenever another nontoken ${selfOrOther[1]} you control enters, ${selfOrOther[2]}`, isPermanent)];
+  // Goldspan Dragon: "whenever ~ attacks or becomes the target of a spell".
+  const attackOrTarget = line.match(/^whenever ~ attacks or (becomes the target of [^,]*),\s*(.*)$/);
+  if (attackOrTarget) return [detectTrigger(`whenever ~ attacks, ${attackOrTarget[2]}`, isPermanent), detectTrigger(`whenever ~ ${attackOrTarget[1]}, ${attackOrTarget[2]}`, isPermanent)];
   const both = line.match(/^(.*?whenever [^,]*?)\benters or attacks\b([^,]*,.*)$/);
   if (both) return [detectTrigger(`${both[1]}enters${both[2]}`, isPermanent), detectTrigger(`${both[1]}attacks${both[2]}`, isPermanent)];
   return [detectTrigger(line, isPermanent)];
@@ -922,13 +967,63 @@ function landInfo(raw: { types: string[]; subTypes: string[]; text: string; name
   return { produces: colors.size ? [...colors] : 'any', tapped };
 }
 
+/** "Kicker {2}{U}", "Multikicker {1}", "Kicker {X}. X can't be 0.", "Offspring {3}" (rules 702.33, 702.175). */
+const KICKER_LINE = /^(multikicker|kicker|offspring) ((?:\{[^}]+\})+)[^\n]*$/m;
+
+/** The card's text with its kicker cost paid (`kicked`) or not: "if it was kicked" clauses kept or dropped. */
+function kickerText(text: string, kicked: boolean): string {
+  let t = text.replace(new RegExp(KICKER_LINE.source + '\\n?', 'm'), '');
+  // Comet Storm: one more target for each time it was kicked (the engine adds the extra targets).
+  t = t.replace(/choose any target, then choose another target for each time ~ was kicked\. ~ deals (x|\d+) damage to each of them\./, '~ deals $1 damage to any target.');
+  if (kicked) {
+    // "Mill eight cards. If this spell was kicked, instead mill half their library": the second sentence replaces the first.
+    t = t.replace(/(^|\.\s+)[^.\n]*\.\s*if (?:~|it) was kicked, instead ([^.]*\.)/gm, '$1$2');
+    t = t.replace(/(^|\.\s+)[^.\n]*\.\s*if (?:~|it) was kicked, ([^.]*) instead\./gm, '$1$2.');
+    t = t.replace(/^(when ~ enters), if (?:~|it) was kicked, /gm, '$1, ');
+  } else {
+    t = t.replace(/\s*if (?:~|it) was kicked, instead [^.]*\./g, '').replace(/\s*if (?:~|it) was kicked, [^.]* instead\./g, '');
+    t = t.replace(/^when ~ enters, if (?:~|it) was kicked, [^\n]*\n?/gm, '');
+  }
+  return t.replace(/\n+$/, '');
+}
+
+/** Read what the card does with its kicker (or offspring) paid. `card` has already been read without it. */
+function readKicker(raw: RawCard, card: SimCard, line: RegExpMatchArray, text: string) {
+  const what = line[1] as 'kicker' | 'multikicker' | 'offspring';
+  const cost = parseManaCost(line[2]);
+  const label = `${what[0].toUpperCase()}${what.slice(1)} ${line[2].toUpperCase()}`;
+  // Everflowing Chalice: no charge counters unkicked, one for each kick (the engine counts them).
+  const charge = /^~ enters with an? charge counter on it for each time it was kicked/m.test(text);
+  if (charge) {
+    card.charge = 0;
+    card.notes = card.notes.map((n) => (/^Enters with \d+ charge counter/.test(n) ? 'Enters with a charge counter for each time it was kicked' : n));
+  }
+  if (what === 'offspring') {
+    // Offspring (rule 702.175a): when it enters, if the cost was paid, a 1/1 token copy of it.
+    card.kicker = { cost, offspring: true, effects: [...card.effects, { kind: 'copySelf', n: 1, size: 1, when: 'resolve' }] };
+    card.notes.push(`${label}: also makes a 1/1 token copy of it`);
+    return;
+  }
+  const kicked = classifyCard({ ...raw, text: kickerText(text, true), back: null });
+  const effects = [...kicked.effects];
+  // Multikicker on a spell: each kick adds another copy of its targeted damage (Comet Storm).
+  if (what === 'multikicker') for (const e of kicked.effects) if (e.kind === 'removal' && e.when === 'resolve') effects.push({ ...e, perKick: true });
+  card.kicker = { cost, ...(what === 'multikicker' ? { multi: true } : {}), ...(charge ? { charge } : {}), effects };
+  const extra = kicked.notes.filter((n) => !card.notes.includes(n) && !/^Creature |^Not read|^Not modeled|^Planeswalker|^Mana: |^Enters with /.test(n));
+  card.notes.push(`${label}${what === 'multikicker' ? ' (any number of times)' : ''}${extra.length ? `: ${extra.join('; ')}` : ''}`);
+  for (const u of kicked.unread ?? []) if (!(card.unread ?? []).includes(u)) (card.unread ??= []).push(u);
+}
+
 export function classifyCard(raw: RawCard): SimCard {
   const types = raw.types.map((t) => t.toLowerCase());
   const supers = raw.superTypes.map((t) => t.toLowerCase());
   const isLand = types.includes('land');
   const isCreature = types.includes('creature');
   const isPermanent = !types.includes('instant') && !types.includes('sorcery');
-  const text = normaliseText(raw.name, raw.text);
+  const fullText = normaliseText(raw.name, raw.text);
+  // Kicker, multikicker and offspring: the card is read without the extra cost paid; the kicked version is read at the end.
+  const kickLine = fullText.match(KICKER_LINE);
+  const text = kickLine ? kickerText(fullText, false) : fullText;
   const keywords = parseKeywords(raw, text);
 
   const card: SimCard = {
@@ -1348,7 +1443,9 @@ export function classifyCard(raw: RawCard): SimCard {
   if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
-  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst;
+  if (kickLine) readKicker(raw, card, kickLine, fullText);
+
+  card.modeled = !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   card.value = cardValue(card);
@@ -1452,6 +1549,9 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.selfToo) effect.selfToo = true;
   if (ctx.nth) effect.nth = ctx.nth;
   if (ctx.turn) effect.turn = ctx.turn;
+  if (ctx.targetedBy) effect.targetedBy = ctx.targetedBy;
+  if (ctx.spellOnly) effect.spellOnly = true;
+  if (ctx.perTurn) effect.perTurn = ctx.perTurn;
   if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
   if (ctx.chapters) effect.chapters = ctx.chapters;
   // "Copy that spell" only means something on a cast trigger.
@@ -1519,6 +1619,9 @@ function describeTrigger(ctx: LineContext): string {
     case 'chapter': return `Chapter ${(ctx.chapters ?? []).map((c) => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII'][c]).join(', ')}: `;
     case 'mutates': return ctx.scope === 'any' ? 'When a creature you control mutates: ' : 'When it mutates: ';
     case 'turnedFaceUp': return 'When it is turned face up: ';
+    case 'targeted': return `When ${ctx.scope === 'self' ? 'it' : ctx.castFilter === 'creature' ? 'a creature you control' : 'a permanent you control'} becomes the target of ${ctx.targetedBy === 'you' ? 'your' : ctx.targetedBy === 'opponents' ? "an opponent's" : 'a'} spell${ctx.spellOnly ? '' : ' or ability'}: `;
+    case 'eachUpkeep': return 'Each upkeep: ';
+    case 'hourTwelve': return 'At the twelfth hour counter: ';
     default: return '';
   }
 }
