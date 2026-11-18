@@ -45,6 +45,7 @@ export type Trigger =
   | 'countered' // a spell or ability you control counters a spell
   | 'dieRoll' // you roll a die (see Effect.minRoll)
   | 'opponentMonarch' // an opponent becomes the monarch
+  | 'ringTempts' // the Ring tempts you (rule 701.54)
   | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
   | 'turnedFaceUp' // this face-down permanent is turned face up
   | 'static'; // always on while the permanent is on the battlefield
@@ -110,7 +111,7 @@ export type EffectBody =
   /** self: the source itself ("~ gains haste until end of turn"), no target. */
   | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
-  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
+  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean; /** The enchanted permanent loses all abilities: a vanilla creature of `lockSize` (Amphibian Downpour) or a land that taps for {C} (Imprisoned in the Moon). */ lock?: 'blank' | 'land'; lockSize?: { p: number; t: number } }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
   | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
@@ -237,6 +238,15 @@ export type EffectBody =
   | { kind: 'goad'; all: boolean; weaker?: boolean }
   /** Exile your own permanents and return them at once, so their enters abilities happen again. */
   | { kind: 'blink'; n: number; what: 'creature' | 'permanent' }
+  /** The Ring tempts you (rule 701.54): choose a ring-bearer; each time adds one of the Ring's four abilities. */
+  | { kind: 'ringTempts' }
+  /**
+   * Rules about drawing: 'double' (Teferi's Ageless Insight: your draws past the first in your draw step are doubled),
+   * 'steal' (Notion Thief: those draws of your opponents come to you instead), 'limit' (Narset: opponents draw at most one card a turn).
+   */
+  | { kind: 'drawRule'; rule: 'double' | 'steal' | 'limit' }
+  /** Mindcrank: whenever an opponent loses life, they mill that many cards. */
+  | { kind: 'lifeLossMill' }
   /** Untap your permanents: up to n lands, all your creatures, all your nonland permanents, one permanent, or the source itself. */
   | { kind: 'untap'; what: 'lands' | 'creatures' | 'nonland' | 'artifacts' | 'permanent' | 'self'; n: number }
   /** Static: untap these permanents of yours during each other player's untap step too (Seedborn Muster, Unwinding Clock). */
@@ -312,6 +322,8 @@ export interface SimCard {
   freeWithCommander?: boolean;
   /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
   cycling?: { cost: ManaCost; land?: boolean };
+  /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
+  cumulativeUpkeep?: ManaCost;
   /** Overload: for this cost the spell hits everything it could target instead of one target. */
   overload?: { cost: ManaCost; effects: Effect[] };
   /** Storm: copied for each spell cast before it this turn. */

@@ -645,7 +645,8 @@ export class Bot implements Agent {
     if (regrow && !g.recursionPool(p, regrow).length && !card.isCreature) return null;
     // Grafdigger's Cage and Rest in Peace: worth it against graveyard decks, and not if we are the graveyard deck.
     if ((kinds.has('graveyardLock') || kinds.has('graveyardHate')) && !card.isCreature && this.leansOnGraveyard(p)) return null;
-    const stealAura = card.effects.some((e) => e.kind === 'equip' && e.steal);
+    // Control Magic and lockdown Auras (Amphibian Downpour): worth it on a real threat.
+    const stealAura = card.effects.some((e) => e.kind === 'equip' && (e.steal || e.lock));
     if (stealAura) return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && g.canTarget(p, q) && threat(g, q) >= 4)) ? 75 : null;
     if (isAura(card) && !p.battlefield.some((q) => q.card.isCreature)) return null;
     if (kinds.has('cheat') && spell && !p.hand.some((c) => c.isCreature)) return null;
@@ -861,7 +862,7 @@ export class Bot implements Agent {
     const bestOf = (list: Perm[], score: (q: Perm) => number) => (list.length ? list.reduce((a, b) => (score(b) > score(a) ? b : a)) : null);
 
     // Aura spells and Equipment: our best creature.
-    if (e === null && d.card.effects.some((f) => f.kind === 'equip' && f.steal)) {
+    if (e === null && d.card.effects.some((f) => f.kind === 'equip' && (f.steal || f.lock))) {
       const theirs = perms.filter((q) => q.seat !== p.seat);
       return asTarget(bestOf(theirs.length ? theirs : perms, (q) => threat(g, q))) ?? d.candidates[0];
     }
