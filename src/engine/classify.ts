@@ -1133,12 +1133,17 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
   }
   graveyardKeywords(text, card);
-  const toxic = isCreature && text.match(/^toxic (\d+)$/m);
+  const ninjutsu = isCreature && text.match(/^(commander )?ninjutsu ((?:\{[^}]+\})+)/m);
+  if (ninjutsu) {
+    card.ninjutsu = { cost: parseManaCost(ninjutsu[2]), ...(ninjutsu[1] ? { commander: true } : {}) };
+    card.notes.push(`${ninjutsu[1] ? 'Commander n' : 'N'}injutsu ${ninjutsu[2].toUpperCase()}: swaps in for an unblocked attacker`);
+  }
+  const toxic = isCreature && text.match(/^toxic (\d+)/m);
   if (toxic) {
     card.toxic = parseInt(toxic[1], 10);
     card.notes.push(`Toxic ${toxic[1]}: poison counters on combat damage to a player`);
   }
-  const cumulative = isPermanent && text.match(/^cumulative upkeep ((?:\{[^}]+\})+)$/m);
+  const cumulative = isPermanent && text.match(/^cumulative upkeep ((?:\{[^}]+\})+)/m);
   if (cumulative) {
     card.cumulativeUpkeep = parseManaCost(cumulative[1]);
     card.notes.push(`Cumulative upkeep ${cumulative[1].toUpperCase()}: pays more each turn, then is sacrificed`);
@@ -1282,7 +1287,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (graveyardLineHandled(line)) return true;
-  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
+  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
 

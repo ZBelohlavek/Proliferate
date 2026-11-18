@@ -169,7 +169,7 @@ describe('one-line cards from the real decks', () => {
     const t = new Table();
     const [a] = t.game.players;
     t.lands(0, 8);
-    const remora = t.game.put(0, spell('Mystic Remora', '{U}', 1, 'Enchantment', 'Cumulative upkeep {1}\nWhenever an opponent casts a noncreature spell, you may draw a card unless that player pays {4}.'));
+    const remora = t.game.put(0, spell('Mystic Remora', '{U}', 1, 'Enchantment', 'Cumulative upkeep {1} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)\nWhenever an opponent casts a noncreature spell, you may draw a card unless that player pays {4}.'));
     expect(remora.card.unread).toBeUndefined();
     for (let i = 0; i < 4 && a.battlefield.includes(remora); i++) {
       t.finishTurn();
@@ -194,7 +194,7 @@ describe('keywords from the partly read cards', () => {
   it('toxic gives poison on combat damage', () => {
     const t = new Table();
     const [, b] = t.game.players;
-    t.game.put(0, creature('Blightbelly Rat', '{1}{G}', 2, 2, 2, { text: 'Toxic 1\nWhen this creature dies, proliferate.' }));
+    t.game.put(0, creature('Blightbelly Rat', '{1}{G}', 2, 2, 2, { text: 'Toxic 1 (Players dealt combat damage by this creature also get a poison counter.)\nWhen this creature dies, proliferate.' }));
     t.handlers[0] = attackAll(1);
     t.finishTurn();
     expect(b.poison).toBe(1);
@@ -220,6 +220,39 @@ describe('keywords from the partly read cards', () => {
     expect(prodigy.effects.some((e) => e.kind === 'pump' && e.when === 'cast')).toBe(true);
     expect(artisan.effects.filter((e) => e.kind === 'removal' && e.mode === 'edict' && e.when === 'attack').length).toBe(2);
     expect(eidolon.effects.some((e) => e.kind === 'draw' && e.when === 'permEnters')).toBe(true);
+  });
+});
+
+describe('ninjutsu', () => {
+  it('swaps a ninja in for an unblocked attacker; it deals the damage and its trigger fires', () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.lands(0, 2);
+    const scout = t.game.put(0, creature('Scout', '{G}', 1, 1, 1));
+    const ninja = creature('Ninja of the Deep Hours', '{3}{G}', 4, 2, 2, { text: 'Ninjutsu {1}{G} ({1}{G}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may draw a card.' });
+    a.hand.push(ninja);
+    expect(ninja.unread).toBeUndefined();
+    const life = b.life;
+    let used = false;
+    t.handlers[0] = (g, d) => {
+      if (d.kind === 'attackers') return [{ attacker: scout.id, defender: 1 }];
+      if (d.kind === 'priority' && !used) {
+        const i = d.actions.findIndex((x) => x.type === 'ninjutsu');
+        if (i !== -1) {
+          used = true;
+          return { action: i };
+        }
+      }
+      return undefined;
+    };
+    const hand = a.hand.length;
+    t.finishTurn();
+    expect(used).toBe(true);
+    expect(a.hand).toContain(scout.card);
+    expect(a.battlefield.some((q) => q.card.name === 'Ninja of the Deep Hours')).toBe(true);
+    expect(b.life).toBe(life - 2);
+    // Scout back in hand (+1), ninja out of hand (-1), one card drawn (+1).
+    expect(a.hand.length).toBe(hand + 1);
   });
 });
 
