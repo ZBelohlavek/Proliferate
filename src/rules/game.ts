@@ -1415,7 +1415,7 @@ export class Game {
         return out;
       }
       case 'counter':
-        return this.stack.filter((s) => s.kind === 'spell' && counterMatches(e.target, s.card) && !s.card.keywords.includes('uncounterable')).map((s) => ({ kind: 'stack', id: s.id }));
+        return this.stack.filter((s) => s.kind === 'spell' && counterMatches(e.target, s.card) && (e.cmc === undefined || s.card.cmc === e.cmc) && !s.card.keywords.includes('uncounterable')).map((s) => ({ kind: 'stack', id: s.id }));
       case 'pump': {
         if (e.self) return null;
         const out: Target[] = [];
@@ -2678,6 +2678,11 @@ export class Game {
         const [hit] = this.stack.splice(idx, 1);
         this.say(`${hit.label} is countered.`);
         if (hit.kind === 'spell') this.leaveStack(this.players[hit.controller], hit);
+        // Mana Drain: mana equal to the countered spell's mana value, kept as one-shot mana.
+        if (e.refund && hit.kind === 'spell' && hit.card.cmc > 0) {
+          p.treasures += hit.card.cmc;
+          this.say(`${p.name} gets ${hit.card.cmc} mana from it.`);
+        }
         this.fire(p, 'countered');
         break;
       }
@@ -3196,6 +3201,11 @@ export class Game {
         if (e.who === 'all') {
           this.fogAll = true;
           this.say(`${p.name} prevents all combat damage this turn.`);
+        } else if (e.who === 'you' && e.bounce) {
+          // Aetherize: the creatures attacking you go back to their owners' hands.
+          const coming = this.attackers().filter((q) => q.attacking === p.seat);
+          if (coming.length) this.removePerms(coming, 'hand');
+          this.say(`${p.name} returns ${coming.length} attacking creature${coming.length === 1 ? '' : 's'} to ${coming.length === 1 ? "its owner's hand" : "their owners' hands"}.`);
         } else if (e.who === 'you') {
           p.fogged = { tokens: !!e.tokens };
           this.say(`${p.name} prevents all combat damage to them this turn.`);
