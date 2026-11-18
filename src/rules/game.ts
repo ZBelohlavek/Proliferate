@@ -92,6 +92,10 @@ export class Game {
   private struckFirst = new Set<number>();
   /** False while nothing is attached to anything, to skip the search for attachments. */
   private anyAttached = false;
+  /** While a spell or ability resolves: its card (the source of a "when this dies" trigger may be gone). */
+  private resolvingCard: SimCard | null = null;
+  /** While a spell or ability resolves: the controller of the last thing it targeted. */
+  private aimedSeat: number | null = null;
   /** Seats that take an extra turn after the current one (Time Warp). */
   private extraTurns: number[] = [];
   private extraTurnsTaken = 0;
@@ -471,26 +475,35 @@ export class Game {
     // Rule of Law: one spell a turn. Drannith Magistrate: no casting from the command zone.
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
-    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload') => {
+    const mutateHosts = this.mutateTargets(p).length > 0;
+    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload', mutate = false) => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return;
       if (!sorcery && !isInstantSpeed(card)) return;
+      if (mutate && !mutateHosts) return;
       const fromCommand = from === 'command';
-      const priced = this.castCard(card, from);
+      const priced = this.castCard(card, mutate ? 'mutate' : from);
       if (mana < this.effectiveCost(p, priced, fromCommand)) return;
       if (!this.canAfford(p, priced, fromCommand, 0)) return;
       if (from !== 'overload' && !this.hasTargets(p, card)) return;
-      actions.push({ type: 'cast', card, from, maxX: this.maxX(p, priced, fromCommand) });
+      actions.push({ type: 'cast', card, from, maxX: this.maxX(p, priced, fromCommand), ...(mutate ? { mutate } : {}) });
     };
-    for (const card of new Set(p.commandZone)) consider(card, 'command');
+    for (const card of new Set(p.commandZone)) {
+      consider(card, 'command');
+      if (card.mutate) consider(card, 'command', true);
+    }
     for (const card of new Set(p.hand)) {
       consider(card, 'hand');
       if (card.overload) consider(card, 'overload');
+      if (card.mutate) consider(card, 'hand', true);
+      // Morph and disguise: cast face down as a 2/2 for {3} (rule 702.37c).
+      if (card.morph && sorcery && mayCast && this.canAfford(p, this.castCard(card, 'faceDown'), false, 0)) actions.push({ type: 'cast', card, from: 'hand', maxX: 0, faceDown: true });
     }
     const seen = new Set<SimCard>();
     for (const card of p.graveyard) {
-      if (card.flashback && !seen.has(card)) {
+      if ((card.flashback || card.mutate?.fromGraveyard) && !seen.has(card)) {
         seen.add(card);
-        consider(card, 'graveyard');
+        if (card.flashback) consider(card, 'graveyard');
+        else consider(card, 'graveyard', true);
       }
     }
     // Cycling works at any time you have priority (rule 702.29).
@@ -505,6 +518,9 @@ export class Game {
       for (const effect of perm.card.effects) {
         if (this.canActivate(p, perm, effect, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect });
       }
+      // Turning a face-down permanent face up is a special action, any time you have priority (rule 116.2b).
+      const up = this.faceUpCost(perm);
+      if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
       // Crew, kept simple: in your first main phase, so the Vehicle can attack.
       if (perm.card.crew && sorcery && this.step === 'main1' && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
     }
@@ -527,6 +543,7 @@ export class Game {
       return targets === null || targets.length > 0;
     }
     if (e.when !== 'activated' || !e.activation) return false;
+    if (e.kind === 'transform' && (e.rider || !sorcery || !perm.card.back)) return false;
     const act = e.activation;
     if (act.tap && (perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')))) return false;
     if (act.cost.life >= p.life && act.cost.life > 0) return false;
@@ -564,7 +581,8 @@ export class Game {
         return true;
       }
       case 'cast':
-        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from);
+        if (action.faceDown) return this.castFaceDown(p, action.card);
+        return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from, !!action.mutate);
       case 'crew': {
         const perm = this.findPerm(action.permId);
         const crew = perm ? this.crewFor(p, perm) : null;
@@ -598,6 +616,16 @@ export class Game {
       }
       case 'activate':
         return yield* this.activate(p, action.permId, action.effect);
+      case 'turnFaceUp': {
+        const perm = p.battlefield.find((q) => q.id === action.permId);
+        const cost = perm ? this.faceUpCost(perm) : null;
+        const plan = cost ? this.planPayment(p, cost, 0, 0) : null;
+        if (!perm || !cost || !plan) return false;
+        this.commitPayment(p, plan);
+        p.life -= cost.life;
+        this.turnFaceUp(p, perm);
+        return true;
+      }
       default:
         return false;
     }
@@ -943,15 +971,19 @@ export class Game {
     if (!alt) cache.set(card, (alt = { ...card, isLegendary: false }));
     return alt;
   }
-  /** The card as it is cast: priced at its flashback cost, or with its overload cost and effects. */
-  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed'): SimCard {
+  /** The card as it is cast: priced at its flashback or mutate cost, or with its overload cost and effects. */
+  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed' | 'mutate' | 'faceDown'): SimCard {
     if (from === 'hand' || from === 'command') return card;
     let cache = this.altCards.get(from);
     if (!cache) this.altCards.set(from, (cache = new WeakMap()));
     let alt = cache.get(card);
     if (!alt) {
-      alt = from === 'crewed'
+      alt = from === 'faceDown'
+        ? faceDownCard(!!card.morph?.ward)
+        : from === 'crewed'
         ? { ...card, isCreature: true }
+        : from === 'mutate'
+        ? { ...card, cost: card.mutate?.cost ?? card.cost }
         : from === 'graveyard'
         ? { ...card, cost: card.flashback ?? card.cost }
         : { ...card, cost: card.overload?.cost ?? card.cost, effects: card.overload?.effects ?? card.effects };
@@ -960,11 +992,12 @@ export class Game {
     return alt;
   }
 
-  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' = 'hand'): Flow<boolean> {
-    const flashback = from === 'graveyard';
-    const zone = fromCommand ? p.commandZone : flashback ? p.graveyard : p.hand;
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' = 'hand', mutate = false): Flow<boolean> {
+    const flashback = from === 'graveyard' && !mutate;
+    const zone = fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : p.hand;
     if (!zone.includes(card) || (flashback && !card.flashback) || (from === 'overload' && !card.overload)) return false;
-    const priced = this.castCard(card, from);
+    if (mutate && (!card.mutate || (from === 'graveyard' && !card.mutate.fromGraveyard))) return false;
+    const priced = this.castCard(card, mutate ? 'mutate' : from);
     const permanent = !card.isInstant && !card.isSorcery;
     const effects = permanent ? [] : priced.effects.filter((e) => e.when === 'resolve');
 
@@ -978,6 +1011,15 @@ export class Game {
       attachTo = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: `Enchant which creature with ${card.name}?`, card, effect: null, candidates, cancellable: true });
       if (!attachTo || !candidates.some((c) => sameTarget(c, attachTo!))) return false;
       ward += this.wardCost(p, attachTo);
+    }
+    // Mutate: the spell targets a non-Human creature its caster owns (rule 702.140a).
+    let mutateOnto: number | undefined;
+    if (mutate) {
+      const candidates = this.mutateTargets(p).filter(affordable);
+      if (!candidates.length) return false;
+      const t = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: `Mutate ${card.name} onto which creature?`, card, effect: null, candidates, cancellable: true });
+      if (!t || t.kind !== 'perm' || !candidates.some((c) => sameTarget(c, t))) return false;
+      mutateOnto = t.id;
     }
     const targets: (Target | null)[] = [];
     for (const e of effects) {
@@ -1031,9 +1073,10 @@ export class Game {
       isCommander: p.deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
     };
     if (flashback) item.flashback = true;
+    if (mutateOnto !== undefined) item.mutateOnto = mutateOnto;
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
-    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : from === 'overload' ? ' with overload' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${card.name}${card.cost.x ? ` (X=${x})` : ''}${mutate ? ` for its mutate cost onto ${this.findPerm(mutateOnto ?? null)?.card.name ?? 'a creature'}` : ''}${fromCommand ? ' from the command zone' : flashback ? ' with flashback' : from === 'graveyard' ? ' from the graveyard' : from === 'overload' ? ' with overload' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
 
     // Storm: a copy for each spell cast before this one this turn (rule 702.40).
     if (card.storm) {
@@ -1123,8 +1166,10 @@ export class Game {
       this.removePerm(perm, 'graveyard');
       this.sacrificed(p);
     }
+    // Parts of the same ability that were read as separate effects (a transform after a loot).
+    const riders = perm.card.effects.filter((r) => r.kind === 'transform' && r.rider && r !== e && sameActivation(r, e));
     this.stack.push({
-      id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e], targets: [target], x: 0,
+      id: this.nextId++, kind: 'ability', controller: p.seat, card: perm.card, effects: [e, ...riders], targets: [target, ...riders.map(() => null)], x: 0,
       isCommander: false, sourceId: act.sacrifice || fodder === perm ? null : perm.id, attachTo: null, label: `${perm.card.name} ability`,
     });
     return true;
@@ -1251,6 +1296,19 @@ export class Game {
       return;
     }
 
+    if (item.kind === 'spell' && item.faceDown) {
+      this.putFaceDown(p, p, item.faceDown, item.card);
+      return;
+    }
+    if (item.kind === 'spell' && item.mutateOnto !== undefined) {
+      const host = this.findPerm(item.mutateOnto);
+      if (host && this.canMutateOnto(p, host)) {
+        yield* this.merge(p, host, item.card, item.isCommander);
+        return;
+      }
+      // With its target gone, a mutating creature spell just enters as a creature (rule 702.140b).
+      this.say(`${item.card.name} has nothing to mutate onto and enters as a creature.`);
+    }
     if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
       yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo);
       return;
@@ -1264,7 +1322,12 @@ export class Game {
         this.anyAttached = true;
       }
     }
+    this.aimedSeat = null;
+    this.resolvingCard = item.card;
     for (let i = 0; i < item.effects.length; i++) {
+      // "Its controller" in a later sentence means whoever controlled what this part hit (Reality Shift).
+      const aim = item.targets[i];
+      if (aim) this.aimedSeat = aim.kind === 'player' ? aim.seat : aim.kind === 'perm' ? this.findPerm(aim.id)?.seat ?? this.aimedSeat : this.stack.find((s) => s.id === aim.id)?.controller ?? this.aimedSeat;
       if (!legal[i] || !p.alive) continue;
       yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i]);
     }
@@ -1278,7 +1341,7 @@ export class Game {
   /** Where a spell goes after it resolves or is countered: exile if it was cast with flashback (rule 702.34). */
   private leaveStack(p: PlayerState, item: StackItem) {
     if (item.flashback) p.exile.push(item.card);
-    else this.toGraveyard(p, item.card, item.isCommander);
+    else this.toGraveyard(p, item.faceDown ?? item.card, item.isCommander);
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
@@ -1304,6 +1367,207 @@ export class Game {
     perm.blocked = false;
     p.battlefield.push(perm);
     this.say(`${p.name} takes control of ${perm.card.name}.`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Mutate (rules 702.140 and 721)
+  // -------------------------------------------------------------------------
+
+  /** May a mutating creature spell of `p`'s merge with this permanent? A non-Human creature they own and control. */
+  canMutateOnto(p: PlayerState, perm: Perm): boolean {
+    return perm.seat === p.seat && perm.owner === undefined && perm.card.isCreature && !perm.uncrewed
+      && !/\bHuman\b/.test(perm.card.typeLine) && p.battlefield.includes(perm) && this.canTarget(p, perm);
+  }
+
+  /** Creatures `p` could mutate onto. */
+  mutateTargets(p: PlayerState): Target[] {
+    return p.battlefield.filter((q) => this.canMutateOnto(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+  }
+
+  /**
+   * A mutating creature spell resolves: it joins the permanent on top or underneath. The permanent
+   * stays the same object, with its counters, damage and summoning sickness (rule 721.2), and has
+   * the top card's characteristics plus the abilities of every card in it. It doesn't enter the
+   * battlefield, so only "whenever this creature mutates" abilities trigger.
+   */
+  private *merge(p: PlayerState, host: Perm, card: SimCard, isCommander: boolean): Flow<void> {
+    const parts = host.parts ?? [{ real: host.token ? null : host.faceDown ?? host.front ?? host.printed ?? host.card, face: host.card, commander: host.isCommander }];
+    host.faceDown = undefined;
+    host.front = undefined;
+    const current = parts[0].face;
+    const pick = yield* this.choose(p, 'mutate', `Put ${card.name} on top of ${current.name} (its body and name), or underneath (only its abilities)?`, [
+      { label: `On top: ${card.name} ${card.power}/${card.toughness}`, card },
+      { label: `Underneath: stay ${current.name} ${current.power}/${current.toughness}`, card: current },
+    ], 1, 1);
+    const part = { real: card, face: card, commander: isCommander };
+    const onTop = (pick[0] ?? 0) === 0;
+    host.parts = onTop ? [part, ...parts] : [...parts, part];
+    host.printed = undefined;
+    host.card = mergedCard(host.parts.map((x) => x.face));
+    host.token = host.parts[0].real === null;
+    host.isCommander = host.parts.some((x) => x.commander);
+    for (const e of card.effects) {
+      this.kindsInGame.add(e.kind);
+      this.kindsInGame.add(`when:${e.when}`);
+    }
+    this.say(`${card.name} mutates ${onTop ? 'onto' : 'under'} ${current.name} (now ${host.card.name}, ${host.parts.length} cards).`);
+    const own = host.card.effects.filter((e) => e.when === 'mutates' && e.scope !== 'any');
+    if (own.length) this.trigger(p, host.card, host.id, own);
+    // "Whenever a creature you control mutates" (Essence Symbiote): "that creature" is the merged one.
+    for (const other of p.battlefield) {
+      const hits = other.card.effects.filter((e) => e.when === 'mutates' && e.scope === 'any');
+      if (hits.length) this.trigger(p, other.card, host.id, hits);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Face-down permanents: morph, disguise, manifest (rules 708, 702.37, 701.40)
+  // -------------------------------------------------------------------------
+
+  /** What turning this permanent face up costs: its morph cost, or its mana cost if it is a manifested creature card. Null if it can't be. */
+  faceUpCost(perm: Perm): ManaCost | null {
+    const real = perm.faceDown;
+    if (!real || perm.parts) return null;
+    if (real.morph) return real.morph.cost;
+    return real.isCreature ? real.cost : null;
+  }
+
+  /** Cast a morph or disguise card face down for {3}. A special way to cast it, so it uses the stack as a creature spell. */
+  private castFaceDown(p: PlayerState, card: SimCard): boolean {
+    const idx = p.hand.indexOf(card);
+    const priced = this.castCard(card, 'faceDown');
+    const plan = idx === -1 || !card.morph ? null : this.spellPlan(p, priced, false, 0, 0);
+    if (!plan) return false;
+    this.commitPayment(p, plan);
+    p.hand.splice(idx, 1);
+    p.castNames.add(card.name);
+    p.spellsThisTurn++;
+    this.stack.push({ id: this.nextId++, kind: 'spell', controller: p.seat, card: priced, faceDown: card, effects: [], targets: [], x: 0, isCommander: false, sourceId: null, attachTo: null, label: 'a face-down creature' });
+    this.say(`${p.name} casts a face-down creature.`);
+    for (const perm of p.battlefield) {
+      const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(priced, e.castFilter ?? 'any') && priced.cmc >= (e.minCmc ?? 0));
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+    }
+    for (const o of this.opponents(p)) {
+      for (const perm of o.battlefield) {
+        const hits = perm.card.effects.filter((e) => e.when === 'opponentCast' && matchesFilter(priced, e.castFilter ?? 'any'));
+        if (hits.length) this.trigger(o, perm.card, perm.id, hits);
+      }
+    }
+    return true;
+  }
+
+  /** Put `real` onto the battlefield face down under `p`'s control; `owner` owns it. It is a creature entering, but none of its own abilities exist. */
+  private putFaceDown(p: PlayerState, owner: PlayerState, real: SimCard, face: SimCard = faceDownCard(false)): Perm {
+    const perm = this.makePerm(p, face, false);
+    perm.faceDown = real;
+    if (owner !== p) perm.owner = owner.seat;
+    p.battlefield.push(perm);
+    this.creatureEntered(p, perm);
+    return perm;
+  }
+
+  /** Manifest the top card of `from`'s library under `p`'s control; with dread, the better of the top two. */
+  private *manifest(p: PlayerState, from: PlayerState, dread: boolean): Flow<void> {
+    if (!from.library.length || !p.alive) return;
+    let card = from.library.shift()!;
+    if (dread && from.library.length) {
+      const other = from.library.shift()!;
+      const options = [card, other];
+      const pick = yield* this.choose(p, 'manifest', 'Manifest dread: which card goes onto the battlefield face down? The other goes to the graveyard.', options.map((c) => ({ label: c.name, card: c })), 1, 1);
+      card = options[pick[0] ?? 0];
+      this.toGraveyard(from, options[1 - (pick[0] ?? 0)], false);
+    }
+    this.putFaceDown(p, from, card);
+    this.say(`${p.name} manifests ${from === p ? 'the top card of their library' : `the top card of ${from.name}'s library`}${dread ? ' (dread)' : ''}.`);
+  }
+
+  /** Turn a face-down permanent face up: it becomes its real card, keeping counters, damage and combat status (rule 708.8). */
+  private turnFaceUp(p: PlayerState, perm: Perm) {
+    const real = perm.faceDown;
+    if (!real) return;
+    perm.faceDown = undefined;
+    perm.card = real;
+    for (const e of real.effects) {
+      this.kindsInGame.add(e.kind);
+      this.kindsInGame.add(`when:${e.when}`);
+    }
+    if (real.morph?.counter) perm.counters++;
+    if (real.loyalty !== undefined) perm.loyalty = real.loyalty;
+    this.say(`${p.name} turns a face-down creature face up: it is ${real.name}.`);
+    const up = real.effects.filter((e) => e.when === 'turnedFaceUp');
+    if (up.length) this.trigger(p, real, perm.id, up);
+  }
+
+  // -------------------------------------------------------------------------
+  // Transforming double-faced cards (rules 701.28, 712)
+  // -------------------------------------------------------------------------
+
+  /** Does a transform's condition hold for `p`? ("If you control four or more Wizards", "seven or more cards in your graveyard".) */
+  private transformAllowed(p: PlayerState, e: Extract<Effect, { kind: 'transform' }>): boolean {
+    const c = e.cond;
+    if (!c) return true;
+    if (c.count === 'graveyard') return p.graveyard.length >= c.n;
+    // Tokens made by this engine carry no creature types, so they count toward any type.
+    const re = c.subtype ? new RegExp(`\\b${c.subtype}\\b`, 'i') : null;
+    return p.battlefield.filter((q) => q.card.isCreature && (!re || re.test(q.card.typeLine) || q.token)).length >= c.n;
+  }
+
+  private *transform(p: PlayerState, e: Extract<Effect, { kind: 'transform' }>, src: Perm | null): Flow<void> {
+    if (!this.transformAllowed(p, e)) return;
+    if (e.fromGraveyard) {
+      // "When this dies, return it to the battlefield transformed": only if it is still in its owner's graveyard.
+      const front = this.resolvingCard;
+      const owner = front?.back ? this.players.find((q) => q.alive && q.graveyard.includes(front)) : undefined;
+      if (!front || !owner) return;
+      owner.graveyard.splice(owner.graveyard.indexOf(front), 1);
+      this.say(`${front.name} returns to the battlefield transformed into ${front.back!.name}.`);
+      yield* this.enterTransformed(owner, front, !!e.tapped, false);
+      return;
+    }
+    if (!src || !this.players[src.seat].battlefield.includes(src) || src.parts || src.faceDown) return;
+    const front = src.front ?? src.card;
+    if (!front.back) return;
+    if (e.reenter) {
+      // Exiled and returned: a new object with no memory of the old one (rule 400.7), under its owner's control.
+      const controller = this.players[src.seat];
+      controller.battlefield.splice(controller.battlefield.indexOf(src), 1);
+      const owner = this.players[src.owner ?? src.seat];
+      const toBack = !src.front;
+      this.say(`${src.card.name} is exiled and returns ${toBack ? `transformed into ${front.back.name}` : `as ${front.name}`}.`);
+      if (toBack) yield* this.enterTransformed(owner, front, false, src.isCommander);
+      else yield* this.enter(owner, front, src.isCommander, 0, null);
+      return;
+    }
+    // Transforming in place keeps everything else about the permanent (rule 712.10).
+    const next = src.front ? src.front : front.back;
+    src.front = src.front ? undefined : front;
+    src.card = next;
+    src.landInfo = next.isLand ? next.land : undefined;
+    if (next.loyalty !== undefined) src.loyalty = next.loyalty;
+    for (const f of next.effects) {
+      this.kindsInGame.add(f.kind);
+      this.kindsInGame.add(`when:${f.when}`);
+    }
+    this.say(`${front.name} transforms into ${next.name}.`);
+  }
+
+  /** Put the back face of `front` onto the battlefield (it enters, so its enters abilities trigger). */
+  private *enterTransformed(p: PlayerState, front: SimCard, tapped: boolean, isCommander: boolean): Flow<void> {
+    const back = front.back!;
+    if (back.isLand && back.land) {
+      this.putLand(p, back, back.land, tapped);
+      const perm = p.battlefield[p.battlefield.length - 1];
+      perm.front = front;
+      perm.isCommander = isCommander;
+      return;
+    }
+    yield* this.enter(p, back, isCommander, 0, null);
+    const perm = p.battlefield.find((q) => q.card === back && !q.front);
+    if (perm) {
+      perm.front = front;
+      if (tapped) perm.tapped = true;
+    }
   }
 
   private makePerm(p: PlayerState, card: SimCard, token: boolean): Perm {
@@ -1488,6 +1752,18 @@ export class Game {
           }
         }
         if (hit.length) this.removePerms(hit, e.mode === 'exile' ? 'exile' : e.mode === 'bounce' ? 'hand' : 'graveyard');
+        break;
+      }
+      case 'transform':
+        yield* this.transform(p, e, src);
+        break;
+      case 'manifest': {
+        if (e.who === 'opponents') {
+          for (const o of this.opponents(p)) yield* this.manifest(p, o, !!e.dread);
+        } else {
+          const who = e.who === 'you' ? p : this.aimedSeat !== null ? this.players[this.aimedSeat] : null;
+          if (who?.alive) yield* this.manifest(who, who, !!e.dread);
+        }
         break;
       }
       case 'counter': {
@@ -1974,12 +2250,17 @@ export class Game {
       controller.battlefield.splice(idx, 1);
 
       // Tokens cease to exist once they leave the battlefield (rule 704.5d). A copy goes back to being its own card.
-      if (!perm.token && owner.alive) {
-        const card = perm.printed ?? perm.uncrewed ?? perm.card;
-        if (to === 'graveyard') owner.graveyard.push(card);
-        else if (to === 'exile') owner.exile.push(card);
-        else owner.hand.push(card);
-        if (perm.isCommander) this.pendingCommander.push({ seat: owner.seat, card, to });
+      // A merged permanent's cards all go to the same zone (rule 721.3).
+      if (owner.alive) {
+        const cards = perm.parts
+          ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
+          : perm.token ? [] : [{ card: perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+        for (const { card, commander } of cards) {
+          if (to === 'graveyard') owner.graveyard.push(card);
+          else if (to === 'exile') owner.exile.push(card);
+          else owner.hand.push(card);
+          if (commander) this.pendingCommander.push({ seat: owner.seat, card, to });
+        }
       }
       if (perm.card.isCreature && to === 'graveyard' && controller.alive) died.push({ perm, seat: controller.seat, worn });
     }
@@ -2384,7 +2665,7 @@ export class Game {
       } else this.loseLife(d.to, d.amount, p, 'combat');
       if (d.from.isCommander && !d.to.shielded) {
         // Commander damage counts per commander, whoever controls it now (rule 903.10a).
-        const key = `${d.from.owner ?? d.from.seat}:${d.from.card.name}`;
+        const key = `${d.from.owner ?? d.from.seat}:${commanderName(d.from)}`;
         d.to.commanderDamage.set(key, (d.to.commanderDamage.get(key) ?? 0) + d.amount);
       }
       hitPlayer.add(d.from);
@@ -2423,6 +2704,42 @@ export class Game {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The characteristics of a merged permanent: the top card's, with every card's abilities (rule 721.2a). */
+export function mergedCard(faces: SimCard[]): SimCard {
+  const [top, ...rest] = faces;
+  if (!rest.length) return top;
+  const effects = [...top.effects];
+  const keywords = [...top.keywords];
+  for (const f of rest) {
+    for (const e of f.effects) if (!effects.includes(e)) effects.push(e);
+    for (const k of f.keywords) if (!keywords.includes(k)) keywords.push(k);
+  }
+  return { ...top, effects, keywords, notes: [...top.notes, `Mutated over ${rest.map((f) => f.name).join(', ')}`] };
+}
+
+/** Commander damage is counted per commander card, whatever the permanent is called now. */
+export function commanderName(perm: Perm): string {
+  return perm.parts?.find((x) => x.commander)?.real?.name ?? perm.front?.name ?? perm.printed?.name ?? perm.card.name;
+}
+
+const FACE_DOWN: SimCard[] = [];
+/** A face-down permanent: a nameless, colorless 2/2 creature with no abilities (rule 708.2). Disguise adds ward {2}. */
+export function faceDownCard(ward: boolean): SimCard {
+  const i = ward ? 1 : 0;
+  FACE_DOWN[i] ??= {
+    name: 'Face-down creature', cost: { generic: 3, pips: [], x: 0, life: 0 }, cmc: 0, typeLine: 'Creature',
+    isLand: false, isCreature: true, isArtifact: false, isEnchantment: false, isPlaneswalker: false, isInstant: false, isSorcery: false,
+    isLegendary: false, isBasic: false, power: 2, toughness: 2, keywords: ward ? ['ward'] : [], effects: [], value: 2, modeled: true,
+    notes: ['Face down: a 2/2 with no name or abilities'],
+  };
+  return FACE_DOWN[i];
+}
+
+/** Two effects read from the same "cost: effect" line. */
+function sameActivation(a: Effect, b: Effect): boolean {
+  return !!a.activation && !!b.activation && a.activation.tap === b.activation.tap && JSON.stringify(a.activation.cost) === JSON.stringify(b.activation.cost);
+}
+
 export function isInstantSpeed(card: SimCard): boolean {
   return card.isInstant || card.keywords.includes('flash');
 }
@@ -2444,6 +2761,7 @@ export function matchesFilter(card: SimCard, filter: CastFilter): boolean {
     case 'instantSorcery': return card.isInstant || card.isSorcery;
     case 'artifact': return card.isArtifact;
     case 'enchantment': return card.isEnchantment;
+    case 'mutate': return !!card.mutate;
   }
 }
 

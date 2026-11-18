@@ -36,7 +36,7 @@ export function archidektToRaw(oc: any, uid?: string): RawCard {
     producedMana: produced.length ? produced : undefined,
     layout: oc.layout,
     loyalty: front.loyalty ?? oc.loyalty ?? null,
-    back: back ? { name: back.name, types: back.types ?? [], subTypes: back.subTypes ?? [], text: back.text ?? '' } : null,
+    back: back ? { name: back.name, types: back.types ?? [], superTypes: back.superTypes ?? [], subTypes: back.subTypes ?? [], text: back.text ?? '', power: back.power ?? null, toughness: back.toughness ?? null, loyalty: back.loyalty ?? null } : null,
     imageUrl: uid ? `https://cards.scryfall.io/normal/front/${uid[0]}/${uid[1]}/${uid}.jpg` : undefined,
   };
 }

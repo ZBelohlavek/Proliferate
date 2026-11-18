@@ -37,7 +37,7 @@ export interface RawCard {
   layout?: string;
   /** Printed loyalty of a planeswalker. */
   loyalty?: string | number | null;
-  back?: { name: string; types: string[]; subTypes: string[]; text: string } | null;
+  back?: { name: string; types: string[]; subTypes: string[]; text: string; superTypes?: string[]; power?: string | null; toughness?: string | null; loyalty?: string | number | null } | null;
   imageUrl?: string;
 }
 
@@ -387,7 +387,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   // --- Counters on self ----------------------------------------------------
-  m = line.match(new RegExp(`put ${NUM} \\+1\\/\\+1 counters? on (~|each creature you control|target creature you control|each other creature you control)`));
+  m = line.match(new RegExp(`put ${NUM} \\+1\\/\\+1 counters? on (~|each creature you control|target creature you control|each other creature you control|(?:it|that creature)(?=\.|,? and |$))`));
   if (m) {
     const n = num(m[1], 1);
     const all = /each/.test(m[2]);
@@ -437,6 +437,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   // --- Cost reduction ------------------------------------------------------
+  if ((m = line.match(/^each creature spell you cast costs \{(\d)\} less to cast if it has mutate/))) {
+    out.push({ body: { kind: 'costReduction', amount: parseInt(m[1], 10), filter: 'mutate' }, note: `Cost reduction {${m[1]}} (spells with mutate)` });
+  }
   m = line.match(/(\w+ )?(\w+ )?spells (?:you cast |of the chosen type )cost \{(\d)\} less/);
   if (m) {
     const phrase = (m[1] ?? '') + (m[2] ?? '');
@@ -497,11 +500,53 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'cheat' }, note: 'Put a creature from your hand onto the battlefield' });
   }
   if (/takes? an extra turn after this one/.test(line)) out.push({ body: { kind: 'extraTurn' }, note: 'Extra turn' });
+
+  // --- Transforming double-faced cards ---------------------------------------------
+  // "Activate only if ..." conditions aren't checked, so those transforms stay unread (Matzalantli, the Temples).
+  const transform = /activate only if/.test(fullLine) ? null : recogniseTransform(line);
+  if (transform) out.push(transform);
+
+  // --- Face-down creatures (manifest, manifest dread) ------------------------------
+  if ((m = line.match(/^(its controller|you|that player) manifests? (the top card of (?:your|their|that player's) library|dread)/))) {
+    const dread = m[2] === 'dread';
+    const who = m[1] === 'you' ? (/that player's library/.test(m[2]) ? 'opponents' as const : 'you' as const) : 'targetController' as const;
+    out.push({ body: { kind: 'manifest', who, ...(dread ? { dread } : {}) }, note: who === 'targetController' ? `Its controller gets a face-down 2/2 (manifest${dread ? ' dread' : ''})` : who === 'opponents' ? "Manifest the top card of each opponent's library (a face-down 2/2 for you)" : `Manifest${dread ? ' dread' : ' the top card of your library'} (a face-down 2/2)` });
+  } else if ((m = line.match(/^manifest (the top card of your library|dread)/))) {
+    const dread = m[1] === 'dread';
+    out.push({ body: { kind: 'manifest', who: 'you', ...(dread ? { dread } : {}) }, note: `Manifest${dread ? ' dread' : ' the top card of your library'} (a face-down 2/2)` });
+  }
+  // Mindleecher: the top card of each opponent's library, to play while it stays exiled. About a card each.
+  if (/^exile the top card of each opponent's library face down\. you may look at and play those cards/.test(fullLine) && /^exile the top card/.test(line)) {
+    out.push({ body: { kind: 'draw', n: 2 }, note: "Play the top card of each opponent's library (≈ draw 2)" });
+  }
   if (/you've cast another spell named ~ this game, you win the game/.test(line)) {
     out.push({ body: { kind: 'approach' }, note: 'Gain 7 life the first time, win the game the second' });
   }
 
   return out;
+}
+
+const BIG_NUMBERS: Record<string, number> = { eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, twenty: 20 };
+
+/** "Transform ~", "exile ~, then return it to the battlefield transformed", "when ~ dies, return it ... transformed". */
+function recogniseTransform(line: string): Found | null {
+  let cond: { count: 'creatures' | 'graveyard'; n: number; subtype?: string } | undefined;
+  const ifClause = line.match(/\bif (?:you control (\w+) or more (\w+)|there are (\w+) or more cards in your graveyard|you have (\w+) or more cards in your graveyard), /);
+  if (ifClause) {
+    const word = ifClause[1] ?? ifClause[3] ?? ifClause[4];
+    const n = BIG_NUMBERS[word] ?? num(word, 0);
+    if (n > 0) cond = ifClause[1] ? { count: 'creatures', n, ...(ifClause[2] !== 'creatures' ? { subtype: ifClause[2].replace(/s$/, '') } : {}) } : { count: 'graveyard', n };
+  }
+  const when = cond ? ` once you have ${cond.n} ${cond.count === 'graveyard' ? 'cards in your graveyard' : cond.subtype ? `${cond.subtype}s` : 'creatures'}` : '';
+  if (/(?:^|\bthen )(?:if [^,]+, )?(?:you may )?transform ~(?:, then untap it)?\.?$/.test(line)) {
+    return { body: { kind: 'transform', ...(cond ? { cond } : {}) }, note: `Transform${when}` };
+  }
+  if (/(?:^|, )exile ~, then return (?:it|him|her|~) to the battlefield transformed under (?:its owner's|his owner's|her owner's|your) control\.?$/.test(line) || /^exile this saga, then return it to the battlefield transformed under your control/.test(line)) {
+    return { body: { kind: 'transform', reenter: true, ...(cond ? { cond } : {}) }, note: `Exile it and return it transformed${when}` };
+  }
+  const back = line.match(/^return (?:it|~) to the battlefield (tapped and )?transformed under (?:its owner's|your) control\.?$/);
+  if (back) return { body: { kind: 'transform', fromGraveyard: true, ...(back[1] ? { tapped: true } : {}) }, note: `Returns to the battlefield transformed${back[1] ? ' and tapped' : ''}` };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +579,7 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
 
   if (/^whenever a land enters[^,]*, [^.]* damage to that land's controller/.test(l)) return { when: 'static', body: l };
   if ((m = l.match(/^whenever a land( you control)? enters[^,]*,\s*(.*)$/))) return { when: 'landfall', body: m[2] };
+  if ((m = l.match(/^(?:when|whenever) ~ is turned face up[^,]*,\s*(.*)$/))) return { when: 'turnedFaceUp', body: m[1] };
   if ((m = l.match(/^(when|whenever) ~ (enters|is turned face up)[^,]*,\s*(.*)$/))) return { when: 'resolve', body: m[3] };
   if ((m = l.match(/^whenever an opponent casts (?:an? |their )?([^,]*?)spell([^,]*),\s*(.*)$/))) {
     const what = m[1] + m[2];
@@ -543,8 +589,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^whenever you draw (a card|your (first|second|third) card each turn)[^,]*,\s*(.*)$/))) return { when: 'draw', body: m[3], oncePerTurn: m[2] ? true : undefined };
   if ((m = l.match(/^whenever (?:an|another) (artifact|enchantment)(?: you control)? enters(?: under your control| the battlefield under your control)?,\s*(.*)$/))) return { when: 'permEnters', castFilter: m[1] as CastFilter, body: m[2] };
   if ((m = l.match(/^whenever you gain life[^,]*,\s*(.*)$/))) return { when: 'gainLife', body: m[1] };
-  // Mutate is played as an ordinary creature, so "whenever this mutates" happens when it enters.
-  if ((m = l.match(/^whenever ~ mutates,\s*(.*)$/))) return { when: 'resolve', body: m[1], chance: 0.5 };
+  if ((m = l.match(/^whenever ~ mutates,\s*(.*)$/))) return { when: 'mutates', scope: 'self', body: m[1] };
+  if ((m = l.match(/^whenever a creature you control mutates,\s*(.*)$/))) return { when: 'mutates', scope: 'any', body: m[1] };
   if ((m = l.match(/^whenever an opponent draws a card[^,]*,\s*(.*)$/))) return { when: 'opponentDraw', body: m[1] };
   if ((m = l.match(/^whenever you sacrifice (a|an|another) (\w+ )?(permanent|creature|artifact|token)[^,]*,\s*(.*)$/))) return { when: 'sacrifice', body: m[4] };
   if ((m = l.match(/^whenever (equipped|enchanted) creature dies,\s*(.*)$/))) return { when: 'creatureDies', scope: 'attached', body: m[2] };
@@ -559,6 +605,7 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) attacks[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'self', body: m[2] };
   if ((m = l.match(/^whenever (you attack|one or more (?:\w+ )?\w+ you control attack)[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'oneOrMore', body: m[2] };
   if ((m = l.match(/^whenever (a|another) (\w+ )?(?:creature|\w+) you control attacks[^,]*,\s*(.*)$/))) return { when: 'attack', scope: 'any', body: m[3], nontoken: m[2] === 'nontoken ' || undefined };
+  if ((m = l.match(/^whenever you cast a creature spell, if it has mutate,\s*(.*)$/))) return { when: 'cast', castFilter: 'mutate', body: m[1] };
   if ((m = l.match(/^whenever you cast (an? |your )?([^,]*?)spell([^,]*),\s*(.*)$/))) {
     const what = m[2] + m[3];
     const castFilter: CastFilter = /noncreature/.test(what) ? 'noncreature' : /instant|sorcery/.test(what) ? 'instantSorcery' : /creature/.test(what) ? 'creature' : /artifact/.test(what) ? 'artifact' : /enchantment/.test(what) ? 'enchantment' : 'any';
@@ -679,7 +726,21 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Land: ${card.land.produces === 'any' ? 'any color' : card.land.produces.join('')}${card.land.tapped ? ' (enters tapped)' : ''}`);
     card.modeled = true;
   }
-  if (raw.back && raw.back.types.map((t) => t.toLowerCase()).includes('land') && !isLand) {
+  // Transforming cards (rule 712) are cast front face up; only modal double-faced cards can be played as their back.
+  const transforms = raw.layout === 'transform' || raw.layout === 'meld';
+  if (raw.back && transforms) {
+    const b = raw.back;
+    const backTypes = b.types.map((t) => t.toLowerCase());
+    // Some data sources leave out the back face's power and toughness: use the front's.
+    const missing = backTypes.includes('creature') && (b.power === undefined || b.power === null);
+    card.back = classifyCard({
+      name: b.name, manaCost: '', cmc: raw.cmc, types: b.types, superTypes: b.superTypes ?? raw.superTypes, subTypes: b.subTypes, text: b.text,
+      power: missing ? raw.power ?? '2' : b.power, toughness: missing ? raw.toughness ?? '2' : b.toughness, keywords: [],
+      colorIdentity: raw.colorIdentity, loyalty: b.loyalty ?? null, imageUrl: raw.imageUrl,
+    });
+    card.notes.push(`Transforms into ${b.name}${card.back.isLand ? ' (a land)' : card.back.isCreature ? ` (${card.back.power}/${card.back.toughness})` : ''}`);
+  }
+  if (raw.back && !transforms && raw.back.types.map((t) => t.toLowerCase()).includes('land') && !isLand) {
     const info = landInfo(raw.back, undefined, raw.colorIdentity);
     card.backLand = { ...info, tapped: info.tapped || /enters tapped/.test(raw.back.text.toLowerCase()), name: raw.back.name };
     card.notes.push(`Back face is a land (${raw.back.name})`);
@@ -706,6 +767,7 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   for (const rawLine of lines) {
+    const effectsBefore = card.effects.length;
     const bullet = rawLine.startsWith('•');
     const line = rawLine.replace(/^•\s*/, '');
     if (isLand && (/: add /.test(line) || /sacrifice ~[^:]*: search/.test(line))) continue;
@@ -719,7 +781,7 @@ export function classifyCard(raw: RawCard): SimCard {
     // "Unless that player pays": assume opponents pay some of the time.
     if ((ctx.when === 'opponentCast' || ctx.when === 'opponentDraw') && /unless (that player|they) pays?|that player may pay/.test(ctx.body)) ctx.chance = 0.6;
     // Intervening "if" clauses: we can't check the condition, so assume it holds half the time.
-    if (ctx.when !== 'resolve' && ctx.when !== 'static' && /^if [^,]+, /.test(ctx.body)) {
+    if (ctx.when !== 'resolve' && ctx.when !== 'static' && /^if [^,]+, /.test(ctx.body) && !/^if [^,]+, (?:you may )?transform ~/.test(ctx.body)) {
       ctx.chance = 0.5;
       ctx.body = ctx.body.replace(/^if [^,]+, /, '');
     }
@@ -796,6 +858,9 @@ export function classifyCard(raw: RawCard): SimCard {
       }
     }
     }
+    // "{T}: Draw a card ... then return him to the battlefield transformed": the transform rides along with the ability.
+    const added = card.effects.slice(effectsBefore);
+    if (added.length > 1) for (const e of added) if (e.kind === 'transform' && e.when === 'activated') e.rider = true;
   }
   settle();
   if (unread.length) card.unread = unread;
@@ -845,6 +910,17 @@ export function classifyCard(raw: RawCard): SimCard {
   if (flashback) {
     card.flashback = parseManaCost(flashback[1]);
     card.notes.push(`Flashback ${flashback[1].toUpperCase()}: cast again from your graveyard`);
+  }
+  const morph = isPermanent && text.match(/^(morph|megamorph|disguise) ((?:\{[^}]+\})+)/m);
+  if (morph) {
+    card.morph = { cost: parseManaCost(morph[2]), ...(morph[1] === 'megamorph' ? { counter: true } : {}), ...(morph[1] === 'disguise' ? { ward: true } : {}) };
+    card.notes.push(`${morph[1][0].toUpperCase()}${morph[1].slice(1)} ${morph[2].toUpperCase()}: may be cast face down as a 2/2 for {3}, then turned face up`);
+  }
+  const mutate = isCreature && text.match(/^mutate ((?:\{[^}]+\})+)/m);
+  if (mutate) {
+    card.mutate = { cost: parseManaCost(mutate[1]) };
+    if (/^you may cast ~ from your graveyard using its mutate ability/m.test(text)) card.mutate.fromGraveyard = true;
+    card.notes.push(`Mutate ${mutate[1].toUpperCase()}: merge with a non-Human creature you own${card.mutate.fromGraveyard ? ' (also from your graveyard)' : ''}`);
   }
   const crew = !isCreature && isPermanent && text.match(/^crew (\d+)/m);
   if (crew) {
@@ -932,7 +1008,7 @@ export function classifyCard(raw: RawCard): SimCard {
   if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
-  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew;
+  card.modeled = isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   card.value = cardValue(card);
@@ -949,7 +1025,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
-  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
+  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^you may cast ~ from your graveyard using its mutate ability|^(morph|megamorph|disguise) \{|^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (/^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
@@ -1000,7 +1076,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'upkeep': return 'Each turn: ';
     case 'attack': return 'On attack: ';
     case 'combatDamage': return 'On combat damage: ';
-    case 'cast': return `On casting ${ctx.castFilter === 'any' ? 'a spell' : ctx.castFilter + ' spells'}${ctx.minCmc ? ` (MV ${ctx.minCmc}+)` : ''}: `;
+    case 'cast': return `On casting ${ctx.castFilter === 'any' ? 'a spell' : ctx.castFilter === 'mutate' ? 'spells with mutate' : ctx.castFilter + ' spells'}${ctx.minCmc ? ` (MV ${ctx.minCmc}+)` : ''}: `;
     case 'creatureEnters': return 'When a creature enters: ';
     case 'creatureDies': return ctx.scope === 'self' ? 'When it dies: ' : ctx.scope === 'attached' ? 'When the creature wearing it dies: ' : ctx.scope === 'all' ? 'When any creature dies: ' : 'When a creature dies: ';
     case 'landfall': return 'Landfall: ';
@@ -1012,6 +1088,8 @@ function describeTrigger(ctx: LineContext): string {
     case 'gainLife': return 'When you gain life: ';
     case 'activated': return 'Activated: ';
     case 'loyalty': return `${(ctx.loyalty ?? 0) > 0 ? '+' : ''}${ctx.loyalty}: `;
+    case 'mutates': return ctx.scope === 'any' ? 'When a creature you control mutates: ' : 'When it mutates: ';
+    case 'turnedFaceUp': return 'When it is turned face up: ';
     default: return '';
   }
 }
@@ -1035,7 +1113,7 @@ export function cardValue(card: SimCard): number {
     if (kw.includes('indestructible') || kw.includes('hexproof')) v += 1.5;
   }
   for (const e of card.effects) {
-    const repeating = e.when !== 'resolve';
+    const repeating = e.when !== 'resolve' && e.when !== 'mutates';
     const mult = repeating ? 2.5 : 1;
     switch (e.kind) {
       case 'ramp': v += 2.5 * Math.max(e.lands, 1) + e.toHand; break;
@@ -1076,6 +1154,8 @@ export function cardValue(card: SimCard): number {
       case 'noMaxHand': v += 0.5; break;
       case 'winOnEmptyDraw': v += 2; break;
       case 'monarch': v += 4; break;
+      case 'manifest': v += e.who === 'targetController' ? -1 : 2 * mult; break;
+      case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
     }
   }
   return Math.max(v, card.cmc * 0.4);
