@@ -69,6 +69,8 @@ export interface Perm {
   front?: SimCard;
   /** Face down (morph, manifest, rule 708): the real card. `card` is then a nameless 2/2. */
   faceDown?: SimCard;
+  /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
+  heldBy?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;

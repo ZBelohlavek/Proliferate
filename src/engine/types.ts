@@ -67,6 +67,12 @@ export type Effect = EffectBody & {
   nontoken?: boolean;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
+  /** Cast triggers: only on the caster's first, second, ... spell of the turn ("their second spell each turn"). */
+  nth?: number;
+  /** Cast triggers: only during the caster's own turn, or only during someone else's ("during each opponent's turn"). */
+  turn?: 'own' | 'others';
+  /** Dies triggers: "this creature or another creature" also triggers on its own death. */
+  selfToo?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
   activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean };
 };
@@ -75,17 +81,19 @@ export type EffectBody =
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
   | { kind: 'mana'; amount: number; colors: Mana[] | 'any' }
   | { kind: 'costReduction'; amount: number; filter: CastFilter }
-  | { kind: 'treasure'; n: number }
+  /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
+  | { kind: 'treasure'; n: number; ritual?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all' }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean }
+  /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters' }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** "Other creatures you control": not the source itself. */ other?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
@@ -108,8 +116,13 @@ export type EffectBody =
   | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
-  /** Enters-the-battlefield abilities of your permanents trigger twice. */
-  | { kind: 'etbDoubler' }
+  /**
+   * Your permanents' triggered abilities trigger an additional time when the event is
+   * 'enters' (an artifact or creature entering: Panharmonicon, the default),
+   * 'permanentEnters' (any permanent: Elesh Norn, Yarok), 'attack' (a creature attacking: Isshin),
+   * 'dies' (a creature dying: Drivnod) or 'magecraft' (you casting an instant or sorcery: Veyran).
+   */
+  | { kind: 'etbDoubler'; event?: 'enters' | 'permanentEnters' | 'attack' | 'dies' | 'magecraft' }
   /** Creatures can't attack you unless their controller pays this much for each. */
   | { kind: 'attackTax'; amount: number }
   /** Each player can't cast more than one spell each turn. */
@@ -128,10 +141,11 @@ export type EffectBody =
   | { kind: 'graveyardHate' }
   /** Exile graveyards: every opponent's, or everyone's. */
   | { kind: 'exileGraveyards'; all: boolean }
-  /** Enters as a copy of a creature on the battlefield. */
-  | { kind: 'clone' }
+  /** Enters as a copy of a creature on the battlefield: any, only yours (Spark Double) or only an opponent's (Imposter Mech). */
+  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
-  | { kind: 'steal'; from: 'battlefield' | 'library' }
+  /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
+  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
