@@ -2467,7 +2467,8 @@ export class Game {
         break;
       }
       case 'recursion': {
-        const pool = this.recursionPool(p, e);
+        const limit = e.belowPower ? (src ? this.power(src) : 0) : Infinity;
+        const pool = this.recursionPool(p, e).filter(({ card }) => card.power < limit);
         if (!pool.length) break;
         const where = e.toBattlefield ? 'the battlefield' : e.toTop ? 'the top of your library' : 'your hand';
         const elsewhere = pool.some((c) => c.owner !== p);
@@ -2491,6 +2492,7 @@ export class Game {
             }
             const perm = yield* this.enter(p, card, owner === p && p.deck.commanders.includes(card), 0, null, owner);
             if (perm && e.tapped) perm.tapped = true;
+            if (perm && e.finality) this.finality.add(perm.id);
           } else {
             if (!e.all) this.say(`${p.name} returns ${card.name}${from} to their hand.`);
             // A card always goes to its owner's hand.
@@ -2670,6 +2672,16 @@ export class Game {
         if (who?.alive) this.setMonarch(who);
         break;
       }
+      case 'exchangeLife': {
+        // "You may": only worth it with an opponent above you on life.
+        const foe = this.opponents(p).filter((o) => o.alive).sort((a, b) => b.life - a.life)[0];
+        if (!foe || foe.life <= p.life) break;
+        const [mine, theirs] = [p.life, foe.life];
+        p.life = theirs;
+        foe.life = mine;
+        this.say(`${p.name} exchanges life totals with ${foe.name}: ${p.name} goes to ${theirs}, ${foe.name} to ${mine}.`);
+        break;
+      }
       case 'extraTurn':
         this.extraTurns.push(p.seat);
         this.say(`${p.name} will take an extra turn.`);
@@ -2800,6 +2812,22 @@ export class Game {
         const etb = original.card.effects.filter((f) => f.when === 'resolve');
         if (etb.length) this.trigger(p, original.card, copy.id, etb);
         this.creatureEntered(p, copy);
+        break;
+      }
+      case 'copyPermanent': {
+        if (e.monarch && this.monarch !== p.seat) break;
+        const pool = this.alivePlayers().flatMap((o) => o.battlefield).filter((q) => (q.card.isArtifact || q.card.isEnchantment) && !q.card.isLegendary && !q.card.isLand && q !== src && q.card.name !== src?.card.name);
+        if (!pool.length) break;
+        pool.sort((a, b) => b.card.value - a.card.value);
+        const [pick] = pool.length === 1 ? [0] : yield* this.choose(p, 'clone', `${src?.card.name ?? 'This'}: copy which permanent?`, pool.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 0, 1);
+        if (pick === undefined) break;
+        const original = pool[pick];
+        const copy = this.makePerm(p, original.card, true);
+        p.battlefield.push(copy);
+        this.say(`${p.name} makes a token copy of ${original.card.name}.`);
+        const etb = original.card.effects.filter((f) => f.when === 'resolve');
+        if (etb.length) this.trigger(p, original.card, copy.id, etb);
+        if (copy.card.isCreature) this.creatureEntered(p, copy);
         break;
       }
       // Static effects (mana, anthems, cost reduction, attachments) do nothing on resolution.
