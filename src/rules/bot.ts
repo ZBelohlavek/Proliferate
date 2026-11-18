@@ -1110,7 +1110,9 @@ export class Bot implements Agent {
         total += hitDamage(g, a);
         if (!blockers.some((b) => g.canBlock(b, a))) unblockable += hitDamage(g, a);
       }
-      const score = this.attackScore(g, o, blockers, unblockable, total) + this.rng.next() * 8;
+      const tax = g.attackTax(o);
+      const payable = tax ? Math.min(candidates.length, Math.floor(g.availableMana(p) / tax)) : candidates.length;
+      const score = this.attackScore(g, o, blockers, unblockable * (payable / candidates.length), total * (payable / candidates.length)) - (candidates.length - payable) * 4 + this.rng.next() * 8;
       if (score > mainScore) {
         main = o;
         mainScore = score;
@@ -1134,8 +1136,12 @@ export class Bot implements Agent {
     const totalDamage = candidates.reduce((s, a) => s + hitDamage(g, a), 0);
     const order = [main, ...opps.filter((o) => o !== main).sort((a, b) => a.life - b.life)];
     const out: AttackDeclaration[] = [];
+    // Attack taxes (Propaganda, Ghostly Prison) are paid per creature; one we can't pay for stays home, so send it elsewhere.
+    let budget = g.availableMana(p);
     for (const a of candidates) {
       for (const o of order) {
+        const tax = g.attackTax(o);
+        if (tax > budget) continue;
         const isMain = o === main;
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
         // A lethal-looking alpha strike, or so many attackers that most get through.
@@ -1148,6 +1154,7 @@ export class Bot implements Agent {
         if (!go && isMain && this.rng.chance(0.1 * this.aggression)) go = true;
         if (go) {
           out.push({ attacker: a.id, defender: o.seat });
+          budget -= tax;
           break;
         }
       }
