@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { commanderName, counterMatches, isAura, isInstantSpeed, removalMatches, type Game } from './game';
+import { commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -281,7 +281,7 @@ export class Bot implements Agent {
       if (level) return pick(level);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       // Before combat: haste and evasion abilities.
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun'))));
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate'))));
     }
 
     // Combat tricks once blockers are known, then abilities that save or pump a creature in the fight.
@@ -771,6 +771,11 @@ export class Bot implements Agent {
     return actions.find((a) => {
       if (a.type !== 'activate' || a.effect.kind === 'equip') return false;
       const perm = g.findPerm(a.permId);
+      // Ygra's Food: our own small creatures and tokens become counters on Ygra and life, at the end of the turn before ours.
+      if (a.effect === FOOD) {
+        if (!perm || perm.isCommander || (!perm.token && perm.card.value >= 2.5) || g.activeSeat === p.seat) return false;
+        return p.battlefield.some((q) => q.card.effects.some((e) => e.kind === 'foodCreatures')) && p.battlefield.filter((q) => q.card.isCreature).length > 2;
+      }
       if (!perm || (!a.effect.activation?.tap && perm.activations >= 3)) return false;
       const e = a.effect;
       // Paying life: only while comfortably healthy.
@@ -786,6 +791,10 @@ export class Bot implements Agent {
       switch (e.kind) {
         case 'draw': return p.library.length > 8 || winsOnEmptyDraw(p);
         case 'rollDice': return true;
+        // Sigurd's boast: a lore counter is a Saga chapter now and a +1/+1 counter.
+        case 'lore': return true;
+        // Zur: before combat, an enchantment worth at least a 3/3 body.
+        case 'animate': return g.step === 'main1' && g.activeSeat === p.seat && (g.targetCandidates(p, e, perm) ?? []).some((t) => t.kind === 'perm' && (g.findPerm(t.id)?.card.cmc ?? 0) >= 3);
         case 'gainLife': return p.life < 30 && g.activeSeat !== p.seat;
         // Tinybones: only when someone has an empty hand.
         case 'drain': return !e.emptyHand || g.opponents(p).some((o) => o.hand.length === 0);
@@ -886,6 +895,11 @@ export class Bot implements Agent {
     const asTarget = (perm: Perm | null | undefined): Target | null => (perm ? { kind: 'perm', id: perm.id } : null);
     const bestOf = (list: Perm[], score: (q: Perm) => number) => (list.length ? list.reduce((a, b) => (score(b) > score(a) ? b : a)) : null);
 
+    // Curses: the opponent it hurts most.
+    if ((e === null && d.card.curse) || e?.kind === 'passCurse') {
+      const seat = this.curseVictim(g, p, d.card, d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : [])));
+      return seat === null ? d.candidates[0] : { kind: 'player', seat };
+    }
     // Aura spells and Equipment: our best creature.
     if (e === null && d.card.effects.some((f) => f.kind === 'equip' && (f.steal || f.lock))) {
       const theirs = perms.filter((q) => q.seat !== p.seat);
@@ -957,6 +971,19 @@ export class Bot implements Agent {
         const best = (seat: number) => Math.max(0, ...g.players[seat].battlefield.filter((q) => q.card.isCreature).map((q) => threat(g, q)));
         return seats.length ? { kind: 'player', seat: seats.reduce((a, b) => (best(b) > best(a) ? b : a)) } : d.candidates[0];
       }
+      case 'lore':
+        // The Saga closest to its last chapter, so its best chapter comes sooner.
+        return asTarget(bestOf(perms, (q) => q.lore ?? 0)) ?? d.candidates[0];
+      case 'blight': {
+        // Ultima: cut off an opponent's colors, best of all a land that taps for several. Our own lands only if nothing else.
+        const theirs = perms.filter((q) => q.seat !== p.seat);
+        const colors = (q: Perm) => (q.landInfo?.produces === 'any' ? 5 : (q.landInfo?.produces ?? []).filter((m) => m !== 'C').length);
+        const pool = theirs.length ? theirs : perms;
+        return asTarget(bestOf(pool, (q) => colors(q) * 2 + (q.card.isBasic ? 0 : 1) + (q.unlocked && !q.unlocked.isBasic ? 1 : 0) - (q.seat === p.seat ? 10 : 0))) ?? d.candidates[0];
+      }
+      case 'animate':
+        // Zur: the biggest enchantment we have.
+        return asTarget(bestOf(mine, (q) => q.card.cmc)) ?? d.candidates[0];
       case 'damagePlayer': {
         const amount = e.n === -1 ? 3 : e.n;
         const seat = this.playerToBurn(g, p, d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : [])), amount);
@@ -965,6 +992,19 @@ export class Bot implements Agent {
       default:
         return d.candidates[0];
     }
+  }
+
+  /**
+   * Who to curse. Curses that reward attacking go on the opponent the table attacks most (the weakest board);
+   * the rest on the leader (the biggest board and life total).
+   */
+  private curseVictim(g: Game, p: PlayerState, card: SimCard, seats: number[]): number | null {
+    const opps = seats.map((s) => g.players[s]).filter((o) => o.alive && o !== p);
+    if (!opps.length) return null;
+    const onAttack = (card.curse ?? []).some((c) => c.on === 'attacked' || c.act === 'hospitality');
+    const already = (o: PlayerState) => g.cursesOn(o).filter((q) => q.card.name === card.name).length;
+    const score = (o: PlayerState) => (onAttack ? -boardThreat(g, o, true) : boardThreat(g, o) * 0.5 + o.life * 0.3) - already(o) * 5;
+    return opps.reduce((a, b) => (score(b) > score(a) ? b : a)).seat;
   }
 
   /** Blinking `perm` now: its enters abilities, less the attack it loses to summoning sickness before our combat. */
@@ -1029,7 +1069,7 @@ export class Bot implements Agent {
         score = 50;
       } else if (t.kind === 'perm') {
         const perm = g.findPerm(t.id);
-        if (!perm || perm.seat === p.seat || !removalMatches(e.target, perm.card)) continue;
+        if (!perm || perm.seat === p.seat || !g.removable(e.target, perm)) continue;
         if (e.mode === 'destroy' && g.hasKw(perm, 'indestructible')) continue;
         if (e.mode === 'damage' && amount < g.toughness(perm) - perm.damage) continue;
         // -N/-N kills through indestructible; damage doesn't.
@@ -1037,6 +1077,8 @@ export class Bot implements Agent {
         if (e.mode === 'fight' && (!fighter || (g.power(fighter) < g.toughness(perm) - perm.damage && !g.hasKw(fighter, 'deathtouch')))) continue;
         const leader = boardThreat(g, g.players[perm.seat]) > 15 ? 1.2 : 1;
         score = threat(g, perm) * leader;
+        // Fblthp shuffles itself away when targeted: the spell would be wasted.
+        if (perm.card.effects.some((f) => f.kind === 'shuffleWhenTargeted')) score *= 0.2;
         if (g.hasKw(perm, 'ward')) score *= 0.6;
         if (e.mode === 'bounce') score *= perm.token ? 1.3 : 0.7;
       } else continue;
@@ -1263,6 +1305,17 @@ export class Bot implements Agent {
         // Paying for escape: our least useful cards. Graveyard hate: their best.
         const own = (i: number) => p.graveyard.includes(card(i));
         return top((i) => (own(i) ? -card(i).value - (card(i).flashback || card(i).graveyard ? 5 : 0) : card(i).value), d.max);
+      }
+      case 'torment': {
+        // Torment of Scarabs: lose the life while healthy, else give up the least useful card or permanent.
+        const lands = p.hand.filter((c) => c.isLand).length;
+        return top((i) => {
+          const o = d.options[i];
+          const q = perm(i);
+          if (q) return q.token ? 2 - threat(g, q) * 0.3 : -threat(g, q);
+          if (o.card) return -this.cardScore(g, p, o.card, lands) * 0.3 + (o.card.isLand && lands >= 2 ? 2 : 0);
+          return p.life >= 25 ? 3 : p.life >= 12 ? 0 : -20;
+        }, 1);
       }
       case 'sacrifice':
         // Treasures first, then tokens and the least useful permanents; lands only when there are plenty.
