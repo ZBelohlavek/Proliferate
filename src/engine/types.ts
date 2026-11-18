@@ -31,11 +31,19 @@ export type Trigger =
   | 'creatureEnters' // a creature enters under your control
   | 'creatureDies' // a creature you control dies
   | 'landfall' // a land enters under your control
+  | 'opponentCast' // an opponent casts a spell (see castFilter)
+  | 'opponentDraw' // an opponent draws a card
+  | 'sacrifice' // you sacrifice a permanent
+  | 'draw' // you draw a card
+  | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
+  | 'gainLife' // you gain life
   | 'activated' // activated ability, paid for with spare mana
+  | 'loyalty' // planeswalker loyalty ability (see Effect.loyalty)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
-export type TriggerScope = 'self' | 'any' | 'oneOrMore';
+/** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. */
+export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all';
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment';
 
@@ -51,10 +59,14 @@ export type Effect = EffectBody & {
   minCmc?: number;
   /** Conditional ("if ...") triggers: probability the condition holds. */
   chance?: number;
+  /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
+  loyalty?: number;
+  /** Creature-enters triggers that only watch nontoken creatures. */
+  nontoken?: boolean;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
-  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean };
+  activation?: { cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean };
 };
 
 export type EffectBody =
@@ -64,22 +76,76 @@ export type EffectBody =
   | { kind: 'treasure'; n: number }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland'; mode: RemovalMode; amount: number; oneSided: boolean }
+  /** anyTarget: damage that can also be aimed at a player ("any target"). */
+  /** each: an edict that hits every opponent, or every player, instead of one target. */
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all' }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
-  | { kind: 'anthem'; p: number; t: number }
-  | { kind: 'overrun'; p: number; t: number; trample: boolean }
-  | { kind: 'pump'; p: number; t: number; protect: boolean }
-  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean }
-  | { kind: 'protect' }
+  /** keywords: "creatures you control have lifelink". */
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean }
+  /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
+  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
+  /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[] }
+  /** cost: the equip cost of an Equipment, when the text gives one. */
+  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean }
+  /** all: every permanent you control. player: you can't lose life either, until your next turn. */
+  | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   | { kind: 'drain'; n: number; gain: number }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
-  | { kind: 'tutor' }
-  | { kind: 'recursion'; n: number; toBattlefield: boolean }
-  | { kind: 'counters'; n: number; all: boolean };
+  /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
+  | { kind: 'loseLife'; n: number }
+  /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
+  | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
+  /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: 'any' | 'artifact' | 'enchantment' | 'instantSorcery'; toTop?: boolean }
+  /** proliferate: only creatures that already have a counter. */
+  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean }
+  /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
+  | { kind: 'doubler'; tokens: boolean; counters: boolean }
+  /** Enters-the-battlefield abilities of your permanents trigger twice. */
+  | { kind: 'etbDoubler' }
+  /** Creatures can't attack you unless their controller pays this much for each. */
+  | { kind: 'attackTax'; amount: number }
+  /** Each player can't cast more than one spell each turn. */
+  | { kind: 'spellLimit' }
+  /** Spells cost more: your opponents' (or everyone's, with `all`), optionally only noncreature spells. */
+  | { kind: 'spellTax'; amount: number; filter: 'any' | 'noncreature'; all?: boolean }
+  /** Ankh of Mishra, Zo-Zu: a land entering costs its controller life. */
+  | { kind: 'landPunish'; n: number }
+  /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
+  | { kind: 'toughnessMatters'; defenders: boolean; /** Only your creatures. */ yours?: boolean }
+  /** Reveal from the top of your library until a nonland permanent card, and put it onto the battlefield. */
+  | { kind: 'digPermanent' }
+  /** Opponents can't cast their commanders from the command zone. */
+  | { kind: 'commandLock' }
+  /** Cards that would go to a graveyard are exiled instead. */
+  | { kind: 'graveyardHate' }
+  /** Exile graveyards: every opponent's, or everyone's. */
+  | { kind: 'exileGraveyards'; all: boolean }
+  /** Enters as a copy of a creature on the battlefield. */
+  | { kind: 'clone' }
+  /** Take a creature: one on the battlefield, or the best in an opponent's library. */
+  | { kind: 'steal'; from: 'battlefield' | 'library' }
+  /** Put a creature card from your hand onto the battlefield. */
+  | { kind: 'cheat' }
+  | { kind: 'extraTurn' }
+  /** Look at the top n cards and keep or bin each. Surveil puts the rest in the graveyard, scry on the bottom. */
+  | { kind: 'scry'; n: number; surveil: boolean }
+  /** Put cards from the top of a library into the graveyard. n: -1 = X, -2 = half the library. */
+  | { kind: 'mill'; n: number; who: 'target' | 'opponents' | 'all' | 'you' }
+  | { kind: 'discard'; n: number; who: 'target' | 'opponents' }
+  /** You have no maximum hand size. */
+  | { kind: 'noMaxHand' }
+  /** Laboratory Maniac: drawing from an empty library wins the game instead. */
+  | { kind: 'winOnEmptyDraw' }
+  /** You become the monarch: draw a card at each of your end steps until someone takes it by combat damage. */
+  | { kind: 'monarch' }
+  /** Approach of the Second Sun: gain 7 the first time, win the second. */
+  | { kind: 'approach' };
 
 export type EffectKind = EffectBody['kind'];
 
@@ -109,6 +175,34 @@ export interface SimCard {
   land?: LandInfo;
   /** X-cost creature that enters with X +1/+1 counters (Hangarback Walker, Stonecoil Serpent). */
   entersWithX?: boolean;
+  /** Planeswalkers: loyalty counters it enters with. */
+  loyalty?: number;
+  /** Doesn't untap during its controller's untap step (Basalt Monolith, Mana Vault). */
+  noUntap?: boolean;
+  /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */
+  freeWithCommander?: boolean;
+  /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
+  cycling?: { cost: ManaCost; land?: boolean };
+  /** Overload: for this cost the spell hits everything it could target instead of one target. */
+  overload?: { cost: ManaCost; effects: Effect[] };
+  /** Storm: copied for each spell cast before it this turn. */
+  storm?: boolean;
+  /** Power (and toughness, if `toughness`) equal to a count, e.g. cards in your hand. */
+  scales?: { by: 'hand' | 'graveyard' | 'oppGraveyards' | 'oneGraveyard' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'; toughness: boolean };
+  /** Vehicle: tap creatures with this much total power to make it a creature until end of turn. */
+  crew?: number;
+  /** Enters tapped with this many stun counters (each one stops an untap). */
+  stun?: number;
+  /** Flashback: may be cast from the graveyard for this cost, then exiled. */
+  flashback?: ManaCost;
+  /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */
+  extraCost?: { sacrifice?: 'creature' | 'artifact' | 'artifactOrCreature'; discard?: number; either?: boolean };
+  /** A nonland permanent that enters tapped. */
+  entersTapped?: boolean;
+  /** X is paid in life instead of mana (Toxic Deluge). */
+  xFromLife?: boolean;
+  /** Costs {amount} less for each of something (affinity, improvise, convoke, "for each creature on the battlefield"). */
+  discount?: { per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'; amount: number };
   /** Modal double-faced card whose back is a land. */
   backLand?: LandInfo & { name: string };
   /** Rough "how good is this card" score used by the AI. */
@@ -117,6 +211,8 @@ export interface SimCard {
   modeled: boolean;
   /** Human-readable interpretation, shown on the deck page. */
   notes: string[];
+  /** Lines of rules text the classifier found nothing in (lower case, card name as ~). */
+  unread?: string[];
   imageUrl?: string;
 }
 

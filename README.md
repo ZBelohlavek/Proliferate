@@ -1,20 +1,26 @@
 # Proliferate
 
-Import your Commander decks from [Archidekt](https://archidekt.com), then let them play each other again and again under the full Magic rules to see how they really compare. Every game is played by [Forge](https://github.com/Card-Forge/forge), the open-source Magic rules engine with ~33,000 scripted cards and its own AI.
+Import your Commander decks from [Archidekt](https://archidekt.com), play them yourself against bots, and let them play each other again and again to see how they really compare.
+
+Two engines play the games:
+
+- **Proliferate's own engine** runs in the browser. It has the real turn structure, priority, the stack, combat and the Commander rules, and its own bot AI. You can sit at the table yourself, and it simulates thousands of games a minute. It reads card text approximately.
+- **[Forge](https://github.com/Card-Forge/forge)**, the open-source Magic rules engine with ~33,000 scripted cards and its own AI, plays bot-versus-bot games under the full rules on your own computer.
 
 - **Import**: link your Archidekt account (lists all your public decks and syncs ones you've changed), paste a deck link, or upload/paste a text decklist.
-- **Simulate** balanced random pods for as long as you like — until you stop, for a set time, or a set number of games. Several Forge games run in parallel.
+- **Play** one of your decks against 1–5 bots: click cards to cast them, declare attackers and blockers, respond on the stack.
+- **Simulate** balanced random pods for as long as you like — until you stop, for a set time, or a set number of games — on either engine. Results are kept separately per engine.
 - **Leaderboard**: strength rating, win rate with confidence range, average place, how each deck kills, commander cast turn, average mulligans — overall or by player count (2–6).
 - **Compare** up to six decks side by side, including deck makeup and bracket.
 - **Deck report**: estimated **Commander Bracket** with reasons, and **card performance** — which cards pull their weight.
 - **Playstyle**: answer an endless stream of real board-state questions; your answers tune a **Forge AI personality** so your decks can be piloted your way.
-- **Watch a game**: play-by-play of the latest Forge game.
+- **Watch a game**: play-by-play of a fresh game on the built-in engine, or of the latest Forge game.
 
 Decks and results are saved in your browser; simulations run on your own computer.
 
 ## Running it
 
-Requires [Node.js](https://nodejs.org) 20+ and Java 17+ ([Adoptium](https://adoptium.net) is fine).
+Requires [Node.js](https://nodejs.org) 20+. Forge also needs Java 17+ ([Adoptium](https://adoptium.net) is fine); playing against bots and the built-in simulator work without it, so you can skip `setup:forge`.
 
 ```bash
 npm install
@@ -31,7 +37,38 @@ npm run dev
 | `npm test` | Run the unit tests |
 | `npm run build` | Type-check and build |
 
-## How simulations work
+## Proliferate's own engine
+
+`src/rules/` is a rules engine and bot AI written for this app.
+
+**The engine** (`game.ts`) follows the Comprehensive Rules for everything it models, with rule numbers in the comments:
+
+- Turn structure: untap, upkeep, draw, main, beginning of combat, declare attackers, declare blockers, combat damage (with a separate first-strike step), end of combat, second main, end step, cleanup.
+- Priority and the stack: players get priority in turn order; spells, activated abilities and triggered abilities go on the stack and can be responded to; a spell whose targets have all become illegal doesn't resolve.
+- Combat: each creature can attack a different opponent, defenders choose blocks, and flying, reach, menace, first strike, double strike, trample, deathtouch, lifelink, vigilance, haste, defender and indestructible work as written.
+- State-based actions: life, lethal and deathtouch damage, zero toughness, drawing from an empty library, the legend rule, Auras with nothing to enchant, tokens leaving the battlefield.
+- Commander: 40 life, the command zone, commander tax, the choice to return a commander to the command zone, 21 commander damage, the free first mulligan and London mulligans, players leaving a multiplayer game.
+
+The engine never decides anything. It is a generator that yields a **decision** (what to do with priority, which target, which attackers, which blockers, what to discard…) and waits for the answer, so a person and bots can share a table (`session.ts`).
+
+**The bot** (`bot.ts`) answers every decision from the public board and its own hand: mulligans, land choice, what to cast and when to hold mana, removal and counterspell targets, combat tricks, attacks split across opponents, blocks and chump blocks.
+
+**What a card does** comes from the classifier (`src/engine/classify.ts`), which matches oracle text against patterns for common Commander effects: ramp, rituals and Treasure, card draw, removal, wipes, counterspells, tokens, anthems, pump spells, Auras and Equipment, drain, tutors, reanimation, cloning, taking control, extra turns, sacrifice outlets, and rule-changing permanents (token and counter doublers, attack taxes, Rule of Law, Rest in Peace, Panharmonicon, extra land drops). Triggers are read for casting, attacking, dealing damage, entering, dying, sacrificing, landfall, your upkeep and end step, and for opponents casting spells or drawing cards. Hover a card at the table to see how it plays.
+
+On a sample of 167 widely played Commander cards (`tests/staples.ts`) all but four are read. Real decks have a much longer tail of unusual text: across 66 real Commander decks (2,373 different nonland cards), 51% of the nonland cards are read in full, 34% in part, and 15% not at all. Hovering a card lists the lines that were **not read**. Decks are classified when they are imported, so re-import a deck to pick up improvements to the classifier. Known gaps:
+
+- Text the classifier doesn't recognise does nothing; a card with no recognised text is marked **no effect**. A card can also be read in part, for example a creature that keeps its body and one of its two abilities.
+- Mana is paid automatically, and mana doesn't float between spells. Ritual mana is kept as Treasures.
+- Planeswalkers use one loyalty ability a turn and leave at zero loyalty, but they can't be attacked or damaged, and ultimates that make emblems aren't read.
+- Tribal wording ("whenever a Dragon you control attacks") counts every creature you control. A stolen creature stays stolen even if the Aura that took it leaves. An attack tax is paid automatically when the attacker can afford it.
+- Cycling, flashback, overload and storm are played by their rules. Power and toughness that count something are read for the common counts (cards in hand, graveyards, artifacts, creatures or lands you control); a count of one creature type counts every creature.
+- Vehicles can be crewed in your first main phase only. Stun counters, spell taxes (Grand Arbiter, Thalia), Ankh of Mishra effects and toughness-as-damage (Arcades, Doran) are played. Kicker is never paid, votes always go to the last option, and mutate triggers happen about half the time.
+- Not yet read: ninjutsu, mutate's merging (mutate creatures are cast as ordinary creatures), Sagas, Classes, goad, the Ring, energy, cast-from-exile and copy effects, alternative costs such as exiling a card from hand, and redirecting targets.
+- "If" conditions it can't read are treated as true about half the time; ward costs {2}.
+
+That makes the built-in simulator a quick estimate. Forge remains the reference for final numbers.
+
+## How Forge simulations work
 
 The dev server converts each deck to a Forge `.dck` file (checking every card against Forge's card list) and runs a pool of `java -jar forge.jar sim … -f commander` processes on balanced random pods. Each process can play several games back to back (`-n`) to skip Forge's ~8-second start-up, with a per-game time limit (`-c`, "Draw after") and an AI personality per player (`-a`). Each game log is parsed for finishing order, cause of death and killer, commander cast round, mulligans and every card cast, and folded into the statistics.
 
@@ -67,9 +104,10 @@ The estimate follows the official [Commander Brackets](https://magic.wizards.com
 
 ```
 src/
-  engine/     card classifier and the internal board engine used for quiz board states
+  rules/      Proliferate's own rules engine, bot AI and play sessions
+  engine/     card classifier, plus the older board engine used for quiz board states
   import/     Archidekt + text/Scryfall importers, deck search
-  sim/        Forge client, pod selection, run limits, statistics
+  sim/        Forge client, built-in simulator (Web Workers), pod selection, run limits, statistics
   analysis/   bracket estimate, card performance, deck composition
   ai/         Forge personality learning and quiz scenarios
   ui/         React components

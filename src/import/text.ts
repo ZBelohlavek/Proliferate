@@ -80,6 +80,7 @@ export function scryfallToRaw(card: any): RawCard {
     colorIdentity: (card.color_identity ?? []) as Color[],
     producedMana: card.type_line?.includes('Land') ? ((card.produced_mana ?? []) as Mana[]) : undefined,
     layout: card.layout,
+    loyalty: front.loyalty ?? card.loyalty ?? null,
     back: back && bt ? { name: back.name, types: bt.types, subTypes: bt.subTypes, text: back.oracle_text ?? '' } : null,
     imageUrl: card.image_uris?.normal ?? front.image_uris?.normal,
   };

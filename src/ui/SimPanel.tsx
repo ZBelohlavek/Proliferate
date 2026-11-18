@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { SimDeck } from '../engine/types';
 import type { ForgeController } from '../sim/forgeController';
+import type { BuiltinController } from '../sim/builtinController';
+import { modeledFraction } from '../import/deck';
 import { formatCountdown } from '../sim/limit';
 import { computeRatings, emptyStats, wilson, type DeckStats, type Stats } from '../sim/stats';
 import type { AiProfileChoice, Settings } from '../storage';
@@ -13,6 +15,7 @@ interface Props {
   decks: SimDeck[];
   activeDecks: SimDeck[];
   forge: ForgeController;
+  builtin: BuiltinController;
   forgeCheck: Record<string, DeckForgeCheck> | null;
   /** Number of Playstyle quiz answers behind the "You" personality. */
   profileAnswers: number;
@@ -34,18 +37,19 @@ const PERSONALITIES: { value: AiProfileChoice; label: string }[] = [
   { value: 'Mixed', label: 'Mixed (random per player)' },
 ];
 
-export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers, onUnselect, settings, onSettings, onStart, onStop, onReset, onOpenPlaystyle }: Props) {
-  const allStats = forge.stats;
+export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profileAnswers, onUnselect, settings, onSettings, onStart, onStop, onReset, onOpenPlaystyle }: Props) {
+  const own = settings.engine === 'builtin';
+  const allStats = own ? builtin.stats : forge.stats;
   // Optional filter: show only games with a given number of players.
   const [sizeFilter, setSizeFilter] = useState('all');
   const sizes = Object.keys(allStats.bySize ?? {}).filter((k) => allStats.bySize![k].games > 0).sort();
   const stats: Stats = sizeFilter === 'all' ? allStats : allStats.bySize?.[sizeFilter] ?? emptyStats();
   const status = forge.status;
-  const running = forge.running;
+  const running = own ? builtin.running : forge.running;
   const ready = !!status?.available;
   const cores = Math.max(1, navigator.hardwareConcurrency || 4);
   const enoughDecks = activeDecks.length >= 2;
-  const canRun = enoughDecks && ready;
+  const canRun = enoughDecks && (own || ready);
   const set = (patch: Partial<Settings>) => onSettings({ ...settings, ...patch });
 
   const ratings = computeRatings(stats);
@@ -60,7 +64,9 @@ export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers
   const draws = Math.max(0, allStats.games - finished);
 
   // Progress of the current run against its "Run for" limit.
-  const run = status?.run ?? null;
+  const run = own
+    ? { stopAt: builtin.limit.stopAt, maxGames: builtin.limit.maxGames, games: builtin.gamesThisRun, finishing: false, finishedByLimit: builtin.finishedByLimit }
+    : status?.run ?? null;
   const finishing = !!run?.finishing;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -75,11 +81,21 @@ export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers
   else if (finishing) runStatus = `Limit reached — finishing the ${status?.activeGames ?? 0} game${status?.activeGames === 1 ? '' : 's'} already in progress…`;
   else if (run?.finishedByLimit) runStatus = `Run finished: reached its ${run.maxGames ? `${run.maxGames.toLocaleString()}-game` : 'time'} limit after ${run.games.toLocaleString()} games.`;
 
-  const problems = forgeCheck ? activeDecks.filter((d) => (forgeCheck[d.id]?.missing.length ?? 0) > 0) : [];
+  const problems = own ? [] : forgeCheck ? activeDecks.filter((d) => (forgeCheck[d.id]?.missing.length ?? 0) > 0) : [];
 
   return (
     <>
       <section className="panel controls">
+        <div className="engine-switch">
+          <button className={own ? '' : 'active'} disabled={running} onClick={() => set({ engine: 'forge' })}>
+            Forge — full rules
+            <span>Every card as written, played by Forge on your own computer. Slow: about a game a minute. Needs the Forge install.</span>
+          </button>
+          <button className={own ? 'active' : ''} disabled={running} onClick={() => set({ engine: 'builtin' })}>
+            Proliferate engine — in the browser
+            <span>Real turns, stack and combat with the same bots you can play against. Thousands of games a minute. Card text is approximated.</span>
+          </button>
+        </div>
         <div className="control-row">
           <label>
             <span>Players per game <Help>How many decks sit at each game — 4 is standard Commander. If you select more decks than this, each game uses a random subset. Never more than 6. <strong>Mixed</strong> varies the table size from 2 to 6 so you can compare decks at every size.</Help></span>
@@ -95,33 +111,44 @@ export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers
               <option value="random">Fully random</option>
             </select>
           </label>
-          <label>
-            <span>AI personality <Help>
-              Which Forge AI profile pilots the decks. <strong>Default</strong> is Forge&apos;s standard AI. <strong>You</strong> is Default adjusted by your Playstyle answers (how often you attack into trades, counter spells, hold combat tricks, trade blockers and destroy artifacts). <strong>Cautious</strong>, <strong>Reckless</strong> and <strong>Experimental</strong> are Forge&apos;s built-in alternatives. <strong>Mixed</strong> gives each player a random one of Forge&apos;s four every game.
-              <br /><br />Forge&apos;s shuffles are fair for every personality — its old &quot;AI shuffle cheat&quot; setting is switched off in simulations.
-            </Help></span>
-            <select value={settings.aiProfile} onChange={(e) => set({ aiProfile: e.target.value as AiProfileChoice })} disabled={running}>
-              {PERSONALITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Forge processes <Help>How many Forge games run at once. Each uses several CPU cores and about 1 GB of RAM. Beyond roughly one process per 4 CPU threads, games just slow each other down.</Help></span>
-            <select value={settings.forgeWorkers} onChange={(e) => set({ forgeWorkers: +e.target.value })} disabled={running}>
-              {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Games per launch <Help>How many games each Forge process plays before restarting. Forge takes ~8 seconds to start, so 2–3 saves that time — the same pod plays those games back to back, with the starting player rotating. 1 = a fresh random pod every game.</Help></span>
-            <select value={settings.gamesPerLaunch} onChange={(e) => set({ gamesPerLaunch: +e.target.value })} disabled={running}>
-              {[1, 2, 3, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Draw after <Help>If a single Forge game is still going after this long, it&apos;s called a draw. This is <strong>real time</strong> — how long your computer spends on that one game (Magic has no in-game clock). A 4-player game usually takes 35 seconds to 4 minutes, so this mostly catches stuck games like board stalls or loops. Running many Forge processes at once makes each game slower, so watch the draw count. It&apos;s per game — not how long the whole simulation runs (that&apos;s &quot;Run for&quot;).</Help></span>
-            <select value={settings.forgeClockSeconds} onChange={(e) => set({ forgeClockSeconds: +e.target.value })} disabled={running}>
-              {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min real time</option>)}
-            </select>
-          </label>
+          {own ? (
+            <label>
+              <span>Workers <Help>How many games run at once, each on its own CPU core. One fewer than your core count keeps the page responsive.</Help></span>
+              <select value={settings.builtinWorkers} onChange={(e) => set({ builtinWorkers: +e.target.value })} disabled={running}>
+                {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          ) : (
+            <>
+              <label>
+                <span>AI personality <Help>
+                  Which Forge AI profile pilots the decks. <strong>Default</strong> is Forge&apos;s standard AI. <strong>You</strong> is Default adjusted by your Playstyle answers (how often you attack into trades, counter spells, hold combat tricks, trade blockers and destroy artifacts). <strong>Cautious</strong>, <strong>Reckless</strong> and <strong>Experimental</strong> are Forge&apos;s built-in alternatives. <strong>Mixed</strong> gives each player a random one of Forge&apos;s four every game.
+                  <br /><br />Forge&apos;s shuffles are fair for every personality — its old &quot;AI shuffle cheat&quot; setting is switched off in simulations.
+                </Help></span>
+                <select value={settings.aiProfile} onChange={(e) => set({ aiProfile: e.target.value as AiProfileChoice })} disabled={running}>
+                  {PERSONALITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Forge processes <Help>How many Forge games run at once. Each uses several CPU cores and about 1 GB of RAM. Beyond roughly one process per 4 CPU threads, games just slow each other down.</Help></span>
+                <select value={settings.forgeWorkers} onChange={(e) => set({ forgeWorkers: +e.target.value })} disabled={running}>
+                  {Array.from({ length: Math.min(16, cores) }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Games per launch <Help>How many games each Forge process plays before restarting. Forge takes ~8 seconds to start, so 2–3 saves that time — the same pod plays those games back to back, with the starting player rotating. 1 = a fresh random pod every game.</Help></span>
+                <select value={settings.gamesPerLaunch} onChange={(e) => set({ gamesPerLaunch: +e.target.value })} disabled={running}>
+                  {[1, 2, 3, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Draw after <Help>If a single Forge game is still going after this long, it&apos;s called a draw. This is <strong>real time</strong> — how long your computer spends on that one game (Magic has no in-game clock). A 4-player game usually takes 35 seconds to 4 minutes, so this mostly catches stuck games like board stalls or loops. Running many Forge processes at once makes each game slower, so watch the draw count. It&apos;s per game — not how long the whole simulation runs (that&apos;s &quot;Run for&quot;).</Help></span>
+                <select value={settings.forgeClockSeconds} onChange={(e) => set({ forgeClockSeconds: +e.target.value })} disabled={running}>
+                  {[300, 600, 900, 1800].map((n) => <option key={n} value={n}>{n / 60} min real time</option>)}
+                </select>
+              </label>
+            </>
+          )}
           <label>
             <span>Run for <Help>How long to keep simulating: until you press Stop, for a set time, or for a set number of games. Separate from the per-game limit. Runs keep to this even with the browser closed; when time is up, games already in progress finish and still count.</Help></span>
             <select
@@ -163,7 +190,7 @@ export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers
           <button onClick={() => confirm('Clear all results?') && onReset()} disabled={!allStats.games}>Reset results</button>
         </div>
 
-        {settings.aiProfile === 'You' && (
+        {!own && settings.aiProfile === 'You' && (
           <p className="small">
             {profileAnswers
               ? <>Playing with <strong>your</strong> profile, learned from {profileAnswers} Playstyle answer{profileAnswers === 1 ? '' : 's'}. </>
@@ -180,40 +207,54 @@ export function SimPanel({ decks, activeDecks, forge, forgeCheck, profileAnswers
             games finished{draws > 0 && <> · {draws.toLocaleString()} draw{draws === 1 ? '' : 's'} ({pct(draws / allStats.games, 1)})</>}
             <Help>Games that ended with a winner. <strong>Draws</strong> are games cut off by the &quot;Draw after&quot; time limit. Lots of draws means the limit is ending games early — raise it to see how decks actually close games out.</Help>
           </div>
-          <div className="kpi"><span>{running ? (status?.gamesPerMinute || 0).toFixed(1) : '—'}</span>games per minute</div>
-          <div className="kpi"><span>{status?.activeGames ?? 0}</span>games in progress</div>
+          <div className="kpi"><span>{!running ? '—' : own ? Math.round(builtin.gamesPerSecond * 60).toLocaleString() : (status?.gamesPerMinute || 0).toFixed(1)}</span>games per minute</div>
+          <div className="kpi"><span>{own ? builtin.activeWorkers : status?.activeGames ?? 0}</span>games in progress</div>
           <div className="kpi">
             <span>{rows.length ? (rows.reduce((s, r) => s + r.s.winRoundSum, 0) / Math.max(1, rows.reduce((s, r) => s + r.s.wins, 0))).toFixed(1) : '—'}</span>
             avg winning round <Help>On average, the round in which games were won. A round is one turn for every player, so round 8 ≈ each player&apos;s 8th turn.</Help>
           </div>
         </div>
 
-        {!status && (
-          <p className="warn">The Forge backend isn&apos;t reachable. Simulations need the local server (<code>npm run dev</code>); they can&apos;t run on static hosting.</p>
+        {own ? (
+          <>
+            <p className="muted small">
+              Proliferate&apos;s own engine plays these games right here in your browser, with the same rules and bots as the Play tab. It follows the real turn
+              structure, the stack and combat, but reads each card&apos;s text approximately, so treat the results as a quick estimate and use Forge for the final word.
+              {activeDecks.length > 0 && <> It understands {pct(activeDecks.reduce((sum, d) => sum + modeledFraction(d), 0) / activeDecks.length, 0)} of the nonland cards in the selected decks; the rest play as plain permanents or do nothing.</>}
+              {' '}Games still going after 40 rounds count as draws.
+            </p>
+            {builtin.lastError && <p className="err">{builtin.lastError}</p>}
+          </>
+        ) : (
+          <>
+            {!status && (
+              <p className="warn">The Forge backend isn&apos;t reachable. Simulations need the local server (<code>npm run dev</code>); they can&apos;t run on static hosting.</p>
+            )}
+            {status && !status.available && <p className="warn">{status.problem}</p>}
+            {ready && (
+              <p className="muted small">
+                Forge {status!.version} at <code>{status!.forgeDir}</code> plays every game under the full Magic rules with its own card scripts and AI. Games keep running
+                while this page is closed, as long as the dev server is up.
+              </p>
+            )}
+            {problems.length > 0 && (
+              <div className="forge-warning">
+                <span>
+                  Forge doesn&apos;t recognise some cards in {problems.map((d) => `${d.name} (${forgeCheck![d.id].missing.length})`).join(', ')} and would play without them.
+                </span>
+                <button onClick={() => onUnselect(problems.map((d) => d.id))} disabled={running}>Unselect {problems.length === 1 ? 'it' : 'them'}</button>
+              </div>
+            )}
+            {forge.warnings.map((w) => (
+              <p key={w.deckId} className="warn small">
+                {deckName(w.deckId)}: Forge doesn&apos;t know {w.missing.join(', ')}, so {w.missing.length === 1 ? 'it was' : 'they were'} left out of the deck.
+              </p>
+            ))}
+            {status?.errors.map((e, i) => <p key={i} className="err small">{e}</p>)}
+            {forge.lastError && <p className="err">{forge.lastError}</p>}
+          </>
         )}
-        {status && !status.available && <p className="warn">{status.problem}</p>}
-        {ready && (
-          <p className="muted small">
-            Forge {status!.version} at <code>{status!.forgeDir}</code> plays every game under the full Magic rules with its own card scripts and AI. Games keep running
-            while this page is closed, as long as the dev server is up.
-          </p>
-        )}
-        {problems.length > 0 && (
-          <div className="forge-warning">
-            <span>
-              Forge doesn&apos;t recognise some cards in {problems.map((d) => `${d.name} (${forgeCheck![d.id].missing.length})`).join(', ')} and would play without them.
-            </span>
-            <button onClick={() => onUnselect(problems.map((d) => d.id))} disabled={running}>Unselect {problems.length === 1 ? 'it' : 'them'}</button>
-          </div>
-        )}
-        {forge.warnings.map((w) => (
-          <p key={w.deckId} className="warn small">
-            {deckName(w.deckId)}: Forge doesn&apos;t know {w.missing.join(', ')}, so {w.missing.length === 1 ? 'it was' : 'they were'} left out of the deck.
-          </p>
-        ))}
-        {status?.errors.map((e, i) => <p key={i} className="err small">{e}</p>)}
         {!enoughDecks && <p className="warn">Select at least two decks on the Decks tab.</p>}
-        {forge.lastError && <p className="err">{forge.lastError}</p>}
         {settings.podSize !== 0 && activeDecks.length > settings.podSize && (
           <p className="muted small">
             Every game seats a random {settings.podSize} of your {activeDecks.length} selected decks in random order
