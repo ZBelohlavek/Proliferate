@@ -570,6 +570,7 @@ function effectLabel(e: Effect): string {
     case 'blink': return 'exile and return';
     case 'untap': return 'untap';
     case 'copySpell': return 'copy';
+    case 'hours': return 'add an hour counter';
     default: return e.kind;
   }
 }
@@ -583,6 +584,11 @@ function actionLabel(g: Game, a: Action): string {
       if (a.mutate) return `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}`;
       if (a.from === 'overload') return `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}`;
       if (a.from === 'alt') return altLabel(a.card);
+      if (a.kick) {
+        const k = a.card.kicker!;
+        const how = k.offspring ? 'with offspring' : k.multi ? `kicked ${a.kick}×` : 'kicked';
+        return `Cast ${a.card.name} ${how} ${costText(g.kickedCard(a.card, a.kick))}`;
+      }
       if (a.from !== 'graveyard') return `Cast ${a.card.name} ${costText(a.card)}`;
       const how = a.card.flashback ? 'Flashback' : a.card.graveyard?.how === 'cast' ? a.card.graveyard.label[0].toUpperCase() + a.card.graveyard.label.slice(1) : 'Cast from graveyard:';
       return `${how} ${a.card.name} ${costText(g.castCard(a.card, 'graveyard'))}`;
@@ -709,6 +715,9 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     perm.charge && `${perm.charge} charge counter${perm.charge > 1 ? 's' : ''}`,
     perm.fogged && 'Combat damage to and from it is prevented this turn',
     perm.lore && `Lore ${perm.lore} of ${card.saga}`,
+    perm.hours && `${perm.hours} hour counter${perm.hours > 1 ? 's' : ''}`,
+    perm.kicked && (card.kicker?.multi ? `Kicked ${perm.kicked} time${perm.kicked > 1 ? 's' : ''}` : card.kicker?.offspring ? 'Offspring paid' : 'Kicked'),
+    perm.fragile && `Sacrificed when it becomes the target of a spell${perm.fragile === 'any' ? ' or ability' : ''}`,
     perm.level && `Level ${perm.level}`,
     perm.goadedBy?.length && `Goaded by ${perm.goadedBy.map((s) => shortName(g.players[s])).join(', ')}`,
     attached.length && `Attached: ${attached.join(', ')}`,
@@ -723,6 +732,7 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
       {perm.sick && card.isCreature && !g.hasKw(perm, 'haste') && <span className="sick-badge" title="Summoning sick">zZ</span>}
       {perm.counters > 0 && <span className="count-badge">+{perm.counters}</span>}
       {!!perm.charge && <span className="count-badge" title="Charge counters">⚙{perm.charge}</span>}
+      {!!perm.hours && <span className="count-badge" title="Hour counters">🕛{perm.hours}</span>}
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
       {(badge || host || attached.length > 0) && <span className="zone-badge">{badge ?? (host ? `on ${host.card.name}` : `⚙ ${attached.join(', ')}`)}</span>}
     </div>

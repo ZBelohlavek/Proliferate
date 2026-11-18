@@ -612,8 +612,12 @@ export class Bot implements Agent {
         if (alt.pitch || alt.returnIslands || casts.some((b) => b.card === a.card && b.from === 'hand')) continue;
         if (alt.evoke && !a.card.effects.some((e) => e.when === 'resolve')) continue;
       }
-      const card = g.castCard(a.card, a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
+      const card = a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
       const fromCommand = a.from === 'command';
+      const kick = a.kick ? this.kickWorth(g, p, a.card, a.kick, a.maxX) : 0;
+      if (kick === null) continue;
+      // Everflowing Chalice: worth nothing without a kick.
+      if (!a.kick && a.card.kicker?.charge) continue;
       // Retrace costs a land card from hand: only once there are lands to spare.
       if (a.from === 'graveyard' && a.card.graveyard?.discardLand && !a.card.flashback && g.landCount(p) < 6) continue;
       // Noctis: casting from the graveyard costs life. Only for cards worth it, and not when low.
@@ -628,9 +632,11 @@ export class Bot implements Agent {
         x = Math.min(x, need);
         if (x <= 0 || p.life - x < 10) continue;
       }
-      if (card.cost.x > 0 && x < (card.isCreature ? 2 : 3)) continue;
+      // Kicker {X} (Thieving Skydiver): X only needs to reach the artifact it takes.
+      if (card.cost.x > 0 && x < (card.isCreature ? 2 : 3) && !(a.kick && a.card.kicker?.cost.x)) continue;
       let score = this.castScore(g, p, card, fromCommand, x, instantWindow);
       if (score === null) continue;
+      score += kick;
       // Keep mana up for counterspells and protection unless this play matters.
       if (reserve > 0 && score < 90 && available - g.effectiveCost(p, card, fromCommand, x) < reserve) continue;
       score += card.cmc * 0.1;
@@ -644,6 +650,36 @@ export class Bot implements Agent {
       }
     }
     return best;
+  }
+
+  /**
+   * What paying a spell's kicker (or offspring) `kicks` times adds to casting it, or null when it isn't worth it.
+   * Kicked spells are usually strictly better, so the kicked version wins whenever the mana is there.
+   */
+  private kickWorth(g: Game, p: PlayerState, card: SimCard, kicks: number, maxX: number): number | null {
+    const k = card.kicker!;
+    if (k.offspring) {
+      // A 1/1 copy: worth most when the creature does something as it enters, attacks or dies.
+      const triggers = card.effects.filter((e) => e.when !== 'static' && e.when !== 'activated').length;
+      return 2 + triggers * 2;
+    }
+    // Thieving Skydiver: only with an opponent's artifact worth taking within reach.
+    const steal = k.effects.find((e) => e.kind === 'steal' && e.what === 'artifact');
+    if (steal) {
+      const reach = g.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isArtifact && !q.landInfo && q.card.cmc <= maxX && g.canTarget(p, q));
+      return reach.some((q) => q.card.value >= 2) ? 6 : null;
+    }
+    if (k.multi) {
+      // Everflowing Chalice: each kick is another mana for good. Comet Storm: another target, when there is one worth hitting.
+      if (k.charge) return kicks * 4;
+      const removal = card.effects.find((e) => e.kind === 'removal');
+      if (removal) {
+        const targets = g.opponents(p).length + g.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isCreature && g.toughness(q) <= maxX && threat(g, q) >= 3).length;
+        return kicks < targets ? kicks * 3 : null;
+      }
+      return kicks * 2;
+    }
+    return 5;
   }
 
   private reservedMana(g: Game, p: PlayerState): number {
@@ -856,6 +892,8 @@ export class Bot implements Agent {
         case 'recursion': return !e.toTop && g.recursionPool(p, e).length > 0;
         case 'exileGraveyards': return e.cards ? g.opponents(p).some((o) => o.graveyard.some((c) => c.value >= 5)) : g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'entomb': return true;
+        // Midnight Clock: wind it forward when a fresh hand of seven beats what we hold, and not if the graveyard is our engine.
+        case 'hours': return p.hand.length <= 2 && !this.leansOnGraveyard(p) && (perm.hours ?? 0) >= 6;
         case 'millReanimate': return p.library.length > 10;
         case 'cheat': return p.hand.some((c) => c.isCreature);
         case 'goad': return e.all || g.opponents(p).length >= 2;
@@ -990,7 +1028,7 @@ export class Bot implements Agent {
         return top ? { kind: 'stack', id: top.id } : d.candidates[0];
       }
       case 'steal': {
-        if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q))) ?? d.candidates[0];
+        if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q) + (e.what === 'artifact' ? q.card.value : 0))) ?? d.candidates[0];
         // The library with the best creature in it.
         const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
         const best = (seat: number) => Math.max(0, ...g.players[seat].library.filter((c) => c.isCreature).map((c) => c.value));

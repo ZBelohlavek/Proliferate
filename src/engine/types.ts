@@ -52,6 +52,9 @@ export type Trigger =
   | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
   | 'turnedFaceUp' // this face-down permanent is turned face up
   | 'lore' // you put a lore counter on a Saga you control (Sigurd)
+  | 'targeted' // a permanent becomes the target of a spell or ability (see scope, targetedBy, spellOnly)
+  | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
+  | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -90,6 +93,14 @@ export type Effect = EffectBody & {
   selfToo?: boolean;
   /** "You may pay {E}{E}{E}. When you do, ...": paid in energy as it resolves, or nothing happens (rule 107.14). */
   energyCost?: number;
+  /** Multikicker (rule 702.33c): the effect happens once more for each time the spell was kicked (Comet Storm). */
+  perKick?: boolean;
+  /** "Becomes the target" triggers: whose spell or ability it must be ('you' or 'opponents'; default anyone's). */
+  targetedBy?: 'you' | 'opponents';
+  /** "Becomes the target of a spell": abilities don't count. */
+  spellOnly?: boolean;
+  /** "This ability triggers only twice each turn" (Nadu): counted for each permanent that is targeted. */
+  perTurn?: number;
   /** For activated abilities: the mana cost and whether it taps the source. */
   activation?: {
     cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number;
@@ -127,7 +138,23 @@ export type EffectBody =
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
-  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean }
+  /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
+  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any' }
+  /**
+   * Create token copies of the source permanent (Skyclave Relic, Jace, Mirror Mage; offspring makes a 1/1 one).
+   * size: the copy's power and toughness. loyalty: its starting loyalty.
+   */
+  | { kind: 'copySelf'; n: number; tapped?: boolean; nonlegendary?: boolean; loyalty?: number; size?: number }
+  /** Shuffle the source into its owner's library (Fblthp, the Lost). */
+  | { kind: 'shuffleSelf' }
+  /** Sacrifice the source (Phantasmal Image's "when this becomes the target ..."). */
+  | { kind: 'sacrificeSelf' }
+  /** Reveal the top card of your library: a land goes onto the battlefield, anything else into your hand (Nadu). */
+  | { kind: 'revealTop' }
+  /** Put this many hour counters on the source; the twelfth sets off its 'hourTwelve' abilities (Midnight Clock). */
+  | { kind: 'hours'; n: number }
+  /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
+  | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
   | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
@@ -199,11 +226,12 @@ export type EffectBody =
   /** Exile graveyards: every opponent's, or everyone's. `cards`: only that many cards, the best ones in opponents' graveyards. */
   | { kind: 'exileGraveyards'; all: boolean; cards?: number }
   /** Enters as a copy of a creature on the battlefield: any, only yours (Spark Double) or only an opponent's (Imposter Mech). */
-  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean }
+  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean; /** Phantasmal Image: "when this becomes the target of a spell or ability, sacrifice it". */ fragile?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
   /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
+  /** what: an artifact instead of a creature (Thieving Skydiver; an Equipment is then attached to the source). maxCmc: only mana value up to this; -1 = X. */
   /** payEnergy: Confiscation Coup gives this much energy, then the steal costs energy equal to the target's mana value. */
-  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number }
+  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number; what?: 'artifact'; maxCmc?: number }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
@@ -491,6 +519,11 @@ export interface SimCard {
   xFromLife?: boolean;
   /** Costs {amount} less for each of something (affinity, improvise, convoke, "for each creature on the battlefield"). */
   discount?: { per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'; amount: number };
+  /**
+   * Kicker, multikicker or offspring (rules 702.33, 702.175): an optional additional cost. `effects` is what the card
+   * does when it was paid (its `effects` are the unkicked version). Multikicker may be paid any number of times.
+   */
+  kicker?: { cost: ManaCost; multi?: boolean; offspring?: boolean; effects: Effect[]; /** Enters with a charge counter for each time it was kicked (Everflowing Chalice). */ charge?: boolean };
   /** Mutate (rule 702.140): cast for this cost onto a non-Human creature you own, merging with it. */
   mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
   /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */

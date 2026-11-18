@@ -99,6 +99,12 @@ export interface Perm {
   cursing?: number;
   /** Age counters (cumulative upkeep). */
   age?: number;
+  /** Times its spell was kicked (multikicker counts each payment; offspring counts as one). */
+  kicked?: number;
+  /** Hour counters (Midnight Clock). */
+  hours?: number;
+  /** Sacrificed when it becomes the target of a spell ('spell') or of a spell or ability ('any'): Phantasmal Image, Jace's Illusions. */
+  fragile?: 'spell' | 'any';
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
   damage: number;
@@ -219,6 +225,8 @@ export interface StackItem {
   faceDown?: SimCard;
   /** Cast for its mutate cost: the permanent it merges with (rule 702.140). */
   mutateOnto?: number;
+  /** Times the spell was kicked (kicker, multikicker, offspring). */
+  kicked?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +240,8 @@ export type Action =
   | { type: 'land'; card: SimCard; back: boolean; fromGraveyard?: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean }
+  /** `kick`: pay its kicker (or offspring) cost this many times (rule 702.33). */
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
@@ -270,7 +279,7 @@ export type Decision =
   /** Pick between `min` and `max` of the options. */
   | { kind: 'choose'; seat: number; reason: ChooseReason; prompt: string; options: ChoiceOption[]; min: number; max: number }
   /** A yes/no question. `card` is the card it is about, if any. */
-  | { kind: 'confirm'; seat: number; reason: ConfirmReason; prompt: string; card?: SimCard; to?: 'graveyard' | 'exile' | 'hand' };
+  | { kind: 'confirm'; seat: number; reason: ConfirmReason; prompt: string; card?: SimCard; to?: 'graveyard' | 'exile' | 'hand' | 'library' };
 
 export interface PriorityAnswer {
   /** Index into the decision's `actions`. */
