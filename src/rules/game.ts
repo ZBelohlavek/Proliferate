@@ -19,6 +19,7 @@ import type {
 import type {
   Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
 } from './types';
+import { assembledCombo, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
 
 /** A piece of the game that may stop to ask players for decisions. */
 export type Flow<T> = Generator<Decision, T, Answer>;
@@ -107,6 +108,12 @@ export class Game {
   monarch: number | null = null;
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
+  /** Isochron Scepter: the card exiled with each one (keyed by permanent id). */
+  readonly imprinted = new Map<number, SimCard>();
+  /** Life each seat lost this turn (Bloodchief Ascension). */
+  private lifeLostThisTurn: number[] = [];
+  /** Seats that hold a card from a combo or an alternative win, so the checks cost nothing for other decks. */
+  private readonly winconSeats = new Set<number>();
 
   constructor(decks: SimDeck[], seed: number, opts: GameOptions = {}) {
     if (decks.length < 2 || decks.length > 6) throw new Error(`A game needs 2–6 players, got ${decks.length}.`);
@@ -146,7 +153,12 @@ export class Game {
       earlyNames: new Set(),
       drawnNames: new Set(),
       castNames: new Set(),
+      milledBy: null,
     }));
+    this.lifeLostThisTurn = this.players.map(() => 0);
+    this.players.forEach((p, seat) => {
+      if ([...p.deck.commanders, ...p.deck.cards.map((e) => e.card)].some((c) => WINCON_NAMES.has(c.name))) this.winconSeats.add(seat);
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -281,6 +293,7 @@ export class Game {
     this.activeSeat = p.seat;
     this.turnNumber++;
     this.triggerBudget = 300;
+    this.lifeLostThisTurn.fill(0);
     this.say(`— Round ${this.round}, ${p.name} (life ${p.life}) —`);
 
     // Untap step (502). No player gets priority.
@@ -305,6 +318,7 @@ export class Game {
     // Upkeep step (503).
     this.step = 'upkeep';
     this.fire(p, 'upkeep');
+    if (this.winconSeats.has(p.seat)) this.upkeepWins(p);
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -327,6 +341,7 @@ export class Game {
     if (this.stopped(p)) return;
 
     this.step = 'end';
+    this.questCounters();
     if (this.monarch === p.seat) {
       this.say(`${p.name} draws a card as the monarch.`);
       this.draw(p, 1);
@@ -1664,6 +1679,7 @@ export class Game {
     }
     if (card.entersTapped) perm.tapped = true;
     p.battlefield.push(perm);
+    if (card.name === 'Isochron Scepter') this.imprint(p, perm);
     const etb = card.effects.filter((e) => e.when === 'resolve');
     if (etb.length) for (let i = this.triggerTimes(p, 'permanentEnters', card); i > 0; i--) this.trigger(p, card, perm.id, etb);
     if (card.isCreature) this.creatureEntered(p, perm);
@@ -1675,6 +1691,20 @@ export class Game {
         if (hits.length) for (let i = 0; i < times; i++) this.trigger(p, other.card, other.id, hits);
       }
     }
+  }
+
+  /**
+   * Isochron Scepter's imprint: exile an instant with mana value 2 or less from
+   * hand. Dramatic Reversal (the combo) is taken first, otherwise the best one.
+   */
+  private imprint(p: PlayerState, perm: Perm) {
+    const options = p.hand.filter((c) => c.isInstant && c.cmc <= 2);
+    if (!options.length) return;
+    const pick = options.find((c) => c.name === 'Dramatic Reversal') ?? options.reduce((a, b) => (b.value > a.value ? b : a));
+    p.hand.splice(p.hand.indexOf(pick), 1);
+    p.exile.push(pick);
+    this.imprinted.set(perm.id, pick);
+    this.say(`${p.name} exiles ${pick.name} with Isochron Scepter.`);
   }
 
   /**
@@ -1864,7 +1894,7 @@ export class Game {
         break;
       }
       case 'drain': {
-        const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        const amount = e.devotion ? this.devotion(p, e.devotion) : e.n === -1 ? Math.max(x, 1) : e.n;
         let total = 0;
         // "You gain life equal to the life lost this way": only what was really lost (Teferi's Protection stops it).
         for (const o of this.opponents(p)) {
@@ -1951,6 +1981,21 @@ export class Game {
           for (const perm of creatures) if (perm.counters > 0) perm.counters += amount;
           for (const perm of this.allPerms()) if (perm.seat !== p.seat && perm.card.isCreature && perm.counters < 0) perm.counters -= 1;
           for (const perm of p.battlefield) if (perm.loyalty !== undefined && perm.card.isPlaneswalker) perm.loyalty += amount;
+          // Proliferate also reaches players (rule 701.34a): one more poison counter on each poisoned opponent,
+          // and one more counter on our other permanents that have some (quest and charge counters).
+          for (const o of this.opponents(p)) {
+            if (o.poison > 0 && !o.shielded) {
+              o.poison++;
+              o.lastHitBy = p.seat;
+              o.lastHitKind = 'noncombat';
+              this.say(`${o.name} gets a poison counter from proliferate (${o.poison} of 10).`);
+            }
+          }
+          for (const perm of p.battlefield) {
+            if (perm.card.isCreature || perm.card.isPlaneswalker) continue;
+            if (perm.loyalty !== undefined) perm.loyalty++;
+            else if (perm.counters > 0) perm.counters++;
+          }
         } else if (e.all) {
           for (const perm of creatures) perm.counters += amount;
         } else if (src && src.card.isCreature && p.battlefield.includes(src)) {
@@ -2023,6 +2068,7 @@ export class Game {
         for (const v of victims) {
           const count = Math.min(v.library.length, e.n === -2 ? Math.ceil(v.library.length / 2) : e.n === -1 ? Math.max(x, 1) * 2 : e.n);
           for (const card of v.library.splice(0, count)) this.toGraveyard(v, card, false);
+          if (count && v !== p) v.milledBy = p.seat;
           if (count) this.say(`${v.name} mills ${count} card${count > 1 ? 's' : ''} (${v.library.length} left).`);
         }
         break;
@@ -2241,6 +2287,7 @@ export class Game {
   loseLife(p: PlayerState, amount: number, source: PlayerState | null, kind: LossReason): number {
     if (amount <= 0 || p.shielded) return 0;
     p.life -= amount;
+    this.lifeLostThisTurn[p.seat] += amount;
     p.lostLifeTurn = this.turnNumber;
     if (source && source !== p) {
       p.lastHitBy = source.seat;
@@ -2493,13 +2540,15 @@ export class Game {
     let changed = false;
 
     // Players who lose (704.5a–c, 903.10a). They all leave at the same time.
+    for (const seat of this.winconSeats) if (this.players[seat].alive) this.checkCombo(this.players[seat]);
+
     const losing: { p: PlayerState; reason: LossReason }[] = [];
     for (const p of this.players) {
       if (!p.alive) continue;
       let reason: LossReason | null = null;
       if (p.life <= 0) reason = p.lastHitKind;
       for (const dmg of p.commanderDamage.values()) if (dmg >= COMMANDER_DAMAGE) reason = 'commander';
-      if (p.poison >= 10) reason = 'combat';
+      if (p.poison >= 10) reason = p.lastHitKind === 'noncombat' ? 'noncombat' : 'combat';
       if (p.drewFromEmpty) reason = 'decked';
       if (reason) losing.push({ p, reason });
     }
@@ -2565,13 +2614,91 @@ export class Game {
     return changed;
   }
 
+  // -------------------------------------------------------------------------
+  // Winning without combat: alternative win conditions and combos (wincons.ts)
+  // -------------------------------------------------------------------------
+
+  /** Mana symbols of `color` among the mana costs of permanents `p` controls (rule 700.5). */
+  devotion(p: PlayerState, color: Color): number {
+    let n = 0;
+    for (const perm of p.battlefield) for (const pip of perm.card.cost.pips) if (pip.includes(color)) n++;
+    return n;
+  }
+
+  /** `p` wins the game: every opponent loses (rule 104.2a), even one whose life can't change. */
+  private winGame(p: PlayerState, why: string) {
+    this.say(`${p.name} wins the game (${why}).`);
+    for (const o of this.opponents(p)) {
+      o.life = Math.min(o.life, 0);
+      o.lastHitBy = p.seat;
+      o.lastHitKind = 'noncombat';
+    }
+  }
+
+  /** "At the beginning of your upkeep, if ..., you win the game." */
+  private upkeepWins(p: PlayerState) {
+    for (const perm of p.battlefield) {
+      const name = perm.card.name;
+      if (UPKEEP_COUNTERS.has(name)) perm.counters++;
+      const wins = UPKEEP_WINS[name];
+      if (wins?.(p, perm)) {
+        this.winGame(p, name);
+        return;
+      }
+    }
+  }
+
+  /** Bloodchief Ascension: a quest counter at each end step in which an opponent lost 2 or more life. */
+  private questCounters() {
+    for (const seat of this.winconSeats) {
+      const p = this.players[seat];
+      if (!p.alive) continue;
+      for (const perm of p.battlefield) {
+        if (perm.card.name !== 'Bloodchief Ascension') continue;
+        if (this.opponents(p).some((o) => this.lifeLostThisTurn[o.seat] >= 2)) perm.counters++;
+      }
+    }
+  }
+
+  /**
+   * A combo that is assembled wins right away: the loop it starts is taken as a
+   * shortcut (rule 727) instead of being played out one trigger at a time.
+   */
+  private checkCombo(p: PlayerState) {
+    const opps = this.opponents(p);
+    if (!opps.length) return;
+    const found = assembledCombo(this, p);
+    if (!found) return;
+    if (found.kind === 'mill') {
+      // Every opponent's library goes to the graveyard; each loses the next time they would draw.
+      const left = opps.filter((o) => o.library.length > 0);
+      if (!left.length) return;
+      this.say(`${p.name} assembles ${found.combo.name} and mills every opponent's library.`);
+      for (const o of left) {
+        for (const card of o.library.splice(0)) this.toGraveyard(o, card, false);
+        o.milledBy = p.seat;
+      }
+      return;
+    }
+    // A drain loop can't touch a player whose life can't change this turn (Teferi's Protection).
+    const victims = opps.filter((o) => !o.shielded && o.life > 0);
+    if (!victims.length) return;
+    if (victims.length < opps.length) {
+      this.say(`${p.name} loops ${found.combo.name}, draining every opponent who can lose life.`);
+      for (const o of victims) this.loseLife(o, o.life, p, 'noncombat');
+      return;
+    }
+    this.winGame(p, found.combo.name);
+  }
+
   private eliminate(dying: { p: PlayerState; reason: LossReason }[]) {
     const aliveBefore = this.alivePlayers().length;
     for (const { p, reason } of dying) {
       p.alive = false;
       // Everyone still in the game finished ahead; players who lose together share the place.
       this.placements[p.seat] = aliveBefore - dying.length + 1;
-      const killer = reason === 'decked' ? null : p.lastHitBy;
+      // Running out of cards counts against whoever milled them last, if anyone did.
+      const killer = reason === 'decked' ? p.milledBy : p.lastHitBy;
       this.eliminations.push({ seat: p.seat, round: this.round, reason, killer });
       this.say(`${p.name} is eliminated (${reason}${killer !== null ? ` by ${this.players[killer].name}` : ''}).`);
       // Everything a player owns leaves the game with them, and what they took goes back (rule 800.4a).

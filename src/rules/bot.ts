@@ -11,6 +11,9 @@ import { commanderName, counterMatches, isAura, isInstantSpeed, recursionMatches
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
+import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons';
+
+const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
 const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect']);
@@ -24,6 +27,39 @@ type Removal = Extract<Effect, { kind: 'removal' }>;
 type Wipe = Extract<Effect, { kind: 'wipe' }>;
 type Pump = Extract<Effect, { kind: 'pump' }>;
 type CastAction = Extract<Action, { type: 'cast' }>;
+
+/** True if `p` controls a permanent that turns drawing from an empty library into a win (Laboratory Maniac). */
+function winsOnEmptyDraw(p: PlayerState): boolean {
+  return p.battlefield.some((q) => q.card.effects.some((e) => e.kind === 'winOnEmptyDraw'));
+}
+
+/** Life each opponent loses whenever one of `p`'s creatures dies (Zulaport Cutthroat, Blood Artist). */
+function deathDrain(p: PlayerState): number {
+  let n = 0;
+  for (const q of p.battlefield) {
+    for (const e of q.card.effects) {
+      if (e.when === 'creatureDies' && e.scope !== 'self' && e.scope !== 'attached' && (e.kind === 'drain' || e.kind === 'damagePlayer') && e.n > 0) n += e.n;
+    }
+  }
+  return n;
+}
+
+/** The plan a deck is built around besides combat, from its own decklist. */
+interface DeckPlan {
+  /** Cards that mill opponents. */
+  mill: number;
+  /** Cards that drain or burn players. */
+  drain: number;
+}
+
+function deckPlan(p: PlayerState): DeckPlan {
+  const plan: DeckPlan = { mill: 0, drain: 0 };
+  for (const c of [...p.deck.commanders, ...p.deck.cards.flatMap((e) => Array<SimCard>(e.count).fill(e.card))]) {
+    if (c.effects.some((e) => e.kind === 'mill' && e.who !== 'you' && e.who !== 'all')) plan.mill++;
+    if (c.effects.some((e) => e.kind === 'drain' || e.kind === 'damagePlayer')) plan.drain++;
+  }
+  return plan;
+}
 
 // ---------------------------------------------------------------------------
 // Board evaluation, shared with the table UI's hints
@@ -50,6 +86,8 @@ export function threat(g: Game, perm: Perm): number {
     }
   }
   if (perm.isCommander) t += 4;
+  // Combo pieces and alternative win conditions are worth answering even when they look harmless.
+  if (WINCON_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw')) t += 6;
   if (perm.token) t *= 0.7;
   return t;
 }
@@ -91,6 +129,7 @@ export class Bot implements Agent {
   private readonly considered = new Set<number>();
   /** X of the spell this bot is in the middle of casting, for choosing its targets. */
   private castingX = 0;
+  private plan: DeckPlan | null = null;
 
   constructor(readonly seat: number, seed: number, opts: BotOptions = {}) {
     this.rng = new Rng((seed ^ ((seat + 1) * 0x9e3779b1)) >>> 0);
@@ -99,6 +138,7 @@ export class Bot implements Agent {
 
   decide(g: Game, d: Decision): Answer {
     const p = g.players[d.seat];
+    this.plan ??= deckPlan(p);
     switch (d.kind) {
       case 'priority': return this.priority(g, p, d.actions);
       case 'target': return this.target(g, p, d);
@@ -153,6 +193,18 @@ export class Bot implements Agent {
     }
 
     const myTurn = g.activeSeat === p.seat;
+    // A spell or ability that knocks an opponent out (or mills them out) comes before anything else.
+    if ((myTurn && (g.step === 'main1' || g.step === 'main2')) || (g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat)) {
+      const kill = this.lethalAction(g, p, actions);
+      if (kill) return pick(kill.action, kill.x);
+    }
+    // Triskaidekaphile: hold exactly thirteen cards going into our upkeep.
+    const holding = this.holdingThirteen(p);
+    if (holding && myTurn && p.hand.length <= 13 && (g.step === 'main1' || g.step === 'main2')) return pick(undefined);
+    if (holding && !myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat && p.hand.length < 13) {
+      const draw = actions.find((a) => a.type === 'activate' && a.effect.kind === 'draw' && g.findPerm(a.permId)?.card.name === 'Triskaidekaphile');
+      if (draw) return pick(draw);
+    }
     if (myTurn && (g.step === 'main1' || g.step === 'main2')) {
       const land = this.chooseLand(g, p, actions);
       if (land) return pick(land);
@@ -190,6 +242,71 @@ export class Bot implements Agent {
       return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
     }
     return pick(undefined);
+  }
+
+  /** Triskaidekaphile on the battlefield and a hand close enough to thirteen to aim for it. */
+  private holdingThirteen(p: PlayerState): boolean {
+    return p.hand.length >= 9 && p.battlefield.some((q) => q.card.name === 'Triskaidekaphile');
+  }
+
+  /**
+   * How much life `effects` would take from opponent `o`, and whether they
+   * would mill `o` out. `card` is the card being cast, if any (its own pips
+   * count toward devotion once it is on the battlefield).
+   */
+  private damageTo(g: Game, p: PlayerState, effects: Effect[], x: number, o: PlayerState, card: SimCard | null): { life: number; milledOut: boolean } {
+    let life = 0;
+    let single = 0;
+    let milled = 0;
+    for (const e of effects) {
+      if (e.kind === 'drain') {
+        const own = card && !card.isInstant && !card.isSorcery && e.devotion ? card.cost.pips.filter((pip) => pip.includes(e.devotion!)).length : 0;
+        life += e.devotion ? g.devotion(p, e.devotion) + own : e.n === -1 ? Math.max(x, 1) : e.n;
+      } else if (e.kind === 'damagePlayer') single = Math.max(single, e.n === -1 ? Math.max(x, 1) : e.n);
+      else if (e.kind === 'removal' && e.mode === 'damage' && e.anyTarget && !e.each) single = Math.max(single, e.amount === -1 ? Math.max(x, 1) : e.amount);
+      else if (e.kind === 'mill' && e.who !== 'you') {
+        const n = e.n === -2 ? Math.ceil(o.library.length / 2) : e.n === -1 ? Math.max(x, 1) * 2 : e.n;
+        // Milling everyone also mills us: only if we have more cards left, or win on an empty library.
+        if (e.who === 'all' && p.library.length <= Math.max(n, o.library.length) && !winsOnEmptyDraw(p)) continue;
+        milled += n;
+      }
+    }
+    return { life: life + single, milledOut: o.library.length > 0 && milled >= o.library.length };
+  }
+
+  /** True if these effects would eliminate an opponent outright, or leave them with no library. */
+  private finishes(g: Game, p: PlayerState, effects: Effect[], x: number, card: SimCard | null): boolean {
+    for (const o of g.opponents(p)) {
+      if (o.shielded) continue;
+      const hit = this.damageTo(g, p, effects, x, o, card);
+      if ((hit.life > 0 && hit.life >= o.life) || hit.milledOut) return true;
+    }
+    return false;
+  }
+
+  /** A spell or ability that finishes an opponent off now, if there is one. */
+  private lethalAction(g: Game, p: PlayerState, actions: Action[]): { action: Action; x: number } | undefined {
+    const instantWindow = g.activeSeat !== p.seat;
+    for (const a of actions) {
+      if (a.type === 'cast') {
+        const card = g.castCard(a.card, a.from);
+        if (instantWindow && !isInstantSpeed(card)) continue;
+        if (card.xFromLife || (card.cost.x > 0 && a.maxX < 1)) continue;
+        const effects = card.effects.filter((e) => e.when === 'resolve');
+        if (this.finishes(g, p, effects, a.maxX, card)) return { action: a, x: a.maxX };
+      } else if (a.type === 'activate') {
+        if ((a.effect.activation?.cost.life ?? 0) >= p.life) continue;
+        if (a.effect.activation?.sacCreature && !p.battlefield.some((q) => q.card.isCreature && q.id !== a.permId)) continue;
+        if (this.finishes(g, p, [a.effect], 0, null)) return { action: a, x: 0 };
+        // A sacrifice outlet with enough death triggers out: each creature fed to it drains the table.
+        const perDeath = deathDrain(p);
+        if (a.effect.activation?.sacCreature && perDeath > 0) {
+          const fodder = p.battlefield.filter((q) => q.card.isCreature && q.id !== a.permId).length;
+          if (g.opponents(p).some((o) => !o.shielded && o.life <= fodder * perDeath)) return { action: a, x: 0 };
+        }
+      }
+    }
+    return undefined;
   }
 
   /** The face-down creature whose real card is best, if it can be turned face up. */
@@ -266,6 +383,8 @@ export class Bot implements Agent {
       const perm = t?.kind === 'perm' ? g.findPerm(t.id) : null;
       if (top.effects[i].kind === 'removal' && perm?.seat === p.seat && threat(g, perm) >= 7) return true;
     }
+    // The last piece of a combo or an alternative win the caster already has the rest of.
+    if (COMBOS.some((c) => c.pieces.some((g1) => g1.includes(top.card.name)) && c.pieces.every((g1) => g1.includes(top.card.name) || caster.battlefield.some((q) => g1.includes(q.card.name))))) return true;
     if (top.isCommander || top.card.value >= 9) return this.rng.chance(0.6);
     if (top.card.value >= 6) return this.rng.chance(0.25);
     return false;
@@ -362,6 +481,14 @@ export class Bot implements Agent {
     const kinds = new Set(card.effects.filter((e) => e.when === 'resolve' || e.when === 'static').map((e) => e.kind));
     if (fromCommand) return 85 + card.value;
 
+    // Combos and alternative wins: the missing piece goes down as soon as possible.
+    if (missingComboPieces(p).has(card.name)) return this.comboReady(p, card) ? 120 : null;
+    if (ALT_WIN_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw')) return 70 + card.value;
+    // Don't draw ourselves out of the game.
+    const drawsN = card.effects.reduce((n, e) => n + (e.kind === 'draw' && e.when === 'resolve' ? (e.n === -1 ? x : e.n) : 0), 0);
+    if (drawsN && drawsN >= p.library.length && !winsOnEmptyDraw(p)) return null;
+    if (card.effects.some((e) => e.kind === 'mill' && (e.who === 'you' || e.who === 'all') && e.when === 'resolve') && p.library.length < 20 && !winsOnEmptyDraw(p)) return null;
+
     // Purely reactive spells wait for something to react to.
     if (!card.isCreature && card.effects.length > 0 && card.effects.every((e) => REACTIVE_KINDS.has(e.kind))) return null;
     if (kinds.has('overrun')) return g.step === 'main1' && this.readyAttackers(g, p).length >= 3 ? 60 : null;
@@ -396,9 +523,16 @@ export class Bot implements Agent {
     if (!spell) score = Math.max(score, 50 + card.value);
     if (kinds.has('draw')) score = Math.max(score, 45 + card.value);
     if (kinds.has('mill') || kinds.has('discard') || kinds.has('scry')) score = Math.max(score, 25 + card.value);
+    // A deck built to mill people out plays its mill cards like threats, and more urgently as libraries run low.
+    if (kinds.has('mill') && (this.plan?.mill ?? 0) >= 6) {
+      const thinnest = Math.min(...g.opponents(p).map((o) => o.library.length));
+      score = Math.max(score, 45 + card.value + (thinnest < 30 ? 15 : 0));
+    }
     if (kinds.has('tutor') || kinds.has('recursion') || kinds.has('tokens') || kinds.has('drain') || kinds.has('damagePlayer') || kinds.has('counters')) {
       score = Math.max(score, 40 + card.value);
     }
+    // Burn and drain decks: the engines that drain on every death or spell are the plan, not an extra.
+    if ((this.plan?.drain ?? 0) >= 8 && card.effects.some((e) => (e.kind === 'drain' || e.kind === 'damagePlayer') && e.when !== 'resolve')) score = Math.max(score, 55 + card.value);
     if (kinds.has('gainLife')) score = Math.max(score, 10);
     if (!card.modeled) {
       if (spell) return null;
@@ -407,6 +541,15 @@ export class Bot implements Agent {
     // Instants in our own main phase: only if nothing better. They usually wait for the end-of-turn window.
     if (card.isInstant && !instantWindow && !card.effects.some((e) => e.kind === 'ramp')) score = Math.min(score, 20);
     return score || null;
+  }
+
+  /**
+   * Whether to put a combo piece down now. Isochron Scepter waits until
+   * Dramatic Reversal is in hand to go under it (it is exiled as it enters).
+   */
+  private comboReady(p: PlayerState, card: SimCard): boolean {
+    if (card.name !== 'Isochron Scepter') return true;
+    return p.hand.some((c) => c.name === 'Dramatic Reversal');
   }
 
   private chooseAbility(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
@@ -421,13 +564,16 @@ export class Bot implements Agent {
         }
         if (e.kind === 'wipe') return this.wipeIsGood(g, p, e, 0);
         if (e.kind === 'recursion') return p.graveyard.some((c) => recursionMatches(e.what, c));
+        // Jace's -8: draw the rest of the library and win.
+        if (e.kind === 'draw') return e.n < p.library.length || winsOnEmptyDraw(p);
         return e.kind !== 'gainLife' && e.kind !== 'scry';
       };
       const minus = loyal.filter((a) => (a.effect.loyalty ?? 0) < 0 && worth(a)).sort((x, y) => (x.effect.loyalty ?? 0) - (y.effect.loyalty ?? 0))[0];
       const plus = loyal.filter((a) => (a.effect.loyalty ?? 0) >= 0).sort((x, y) => (y.effect.loyalty ?? 0) - (x.effect.loyalty ?? 0))[0];
       const perm = minus ? g.findPerm(minus.permId) : null;
       // Keep at least one loyalty unless the ability is removal that matters.
-      if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe')) return minus;
+      const winsNow = !!minus && minus.effect.kind === 'draw' && minus.effect.n >= p.library.length && winsOnEmptyDraw(p);
+      if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe' || winsNow)) return minus;
       if (plus) return plus;
     }
     return actions.find((a) => {
@@ -439,12 +585,14 @@ export class Bot implements Agent {
       if ((e.activation?.cost.life ?? 0) > 0 && p.life < 20) return false;
       if (e.activation?.sacCreature) {
         // Sacrifice outlets: only feed them tokens and small creatures, and only for something worth having.
-        if (e.kind === 'treasure') return false;
+        // With death triggers that drain the table, every token is worth feeding in.
+        const drains = deathDrain(p) > 0;
+        if (e.kind === 'treasure' && !drains) return false;
         const fodder = p.battlefield.filter((q) => q.card.isCreature && q !== perm && !q.isCommander && (q.token || q.card.value < 2.5));
-        if (!fodder.length || perm.activations >= 2) return false;
+        if (!fodder.length || (perm.activations >= 2 && !(drains && fodder.some((q) => q.token)))) return false;
       }
       switch (e.kind) {
-        case 'draw': return p.library.length > 8;
+        case 'draw': return p.library.length > 8 || winsOnEmptyDraw(p);
         case 'rollDice': return true;
         case 'gainLife': return p.life < 30 && g.activeSeat !== p.seat;
         // Tinybones: only when someone has an empty hand.
@@ -452,7 +600,8 @@ export class Bot implements Agent {
         // "Creatures you control gain haste": before combat, with fresh creatures worth sending in.
         case 'overrun': return !e.p && !!e.grant?.includes('haste') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && q.sick && !q.tapped && g.power(q) >= 2 && !g.hasKw(q, 'haste'));
         case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': case 'discard': case 'scry': return true;
-        case 'mill': return e.who !== 'you';
+        // Milling everyone (Syr Konrad) only while we have more cards left than the table, or win on an empty library.
+        case 'mill': return e.who === 'all' ? winsOnEmptyDraw(p) || p.library.length > Math.min(...g.opponents(p).map((o) => o.library.length)) + 10 : e.who !== 'you' || winsOnEmptyDraw(p);
         // "Can't be blocked this turn": before combat, with something worth sending in.
         case 'pump':
           if (e.self) return this.selfPumpNow(g, p, perm, e);
@@ -578,6 +727,9 @@ export class Bot implements Agent {
       case 'mill':
       case 'discard': {
         // Whoever is closest to running out, or holds the most cards.
+        // With Laboratory Maniac out, our own library is the one to empty when it is the shortest.
+        if (e.kind === 'mill' && winsOnEmptyDraw(p) && d.candidates.some((t) => t.kind === 'player' && t.seat === p.seat)
+          && g.opponents(p).every((o) => o.library.length > p.library.length)) return { kind: 'player', seat: p.seat };
         const seats = d.candidates.flatMap((t) => (t.kind === 'player' && t.seat !== p.seat ? [t.seat] : []));
         if (!seats.length) return d.candidates[0];
         const score = (seat: number) => (e.kind === 'mill' ? -g.players[seat].library.length : g.players[seat].hand.length);
@@ -622,7 +774,8 @@ export class Bot implements Agent {
     if (!opps.length) return null;
     const killable = opps.find((o) => o.life <= amount);
     if (killable) return killable.seat;
-    const score = (o: PlayerState) => boardThreat(g, o) - o.life * 0.2;
+    // Otherwise chip at whoever is closest to dying (to finish them), weighed against who is most dangerous.
+    const score = (o: PlayerState) => boardThreat(g, o) * 0.3 - o.life * 0.5;
     return opps.reduce((a, b) => (score(b) > score(a) ? b : a)).seat;
   }
 
@@ -859,7 +1012,9 @@ export class Bot implements Agent {
       }
       case 'tutor': {
         const needLand = g.landCount(p) < 4 && !p.hand.some((c) => c.isLand);
-        return top((i) => (card(i).isLand === needLand ? 100 : 0) + card(i).value, 1);
+        // The missing piece of a combo beats anything else.
+        const missing = missingComboPieces(p);
+        return top((i) => (missing.has(card(i).name) ? 300 : 0) + (card(i).isLand === needLand ? 100 : 0) + card(i).value, 1);
       }
       case 'recursion':
         return top((i) => card(i).value, d.max);

@@ -127,6 +127,8 @@ export interface PlayerState {
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
+  /** Seat of the last opponent who milled this player's cards, credited if they run out (null: nobody). */
+  milledBy: number | null;
   /** Poison counters; ten lose the game (rule 704.5c). */
   poison: number;
   /** Spells cast this turn (Rule of Law). */

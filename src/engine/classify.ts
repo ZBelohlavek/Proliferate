@@ -420,7 +420,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     } else {
       const fixedGain = fullLine.match(new RegExp(`you gain ${NUM} life`));
       const gain = /you gain life equal/.test(fullLine) ? -1 : fixedGain ? num(fixedGain[1], 1) : 0;
-      out.push({ body: { kind: 'drain', n, gain }, note: `Drain each opponent ${n === -1 ? 'X' : n}` });
+      // Gray Merchant: "where X is your devotion to black".
+      const devotion = n === -1 ? fullLine.match(/where x is your devotion to (white|blue|black|red|green)/) : null;
+      const color = devotion ? ({ white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' } as const)[devotion[1] as 'white'] : undefined;
+      out.push({ body: { kind: 'drain', n, gain, ...(color ? { devotion: color } : {}) }, note: `Drain each opponent ${color ? `your devotion to ${devotion![1]}` : n === -1 ? 'X' : n}` });
     }
   } else if ((m = line.match(new RegExp(`(target (player|opponent) loses|deals? ${NUM} damage to (target (player|opponent)|any target))`)))) {
     const amt = line.match(new RegExp(`(loses|deals?) ${NUM}`));
