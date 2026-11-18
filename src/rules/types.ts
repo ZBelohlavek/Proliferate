@@ -83,6 +83,8 @@ export interface Perm {
   faceDown?: SimCard;
   /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
   heldBy?: number;
+  /** Taken "for as long as that player is the monarch" (Garland, Royal Kidnapper): control ends when that seat stops being the monarch. */
+  heldWhileMonarch?: number;
   /** Under a lockdown Aura (Amphibian Downpour, Imprisoned in the Moon): its real card. `card` is then the vanilla version. */
   unlocked?: SimCard;
   /** The Aura that locks it down. */
@@ -91,6 +93,10 @@ export interface Perm {
   charge?: number;
   /** Combat damage to and from it is prevented this turn (Maze of Ith). */
   fogged?: boolean;
+  /** The turn number on which it last attacked (boast, rule 702.142). */
+  attackedTurn?: number;
+  /** A Curse: the seat of the player it enchants (rule 303.4). */
+  cursing?: number;
   /** Age counters (cumulative upkeep). */
   age?: number;
   /** A crewed Vehicle: its card while it isn't a creature. */
@@ -248,7 +254,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

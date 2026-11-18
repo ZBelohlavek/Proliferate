@@ -122,7 +122,10 @@ export function recogniseRecursion(line: string, fullLine: string): Found[] {
     const cap = m[5] ? maxCmc(m[5]) : undefined;
     // Two targets in one sentence: "return target creature card and up to one target ... creature card".
     const second = /card and (up to one )?target [^.]* cards? from/.test(line) ? 1 : 0;
-    push(n + second, /battlefield/.test(m[7]), what, { ...(from ? { from } : {}), ...(toTop ? { toTop } : {}), ...(m[8] ? { tapped: true } : {}), ...(cap !== undefined ? { maxCmc: cap } : {}) });
+    // Mirko: "with power less than ~'s"; the returned card gets a finality counter.
+    const belowPower = m[5] && /power less than ~'s/.test(m[5]) ? { belowPower: true } : {};
+    const finality = /with a finality counter/.test(line) ? { finality: true } : {};
+    push(n + second, /battlefield/.test(m[7]), what, { ...(from ? { from } : {}), ...(toTop ? { toTop } : {}), ...(m[8] ? { tapped: true } : {}), ...(cap !== undefined ? { maxCmc: cap } : {}), ...belowPower, ...finality });
     return out;
   }
   if (/return enchanted creature card to the battlefield/.test(line)) {

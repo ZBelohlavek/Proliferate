@@ -33,6 +33,8 @@ export type Trigger =
   | 'landfall' // a land enters under your control
   | 'opponentCast' // an opponent casts a spell (see castFilter)
   | 'opponentDraw' // an opponent draws a card
+  | 'opponentDiscard' // an opponent discards a card (once for each card)
+  | 'opponentLoseLife' // an opponent loses life (x = how much)
   | 'sacrifice' // you sacrifice a permanent
   | 'draw' // you draw a card
   | 'permEnters' // an artifact or enchantment enters under your control (see castFilter)
@@ -49,6 +51,7 @@ export type Trigger =
   | 'energy' // you get one or more energy counters (x: how many)
   | 'mutates' // a mutating creature spell merges with this creature (scope 'self') or one you control ('any')
   | 'turnedFaceUp' // this face-down permanent is turned face up
+  | 'lore' // you put a lore counter on a Saga you control (Sigurd)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -96,6 +99,8 @@ export type Effect = EffectBody & {
     charge?: number;
     /** "Activate only as a sorcery." */
     sorcery?: boolean;
+    /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
+    boast?: boolean;
   };
 };
 
@@ -112,6 +117,8 @@ export type EffectBody =
   | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
+  /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
+  | { kind: 'exchangeLife' }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
   /** each: an edict that hits every opponent, or every player, instead of one target. */
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
@@ -120,7 +127,7 @@ export type EffectBody =
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters' }
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
-  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
+  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean }
   /** keywords: "creatures you control have lifelink". */
   | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
@@ -146,7 +153,7 @@ export type EffectBody =
    * all: every matching card instead of n of them. from: whose graveyard ('any' graveyard, or only 'opponents''; default your own);
    * cards from someone else's graveyard enter under your control. maxCmc: only cards with at most this mana value.
    */
-  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: RecursionWhat; toTop?: boolean; all?: boolean; from?: 'any' | 'opponents'; maxCmc?: number; tapped?: boolean; /** Onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */ byExperience?: boolean }
+  | { kind: 'recursion'; n: number; toBattlefield: boolean; what?: RecursionWhat; toTop?: boolean; all?: boolean; from?: 'any' | 'opponents'; maxCmc?: number; tapped?: boolean; /** Onto the battlefield if its mana value is at most your experience counters, else to hand (Meren). */ byExperience?: boolean; /** Only creature cards with power less than the source's (Mirko). */ belowPower?: boolean; /** The returned permanent gets a finality counter. */ finality?: boolean }
   /** Put up to n cards from your library into your graveyard (Buried Alive, Entomb). what: creature cards only, or any. */
   | { kind: 'entomb'; n: number; what: 'creature' | 'any' }
   /** Opponents mill more: twice as many (mult 2, Bruvac) and/or extra cards (plus 4, The Water Crystal). */
@@ -163,7 +170,7 @@ export type EffectBody =
   | { kind: 'returnSelf'; counters: number }
   /** proliferate: only creatures that already have a counter. */
   /** byExperience: as many counters as you have experience counters (Kratos). */
-  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean; byExperience?: boolean }
+  | { kind: 'counters'; n: number; all: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
   /**
@@ -228,6 +235,8 @@ export type EffectBody =
   | { kind: 'selfKeyword'; keyword: string; cond: 'halfLife' | 'yourTurn' }
   /** Satya: a token copy of another nontoken creature you control, tapped and attacking; sacrificed at the next end step unless you pay energy equal to its mana value. */
   | { kind: 'copyCreature'; temporary: boolean }
+  /** A token copy of another nonlegendary artifact or enchantment; only while you're the monarch when `monarch` (Court of Vantress). */
+  | { kind: 'copyPermanent'; monarch?: boolean }
   /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
   | { kind: 'enterCounters'; n: number }
   /** Kudo: other creatures have this base power and toughness. */
@@ -291,6 +300,28 @@ export type EffectBody =
   | { kind: 'blink'; n: number; what: 'creature' | 'permanent' }
   /** The Ring tempts you (rule 701.54): choose a ring-bearer; each time adds one of the Ring's four abilities. */
   | { kind: 'ringTempts' }
+  /** Put a lore counter on target Saga you control (Sigurd's boast). Its chapter ability triggers. */
+  | { kind: 'lore' }
+  /** Static: when this permanent becomes the target of a spell, it is shuffled into its owner's library (Fblthp, the Lost). */
+  | { kind: 'shuffleWhenTargeted' }
+  /** Put a blight counter on target land: it loses its abilities and taps for {C} for good (Ultima). */
+  | { kind: 'blight' }
+  /** Static: whenever you tap a land for {C}, add an additional {C} (Ultima). */
+  | { kind: 'colorlessBoost' }
+  /** Target non-Aura enchantment you control becomes a creature with base power and toughness equal to its mana value, for good (Zur). */
+  | { kind: 'animate' }
+  /** Static: your creatures of this subtype have protection from ring-bearers (Lord of the Nazgûl). */
+  | { kind: 'ringProtection'; subtype: string }
+  /** Static: when an opponent's spell or ability makes you discard this card, create a token copy of target permanent (Orvar). */
+  | { kind: 'copyOnDiscard' }
+  /** Static: other creatures are Food artifacts with "{2}, {T}, Sacrifice this: gain 3 life" (Ygra). */
+  | { kind: 'foodCreatures' }
+  /** A Curse's ability (see SimCard.curse). */
+  | { kind: 'curse'; act: CurseAct; n: number }
+  /** Static: a Curse put into your graveyard from the battlefield returns attached to you at the next end step (Lynde). */
+  | { kind: 'returnCurses' }
+  /** You may move a Curse attached to you onto an opponent; if you do, draw n cards (Lynde). */
+  | { kind: 'passCurse'; n: number }
   /**
    * Rules about drawing: 'double' (Teferi's Ageless Insight: your draws past the first in your draw step are doubled),
    * 'steal' (Notion Thief: those draws of your opponents come to you instead), 'limit' (Narset: opponents draw at most one card a turn).
@@ -309,6 +340,35 @@ export type EffectBody =
   | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability'; /** Only spells you control. */ yours?: boolean };
 
 export type EffectKind = EffectBody['kind'];
+
+/**
+ * What a Curse does (Aura — Curse with "Enchant player", rule 303.4).
+ * - gold, zombie, gainLife, draw: you get it, and so does each opponent attacking the enchanted player (Curse of Opulence, Disturbance, Vitality, Verbosity).
+ * - attackerZombie: each player attacking the enchanted player may create a tapped 2/2 Zombie (Curse of Shallow Graves).
+ * - thirst: damage equal to the Curses attached to them. torment: they lose n unless they sacrifice a nonland permanent or discard.
+ * - surveil: you draw cards equal to the Curses attached to them. unbinding: reveal until a creature, it is yours, the rest are milled.
+ * - cruel: they sacrifice a creature or planeswalker, or lose n. drain: they lose n and you gain n.
+ * - burn: n damage to them. hex: a d6 of damage, then the Curse moves to another opponent at random.
+ * - spite: a spite counter on the Curse; when they lose, you gain that much life and draw that many.
+ * - restless: you create a 2/2 Zombie that can't block. fraying: they mill as many cards as went to their graveyard this turn.
+ * - obsessionDraw: they draw n more. obsessionDiscard: they discard their hand. misfortunes: tutor another Curse onto them.
+ * - shrink: their creatures get -n/-n. double: damage to them is doubled. hospitality: creatures attacking them have trample,
+ *   and each one that connects exiles their top card for its controller to play.
+ */
+export type CurseAct = 'gold' | 'zombie' | 'gainLife' | 'draw' | 'attackerZombie' | 'thirst' | 'torment' | 'surveil' | 'unbinding' | 'cruel' | 'drain' | 'burn' | 'hex' | 'spite' | 'restless' | 'fraying' | 'obsessionDraw' | 'obsessionDiscard' | 'misfortunes' | 'shrink' | 'double' | 'hospitality';
+
+/**
+ * When a Curse's ability happens. attacked: the enchanted player is attacked. theirUpkeep, theirDraw, theirEnd: steps of
+ * the enchanted player's turn. yourUpkeep: its controller's upkeep. eachEnd: every end step. draws, casts, creatureEnters,
+ * landEnters: things the enchanted player does. static: always on.
+ */
+export interface CurseAbility {
+  on: 'attacked' | 'theirUpkeep' | 'theirDraw' | 'theirEnd' | 'yourUpkeep' | 'eachEnd' | 'draws' | 'casts' | 'creatureEnters' | 'landEnters' | 'static';
+  act: CurseAct;
+  n: number;
+  /** casts: only these spells ('notFirst': every spell after their first each turn). */
+  filter?: 'noncreature' | 'instantSorcery' | 'notFirst';
+}
 
 /** Which cards a recursion effect can return. */
 export type RecursionWhat = 'any' | 'artifact' | 'enchantment' | 'instantSorcery' | 'land' | 'planeswalker' | 'creatureOrPlaneswalker' | 'artifactOrCreature' | 'artifactOrEnchantment' | 'permanent' | 'legendary';
@@ -423,6 +483,8 @@ export interface SimCard {
   charge?: number;
   /** Sunburst (rule 702.44): a creature gets +1/+1 counters, anything else charge counters, one for each color spent. */
   sunburst?: boolean;
+  /** A Curse: an Aura with "Enchant player" (rule 303.4) and what it does to that player. */
+  curse?: CurseAbility[];
   /** A nonland permanent that enters tapped. */
   entersTapped?: boolean;
   /** X is paid in life instead of mana (Toxic Deluge). */
