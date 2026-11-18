@@ -58,6 +58,10 @@ export interface Perm {
   loyalty?: number;
   /** Planeswalkers: a loyalty ability was activated this turn (rule 606.3). */
   loyaltyUsed?: boolean;
+  /** Stun counters: each replaces one untap. */
+  stun?: number;
+  /** A crewed Vehicle: its card while it isn't a creature. */
+  uncrewed?: SimCard;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
@@ -158,6 +162,8 @@ export type Action =
   | { type: 'land'; card: SimCard; back: boolean }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload'; maxX: number }
+  /** Crew a Vehicle: tap creatures to make it a creature until end of turn. */
+  | { type: 'crew'; permId: number }
   /** Cycling: pay the cost and discard the card to draw one. */
   | { type: 'cycle'; card: SimCard }
   /** Activate an ability of a permanent (`effect` is one of its card's effects). */

@@ -277,7 +277,9 @@ export class Game {
     // Untap step (502). No player gets priority.
     this.step = 'untap';
     for (const perm of p.battlefield) {
-      if (!perm.card.noUntap) perm.tapped = false;
+      // A stun counter is removed instead of untapping (rule 122.1d).
+      if (perm.stun && perm.tapped) perm.stun--;
+      else if (!perm.card.noUntap) perm.tapped = false;
       perm.sick = false;
     }
     for (const q of this.players) {
@@ -342,6 +344,10 @@ export class Game {
         perm.tempP = 0;
         perm.tempT = 0;
         perm.tempKw = [];
+        if (perm.uncrewed) {
+          perm.card = perm.uncrewed;
+          perm.uncrewed = undefined;
+        }
       }
     }
     yield* this.checkState();
@@ -497,6 +503,8 @@ export class Game {
       for (const effect of perm.card.effects) {
         if (this.canActivate(p, perm, effect, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect });
       }
+      // Crew, kept simple: in your first main phase, so the Vehicle can attack.
+      if (perm.card.crew && sorcery && this.step === 'main1' && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
     }
     return actions;
   }
@@ -555,6 +563,16 @@ export class Game {
       }
       case 'cast':
         return yield* this.cast(p, action.card, action.from === 'command', Math.max(0, Math.min(action.maxX, Math.floor(x) || 0)), action.from);
+      case 'crew': {
+        const perm = this.findPerm(action.permId);
+        const crew = perm ? this.crewFor(p, perm) : null;
+        if (!perm || !crew) return false;
+        for (const c of crew) c.tapped = true;
+        perm.uncrewed = perm.card;
+        perm.card = this.castCard(perm.card, 'crewed');
+        this.say(`${p.name} crews ${perm.card.name} with ${crew.map((c) => c.card.name).join(', ')}.`);
+        return true;
+      }
       case 'cycle': {
         const card = action.card;
         const plan = card.cycling ? this.planPayment(p, card.cycling.cost, 0, 0) : null;
@@ -684,9 +702,22 @@ export class Game {
     return p.battlefield.filter((q) => (what !== 'artifact' && q.card.isCreature) || (what !== 'creature' && q.card.isArtifact));
   }
 
+  /** Grand Arbiter, Thalia: extra generic mana `p` pays for this spell. */
+  private spellTax(p: PlayerState, card: SimCard): number {
+    if (!this.kindsInGame.has('spellTax')) return 0;
+    let tax = 0;
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) for (const e of perm.card.effects) {
+        if (e.kind === 'spellTax' && (e.all || q !== p) && (e.filter === 'any' || !card.isCreature)) tax += e.amount;
+      }
+    }
+    return tax;
+  }
+
   effectiveCost(p: PlayerState, card: SimCard, fromCommand = false, x = 0): number {
-    if (this.isFree(p, card)) return 0;
-    const base = card.cost.generic + card.cost.x * x + this.commanderTax(p, card, fromCommand);
+    if (this.isFree(p, card)) return this.spellTax(p, card);
+    const base = card.cost.generic + card.cost.x * x + this.commanderTax(p, card, fromCommand) + this.spellTax(p, card);
     return Math.max(0, base - this.costReduction(p, card)) + card.cost.pips.length;
   }
 
@@ -757,8 +788,9 @@ export class Game {
   private spellPlan(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, extra: number) {
     if (card.cost.life > 0 && card.cost.life >= p.life) return null;
     if (!this.canPayExtra(p, card)) return null;
-    if (this.isFree(p, card)) return this.planPayment(p, NO_COST, extra, 0);
-    return this.planPayment(p, card.cost, card.cost.x * x + this.commanderTax(p, card, fromCommand) + extra, this.costReduction(p, card));
+    const tax = this.spellTax(p, card);
+    if (this.isFree(p, card)) return this.planPayment(p, NO_COST, extra + tax, 0);
+    return this.planPayment(p, card.cost, card.cost.x * x + this.commanderTax(p, card, fromCommand) + extra + tax, this.costReduction(p, card));
   }
 
   canAfford(p: PlayerState, card: SimCard, fromCommand = false, x = 0, extra = 0): boolean {
@@ -881,15 +913,36 @@ export class Game {
 
   /** Returns false if the cast was taken back before anything was paid. */
   /** The same card priced at its flashback cost, for the cost and payment helpers. */
+  /** The cheapest untapped creatures that can crew this Vehicle (rule 702.122), or null. */
+  crewFor(p: PlayerState, vehicle: Perm): Perm[] | null {
+    const need = vehicle.card.crew;
+    if (!need || vehicle.uncrewed || vehicle.card.isCreature || p.battlefield.indexOf(vehicle) === -1) return null;
+    const pool = p.battlefield.filter((q) => q.card.isCreature && !q.tapped && q !== vehicle).sort((a, b) => this.power(a) - this.power(b));
+    // Prefer one creature that is just big enough; otherwise the smallest ones together.
+    const single = pool.find((q) => this.power(q) >= need);
+    const group: Perm[] = [];
+    let sum = 0;
+    for (const q of pool) {
+      if (sum >= need) break;
+      group.push(q);
+      sum += this.power(q);
+    }
+    if (sum < need) return null;
+    const groupPower = sum;
+    return single && this.power(single) <= groupPower ? [single] : group;
+  }
+
   private altCards = new Map<string, WeakMap<SimCard, SimCard>>();
   /** The card as it is cast: priced at its flashback cost, or with its overload cost and effects. */
-  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload'): SimCard {
-    if (from !== 'graveyard' && from !== 'overload') return card;
+  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed'): SimCard {
+    if (from === 'hand' || from === 'command') return card;
     let cache = this.altCards.get(from);
     if (!cache) this.altCards.set(from, (cache = new WeakMap()));
     let alt = cache.get(card);
     if (!alt) {
-      alt = from === 'graveyard'
+      alt = from === 'crewed'
+        ? { ...card, isCreature: true }
+        : from === 'graveyard'
         ? { ...card, cost: card.flashback ?? card.cost }
         : { ...card, cost: card.overload?.cost ?? card.cost, effects: card.overload?.effects ?? card.effects };
       cache.set(card, alt);
@@ -1226,6 +1279,7 @@ export class Game {
       counters: 0, damage: 0, deathtouched: false, tempP: 0, tempT: 0, tempKw: [],
       attachedTo: null, activations: 0, usedThisTurn: [], attacking: null, blocked: false, blocking: null,
       ...(card.loyalty !== undefined ? { loyalty: card.loyalty } : {}),
+      ...(card.stun ? { stun: card.stun } : {}),
     };
   }
 
@@ -1301,6 +1355,14 @@ export class Game {
     p.battlefield.push(perm);
     const etb = card.effects.filter((e) => e.when === 'resolve');
     if (etb.length) this.trigger(p, card, perm.id, etb);
+    if (this.kindsInGame.has('landPunish')) {
+      for (const q of this.allPerms()) for (const e of q.card.effects) {
+        if (e.kind === 'landPunish' && !p.shielded) {
+          p.life -= e.n;
+          this.say(`${q.card.name} deals ${e.n} damage to ${p.name} (life ${p.life}).`);
+        }
+      }
+    }
     this.fire(p, 'landfall');
   }
 
@@ -1459,6 +1521,19 @@ export class Game {
       case 'gainLife':
         this.gainLife(p, e.n === -1 ? Math.max(x, 1) : e.n);
         break;
+      case 'loseLife':
+        if (!p.shielded) p.life -= e.n;
+        break;
+      case 'digPermanent': {
+        const at = p.library.findIndex((c) => !c.isLand && !c.isInstant && !c.isSorcery && !isAura(c));
+        if (at === -1) break;
+        const [found] = p.library.splice(at, 1);
+        // The cards exiled on the way go to the bottom here.
+        p.library.push(...p.library.splice(0, at));
+        this.say(`${p.name} digs up ${found.name} and puts it onto the battlefield.`);
+        yield* this.enter(p, found, false, 0, null);
+        break;
+      }
       case 'tutor': {
         if (!p.library.length) break;
         if (e.creatureToBattlefield) {
@@ -1741,7 +1816,21 @@ export class Game {
     return out;
   }
 
+  /** Doran and Arcades: does this creature deal combat damage with its toughness? */
+  private usesToughness(perm: Perm): boolean {
+    if (!this.kindsInGame.has('toughnessMatters')) return false;
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const src of q.battlefield) for (const e of src.card.effects) {
+        if (e.kind !== 'toughnessMatters') continue;
+        if (e.defenders ? q.seat === perm.seat && perm.card.keywords.includes('defender') : true) return true;
+      }
+    }
+    return false;
+  }
+
   power(perm: Perm): number {
+    if (perm.card.isCreature && this.usesToughness(perm)) return Math.max(0, this.toughness(perm));
     let p = perm.card.power + perm.counters + perm.tempP + this.anthemBonus(perm.seat).p + this.scaled(perm);
     for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') p += e.p;
     return Math.max(0, p);
@@ -1755,6 +1844,7 @@ export class Game {
     switch (s.by) {
       case 'hand': return p.hand.length;
       case 'graveyard': return p.graveyard.length;
+      case 'oneGraveyard': return Math.max(0, ...this.opponents(p).map((o) => o.graveyard.length));
       case 'oppGraveyards': return this.opponents(p).reduce((n, o) => n + o.graveyard.length, 0);
       case 'allGraveyardCreatures': return this.players.reduce((n, q) => n + q.graveyard.filter((c) => c.isCreature).length, 0);
       case 'spellsInGraveyard': return p.graveyard.filter((c) => c.isInstant || c.isSorcery).length;
@@ -1774,7 +1864,7 @@ export class Game {
     if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw)) return true;
     if (!perm.card.isCreature) return false;
     if (this.kindsInGame.has('anthem')) {
-      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw)) return true;
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
     }
     for (const eq of this.attachments(perm)) {
       for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
@@ -1800,7 +1890,7 @@ export class Game {
 
     // Tokens cease to exist once they leave the battlefield (rule 704.5d). A copy goes back to being its own card.
     if (!perm.token && owner.alive) {
-      const card = perm.printed ?? perm.card;
+      const card = perm.printed ?? perm.uncrewed ?? perm.card;
       if (to === 'graveyard') owner.graveyard.push(card);
       else if (to === 'exile') owner.exile.push(card);
       else owner.hand.push(card);
@@ -1966,7 +2056,7 @@ export class Game {
 
   /** Creatures `p` could declare as attackers (rule 508.1a). */
   attackCandidates(p: PlayerState): Perm[] {
-    return p.battlefield.filter((perm) => perm.card.isCreature && !perm.tapped && (!perm.sick || this.hasKw(perm, 'haste')) && !this.hasKw(perm, 'defender'));
+    return p.battlefield.filter((perm) => perm.card.isCreature && !perm.tapped && (!perm.sick || this.hasKw(perm, 'haste')) && (!this.hasKw(perm, 'defender') || this.usesToughness(perm)));
   }
 
   /** Could `blocker` legally block `attacker`? (rule 509.1b) */

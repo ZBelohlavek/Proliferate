@@ -160,6 +160,16 @@ export class Bot implements Agent {
       if (equip) return pick(equip);
       const spell = this.chooseSpell(g, p, casts, false);
       if (spell) return pick(spell.action, spell.x);
+      // Crew a Vehicle when it hits harder than the creatures that would drive it.
+      const crew = actions.find((a) => {
+        if (a.type !== 'crew') return false;
+        const vehicle = g.findPerm(a.permId);
+        const drivers = vehicle ? g.crewFor(p, vehicle) : null;
+        if (!vehicle || !drivers || vehicle.sick) return false;
+        const lost = drivers.filter((q) => !q.sick).reduce((n, q) => n + g.power(q), 0);
+        return vehicle.card.power > lost;
+      });
+      if (crew) return pick(crew);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       return pick(undefined);
     }

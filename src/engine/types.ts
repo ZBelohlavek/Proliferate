@@ -83,7 +83,7 @@ export type EffectBody =
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature' }
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[] }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[] }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
@@ -96,6 +96,8 @@ export type EffectBody =
   | { kind: 'drain'; n: number; gain: number }
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
+  /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
+  | { kind: 'loseLife'; n: number }
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
   /** what: which cards it can return (default creatures). toTop: onto the library instead of into the hand. */
@@ -110,6 +112,14 @@ export type EffectBody =
   | { kind: 'attackTax'; amount: number }
   /** Each player can't cast more than one spell each turn. */
   | { kind: 'spellLimit' }
+  /** Spells cost more: your opponents' (or everyone's, with `all`), optionally only noncreature spells. */
+  | { kind: 'spellTax'; amount: number; filter: 'any' | 'noncreature'; all?: boolean }
+  /** Ankh of Mishra, Zo-Zu: a land entering costs its controller life. */
+  | { kind: 'landPunish'; n: number }
+  /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
+  | { kind: 'toughnessMatters'; defenders: boolean }
+  /** Reveal from the top of your library until a nonland permanent card, and put it onto the battlefield. */
+  | { kind: 'digPermanent' }
   /** Opponents can't cast their commanders from the command zone. */
   | { kind: 'commandLock' }
   /** Cards that would go to a graveyard are exiled instead. */
@@ -178,7 +188,11 @@ export interface SimCard {
   /** Storm: copied for each spell cast before it this turn. */
   storm?: boolean;
   /** Power (and toughness, if `toughness`) equal to a count, e.g. cards in your hand. */
-  scales?: { by: 'hand' | 'graveyard' | 'oppGraveyards' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'; toughness: boolean };
+  scales?: { by: 'hand' | 'graveyard' | 'oppGraveyards' | 'oneGraveyard' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'; toughness: boolean };
+  /** Vehicle: tap creatures with this much total power to make it a creature until end of turn. */
+  crew?: number;
+  /** Enters tapped with this many stun counters (each one stops an untap). */
+  stun?: number;
   /** Flashback: may be cast from the graveyard for this cost, then exiled. */
   flashback?: ManaCost;
   /** "As an additional cost to cast this spell": sacrifice a permanent of this kind and/or discard cards. */

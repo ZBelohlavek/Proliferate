@@ -969,4 +969,70 @@ describe('playing against bots', () => {
     a.hand.pop();
     expect(t.game.power(perm)).toBe(2);
   });
+  it('a Vehicle is crewed by tapping creatures and is a creature until end of turn', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    const car = spell('Test Wagon', '{G}', 1, 'Artifact', 'Trample\nCrew 2', { power: '5', toughness: '5', subTypes: ['Vehicle'], keywords: ['Trample'] });
+    expect(car.crew).toBe(2);
+    const wagon = t.game.put(0, car);
+    const driver = t.game.put(0, bears());
+    let crewed = false;
+    t.handlers[0] = (_g, d) => {
+      if (d.kind === 'attackers') return d.candidates.includes(wagon.id) ? [{ attacker: wagon.id, defender: 1 }] : [];
+      if (d.kind !== 'priority' || crewed) return undefined;
+      const i = d.actions.findIndex((x) => x.type === 'crew');
+      if (i === -1) return undefined;
+      crewed = true;
+      return { action: i };
+    };
+    t.until(() => b.life < 40);
+    expect(b.life).toBe(35);
+    expect(driver.tapped).toBe(true);
+    t.until((g) => g.activeSeat === 1);
+    expect(wagon.card.isCreature).toBe(false);
+  });
+
+  it('stun counters keep a permanent tapped, one untap step each', () => {
+    const t = new Table();
+    const kraken = creature('Slow Kraken', '{G}', 1, 9, 9, { text: '~ enters tapped with two stun counters on it.' });
+    expect(kraken.stun).toBe(2);
+    const perm = t.game.put(0, kraken, { tapped: true });
+    expect(perm.stun).toBe(2);
+    // Two untap steps each remove a counter; the third untaps it (seat 0's turns are 1, 3, 5, 7).
+    t.until(() => !perm.tapped);
+    expect(perm.stun).toBe(0);
+    expect(t.game.turnNumber).toBe(7);
+  });
+
+  it("a spell tax makes opponents' spells cost more", () => {
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.put(1, creature('Tax Collector', '{G}', 1, 1, 1, { text: 'Spells your opponents cast cost {1} more to cast.' }));
+    const spark = spell('Spark', '{G}', 1, 'Instant', 'You gain 1 life.');
+    expect(t.game.effectiveCost(a, spark)).toBe(2);
+    expect(t.game.effectiveCost(b, spark)).toBe(1);
+  });
+
+  it('Arcades-style defenders attack and hit with their toughness', () => {
+    const t = new Table();
+    const [, b] = t.game.players;
+    t.game.put(0, creature('Wall Marshal', '{G}', 1, 0, 1, { text: 'Each creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn\'t have defender.' }));
+    const wall = t.game.put(0, vanilla('Big Wall', 0, 6, ['Defender']));
+    expect(t.game.power(wall)).toBe(6);
+    t.handlers[0] = attackAll(1);
+    t.until(() => b.life < 40);
+    expect(b.life).toBe(34);
+  });
+
+  it('a kicked "instead" clause and a land punisher are read as written', () => {
+    const noise = spell('Loud Noise', '{G}', 1, 'Sorcery', 'Kicker {3}{G}\nEach opponent mills eight cards. If this spell was kicked, instead each opponent mills half their library, rounded up.');
+    expect(noise.effects.filter((e) => e.kind === 'mill')).toHaveLength(1);
+    const t = new Table();
+    const [a] = t.game.players;
+    t.game.put(1, creature('Land Hater', '{G}', 1, 2, 2, { text: "Whenever a land enters, ~ deals 2 damage to that land's controller." }));
+    a.hand.push(forest());
+    t.handlers[0] = (_g, d) => (d.kind === 'priority' && find(d.actions, 'land') !== -1 ? { action: find(d.actions, 'land') } : undefined);
+    t.until(() => a.life < 40);
+    expect(a.life).toBe(38);
+  });
 });
