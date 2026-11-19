@@ -11,7 +11,7 @@ import { threat } from '../rules/bot';
 import { spreeLabel, type Game } from '../rules/game';
 import { Session } from '../rules/session';
 import { STEP_NAMES, type Action, type Decision, type Perm, type PlayerState, type Target } from '../rules/types';
-import { CardFace, usePreview } from './BoardView';
+import { CardFace, cardImage, usePreview } from './BoardView';
 import { commanderNames } from './format';
 import { cardKey, loadFxLevel, saveFxLevel, useTableFx, type FxLevel } from './tableFx';
 
@@ -335,7 +335,7 @@ function Table({ session, speed, onSpeed, fx, onFx, fxUntil, redraw, onRestart, 
                   const hit = d?.kind === 'target' && isTarget({ kind: 'stack', id: item.id });
                   const aimed = [item.attachTo, ...item.targets].filter((t): t is Target => !!t);
                   return (
-                    <li key={item.id} className={`${hit ? 'target' : ''} ${item.kind}`} onClick={hit ? () => answer({ kind: 'stack', id: item.id }) : undefined} {...bind(item.card.imageUrl ?? null)}
+                    <li key={item.id} className={`${hit ? 'target' : ''} ${item.kind}`} onClick={hit ? () => answer({ kind: 'stack', id: item.id }) : undefined} {...bind(item.card.imageUrl ?? cardImage(item.card.name))}
                       data-fx={`stack:${item.id}`} data-fx-card={cardKey(item.card)} data-fx-name={item.card.name} data-fx-img={item.card.imageUrl ?? ''}>
                       <span className="stack-thumb"><CardFace name={item.card.name} imageUrl={item.card.imageUrl ?? null} pt={null} /></span>
                       <strong>{item.label}</strong>
@@ -571,7 +571,7 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
           <div className="card-row choice-row">
             {shown.map(({ o, i }) => (
               <div key={i} className={`board-card ${chosen.includes(i) ? 'selected' : 'can'}`} onClick={() => toggle(i)} title={o.label}>
-                <CardFace name={o.label} imageUrl={o.card?.imageUrl ?? null} pt={null} {...bind(o.card?.imageUrl ?? null)} />
+                <CardFace name={o.label} imageUrl={o.card ? o.card.imageUrl ?? cardImage(o.card.name) : null} pt={null} token {...bind(o.card ? o.card.imageUrl ?? cardImage(o.card.name) : null)} />
               </div>
             ))}
           </div>
@@ -730,11 +730,11 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
   const lands = p.battlefield.filter((q) => q.landInfo);
   const creatures = p.battlefield.filter((q) => !q.landInfo && q.card.isCreature);
   const others = p.battlefield.filter((q) => !q.landInfo && !q.card.isCreature);
-  const landGroups = new Map<string, { name: string; tapped: boolean; n: number }>();
+  const landGroups = new Map<string, { name: string; tapped: boolean; n: number; card: SimCard }>();
   for (const l of lands) {
     const name = l.landInfo === l.card.backLand ? l.card.backLand!.name : l.card.name;
     const key = `${name}|${l.tapped}`;
-    landGroups.set(key, { name, tapped: l.tapped, n: (landGroups.get(key)?.n ?? 0) + 1 });
+    landGroups.set(key, { name, tapped: l.tapped, n: (landGroups.get(key)?.n ?? 0) + 1, card: l.card });
   }
   const damage = [...p.commanderDamage].map(([key, n]) => `${n} from ${shortName(g.players[+key.split(':')[0]])}`);
   const active = g.activeSeat === p.seat && !g.over;
@@ -764,10 +764,14 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
             {g.monarch === p.seat && <span title="The monarch draws a card at each of their end steps">👑</span>}
             {damage.length > 0 && <span>Commander damage: {damage.join(', ')}</span>}
           </div>
-          <div className="land-row small">
-            {lands.length === 0 && <span className="muted">No lands</span>}
+          <div className="land-row">
+            {lands.length === 0 && <span className="muted small">No lands</span>}
             {[...landGroups.values()].map((l) => (
-              <span key={`${l.name}|${l.tapped}`} className={`land-chip ${l.tapped ? 'tapped' : ''}`} data-fx={`land:${p.seat}:${l.name}|${l.tapped}`} data-fx-card={l.n} data-fx-name={l.name}>{l.name}{l.n > 1 ? ` ×${l.n}` : ''}{l.tapped ? ' (tapped)' : ''}</span>
+              <div key={`${l.name}|${l.tapped}`} className={`board-card land ${l.tapped ? 'tapped' : ''}`} title={`${l.name}${l.n > 1 ? ` ×${l.n}` : ''}${l.tapped ? ' (tapped)' : ''}`}
+                data-fx={`land:${p.seat}:${l.name}|${l.tapped}`} data-fx-card={l.n} data-fx-name={l.name}>
+                <CardFace name={l.name} imageUrl={l.card.imageUrl ?? null} pt={null} {...bind(l.card.imageUrl ?? cardImage(l.name))} />
+                {l.n > 1 && <span className="land-count">×{l.n}</span>}
+              </div>
             ))}
           </div>
           <div className="card-row">
@@ -777,7 +781,7 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
               return (
                 <div key={`cz${i}`} className={`board-card command ${s.cls}`} onClick={s.onClick} title={`${card.name} — in the command zone${tax ? `, costs {${tax}} more` : ''}`}
                   data-fx={`cmd:${p.seat}:${cardKey(card)}`} data-fx-card={cardKey(card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
-                  <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={null} {...bind(card.imageUrl ?? null)} />
+                  <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={null} {...bind(card.imageUrl ?? cardImage(card.name))} />
                   <span className="cmdr-badge">CMDR</span>
                   <span className="zone-badge">command zone{tax ? ` +${tax}` : ''}</span>
                 </div>
@@ -825,7 +829,7 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
   return (
     <div className={`board-card ${perm.tapped ? 'tapped' : ''} ${perm.attacking !== null ? 'attacking' : ''} ${perm.blocking !== null ? 'blocking' : ''} ${state.cls}`} onClick={state.onClick} title={title}
       data-fx={`perm:${perm.id}`} data-fx-card={cardKey(perm.card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
-      <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={pt} token={perm.token} {...bind(card.imageUrl ?? null)} />
+      <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={pt} token={perm.token || !!perm.faceDown} {...bind(perm.token || perm.faceDown ? card.imageUrl ?? null : card.imageUrl ?? cardImage(card.name))} />
       {perm.isCommander && <span className="cmdr-badge">CMDR</span>}
       {perm.sick && card.isCreature && !g.hasKw(perm, 'haste') && <span className="sick-badge" title="Summoning sick">zZ</span>}
       {perm.counters > 0 && <span className="count-badge">+{perm.counters}</span>}
@@ -852,7 +856,7 @@ function HandCard({ card, cls, onClick, bind, fxKey }: { card: SimCard; cls: str
   const title = `${card.name} ${card.isLand ? '' : costText(card)}\n${card.typeLine}\n${card.notes.length ? `Plays as: ${card.notes.join('; ')}` : ''}`;
   return (
     <div className={`board-card hand ${cls}`} onClick={onClick} title={title} data-fx={fxKey} data-fx-card={cardKey(card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
-      <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={card.isCreature ? `${card.power}/${card.toughness}` : null} {...bind(card.imageUrl ?? null)} />
+      <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={card.isCreature ? `${card.power}/${card.toughness}` : null} {...bind(card.imageUrl ?? cardImage(card.name))} />
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
     </div>
   );

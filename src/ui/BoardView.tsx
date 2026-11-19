@@ -27,8 +27,8 @@ export function usePreview() {
       src={preview.url}
       alt=""
       style={{
-        left: Math.min(preview.x + 18, window.innerWidth - 270),
-        top: Math.max(8, Math.min(preview.y - 170, window.innerHeight - 360)),
+        left: Math.min(preview.x + 18, window.innerWidth - 320),
+        top: Math.max(8, Math.min(preview.y - 170, window.innerHeight - 430)),
       }}
     />
   );
@@ -120,13 +120,25 @@ function HandCard({ c, bind }: { c: HandCardView; bind: Bind }) {
   );
 }
 
+/**
+ * A card's picture looked up by name on Scryfall, for cards stored without
+ * one (decks imported before images were saved, back faces, copies). Tokens
+ * and face-down cards have no printed card to show.
+ */
+export function cardImage(name: string): string | null {
+  if (!name || / token$/i.test(name) || name === 'Face-down creature') return null;
+  return `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name.split(' // ')[0])}&format=image&version=normal`;
+}
+
 /** A card image, or a plain frame with the name for tokens / missing images. */
 export function CardFace({ name, imageUrl, pt, token, big, ...handlers }: { name: string; imageUrl: string | null; pt: string | null; token?: boolean; big?: boolean } & object) {
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState(0);
+  const sources = [imageUrl, token ? null : cardImage(name)].filter((u): u is string => !!u);
+  const src = sources[failed];
   return (
     <div className={`card-face ${big ? 'big' : ''}`} {...handlers}>
-      {imageUrl && !failed ? (
-        <img src={imageUrl} alt={name} loading="lazy" onError={() => setFailed(true)} />
+      {src ? (
+        <img key={src} src={src} alt={name} loading="lazy" onError={() => setFailed((n) => n + 1)} />
       ) : (
         <div className={`card-frame ${token ? 'token' : ''}`}>
           <span>{name}</span>
