@@ -4685,7 +4685,11 @@ export class Game {
         if (q && q.seat === p.seat) perms = [q];
         break;
       }
-      case 'artifacts': perms = p.battlefield.filter((q) => q.card.isArtifact && !q.card.isCreature && !q.landInfo && !q.uncrewed); break;
+      case 'artifacts':
+        perms = p.battlefield.filter((q) => q.card.isArtifact && !q.card.isCreature && !q.landInfo && !q.uncrewed);
+        // Depthshaker Titan's artifacts are sacrificed afterwards: ≈ its controller picks the ones it can spare (no mana rocks, Equipment or anything costly).
+        if (e.until === 'sacAtEnd') perms = perms.filter((q) => q.token || (q.card.cmc <= 3 && !q.card.effects.some((f) => f.kind === 'mana' || f.kind === 'equip')));
+        break;
       case 'vehicles': perms = p.battlefield.filter((q) => q.card.crew !== undefined && !q.card.isCreature && !q.uncrewed); break;
       case 'treasures': {
         if (!p.treasures) return;
