@@ -184,10 +184,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Spells your opponents cast that target this creature cost {1} less to cast.',
     why: 'Coming back as Infectious Curse (drain 1 each upkeep) is left out.',
   },
-  'Curse of Echoes': {
-    text: 'Enchant player',
-    why: 'Copying the enchanted player\'s instants and sorceries is left out.',
-  },
   'Azula, Ruthless Firebender': {
     text: 'Firebending 1 (Whenever this creature attacks, add {R}. This mana lasts until end of combat.)\nWhenever Azula attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: ~ gets +2/+2 until end of turn.',
     why: 'The +1/+1 for each experience counter is read as +2/+2; menace is left out.',
@@ -216,10 +212,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Equipped creature gets +1/+1 and has vigilance.\nWhenever equipped creature attacks, look at the top six cards of your library. Put one of them into your hand and the rest on the bottom of your library in a random order.\nEquip {1}',
     why: 'Only a card sharing a creature type with the creature can be taken; read as any card.',
   },
-  'Reconnaissance': {
-    text: '',
-    why: 'Removing your attackers from combat is left out.',
-  },
   'Elesh Norn': {
     text: 'Vigilance',
     why: 'The {1} tax on opponents\' damage and transforming into The Argent Etchings are left out.',
@@ -239,10 +231,6 @@ export const LATE_RULES: Record<string, CardRule> = {
   'Eye of Duskmantle': {
     text: 'Flying, lifelink',
     why: 'Casting surveilled cards from the graveyard for life is left out.',
-  },
-  'The Ozolith': {
-    text: '',
-    why: 'Keeping counters from creatures that leave is left out.',
   },
   'Piper of the Swarm': {
     text: 'Rats you control have menace.\n{1}{B}, {T}: Create a 1/1 black Rat creature token.\n{2}{B}{B}, {T}, Sacrifice a creature: Gain control of target creature.',
@@ -340,10 +328,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Up to X target creatures phase out. (While they\'re phased out, they\'re treated as though they don\'t exist. Each one phases in before its controller untaps during their next untap step.)',
     why: 'Exiling blue cards to cast it cheaper is left out.',
   },
-  'Resourceful Defense': {
-    text: '',
-    why: 'Moving counters is left out.',
-  },
   'The Creation of Avacyn': {
     text: '(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Search your library for a card, exile it face down, then shuffle.\nII — You lose 4 life.\nIII — You may put a creature card from your hand onto the battlefield.',
     why: 'The card found face down in chapter I is read as going to your hand; chapter II\'s life loss as 4, and chapter III as putting a creature from hand onto the battlefield.',
@@ -355,10 +339,6 @@ export const LATE_RULES: Record<string, CardRule> = {
   'Lukka, Coppercoat Outcast': {
     text: '+1: Exile the top three cards of your library. Creature cards exiled this way gain "You may cast this card from exile as long as you control a Lukka planeswalker."\n-2: Search your library for a creature card, put it onto the battlefield, then shuffle.\n−7: Each creature you control deals damage equal to its power to each opponent.',
     why: 'Exiling one of your creatures to reveal a bigger one is read as putting a creature from your library onto the battlefield.',
-  },
-  'Kill Switch': {
-    text: '',
-    why: 'Tapping all other artifacts is left out.',
   },
   'Omenpath Journey': {
     text: 'At the beginning of your end step, search your library for a land card, put it onto the battlefield tapped, then shuffle.',

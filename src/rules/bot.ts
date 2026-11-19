@@ -7,7 +7,7 @@
 
 import { isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
-import type { Effect, Mana, SimCard } from '../engine/types';
+import type { Color, Effect, Mana, SimCard } from '../engine/types';
 import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
@@ -219,6 +219,10 @@ export class Bot implements Agent {
   /** X of the spell this bot is in the middle of casting, for choosing its targets. */
   private castingX = 0;
   private plan: DeckPlan | null = null;
+  /** A permanent of ours about to be exiled or stolen, to sacrifice or destroy first (Claws of Gix, Despotic Scepter). */
+  private doomed: number | null = null;
+  /** The attacker Reconnaissance should pull out of combat. */
+  private reconTarget: number | null = null;
 
   constructor(readonly seat: number, seed: number, opts: BotOptions = {}) {
     this.rng = new Rng((seed ^ ((seat + 1) * 0x9e3779b1)) >>> 0);
@@ -286,10 +290,21 @@ export class Bot implements Agent {
       if (this.considered.has(top.id)) return pick(undefined);
       this.considered.add(top.id);
       if (top.controller === p.seat) return pick(this.copyOwn(top, actions));
-      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions) ?? this.redirect(g, p, top, actions));
+      return pick(this.response(g, p, top, casts) ?? this.selfSave(g, p, top, actions) ?? this.redirect(g, p, top, actions));
     }
 
     const myTurn = g.activeSeat === p.seat;
+    // Mana in the pool that empties as this step ends (Thran Turbine in the upkeep, firebending in combat): spend it on an ability it pays for in full.
+    if (!(myTurn && (g.step === 'main1' || g.step === 'main2'))) {
+      const pool = g.livePool(p).filter((m) => m.until !== 'kept');
+      const spare = pool.reduce((n, m) => n + m.n, 0);
+      if (spare > 0) {
+        const colored = pool.some((m) => m.colors === 'any');
+        const fits = (a: Action) => a.type === 'activate' && !!a.effect.activation && (colored || !a.effect.activation.cost.pips.length) && a.effect.activation.cost.generic + a.effect.activation.cost.pips.length <= spare;
+        const use = this.chooseAbility(g, p, actions.filter(fits));
+        if (use) return pick(use);
+      }
+    }
     // A spell or ability that knocks an opponent out (or mills them out) comes before anything else.
     if ((myTurn && (g.step === 'main1' || g.step === 'main2')) || (g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat)) {
       const kill = this.lethalAction(g, p, actions);
@@ -338,7 +353,7 @@ export class Bot implements Agent {
       if (unlock) return pick(unlock);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       // Before combat: haste and evasion abilities, tapping a blocker, hasty copies (Kiki-Jiki), borrowed attackers, and keeping a blocker out of the way (Zirda).
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext' || a.effect.kind === 'becomeCreature'))) ?? this.chooseCombatShaping(g, p, actions));
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext' || a.effect.kind === 'becomeCreature' || a.effect.kind === 'moveCounters'))) ?? this.chooseCombatShaping(g, p, actions));
     }
 
     // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
@@ -359,6 +374,13 @@ export class Bot implements Agent {
     if (g.step === 'declareBlockers' && myTurn) {
       const ninja = this.chooseNinjutsu(g, actions);
       if (ninja) return pick(ninja);
+      const recon = this.chooseRecon(g, p, actions, false);
+      if (recon) return pick(recon);
+    }
+    // Reconnaissance: attackers untap at end of combat, as if they had vigilance.
+    if (g.step === 'endCombat' && myTurn) {
+      const recon = this.chooseRecon(g, p, actions, true);
+      if (recon) return pick(recon);
     }
     if (g.step === 'declareBlockers' && !myTurn) {
       const fog = this.chooseFog(g, p, actions);
@@ -550,7 +572,7 @@ export class Bot implements Agent {
       const perm = g.findPerm(t.id);
       if (!perm || perm.seat !== p.seat || threat(g, perm) < 5) continue;
       // Protection, or a blink that makes the removal lose its target.
-      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
+      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => (f.kind === 'protect' && (f.returns === undefined || ((e.mode === 'destroy' || e.mode === 'damage') && perm.card.isCreature && !perm.token))) || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
       if (save) return save;
     }
     return undefined;
@@ -603,8 +625,24 @@ export class Bot implements Agent {
   }
 
   /** Regenerate-style "~ gains indestructible" in answer to destroy or damage removal aimed at it. */
-  private selfSave(p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
+  private selfSave(g: Game, p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
     if (top.controller === p.seat) return undefined;
+    // Claws of Gix, Despotic Scepter, Tel-Jilad Stylus: a permanent of ours about to be exiled or stolen goes first on our terms.
+    // Resourceful Defense: counters on one about to be removed move to another of ours.
+    for (let i = 0; i < top.effects.length; i++) {
+      const e = top.effects[i];
+      const t = top.targets[i];
+      const q = t?.kind === 'perm' ? p.battlefield.find((r) => r.id === t.id) : undefined;
+      if (!q || q.emblem) continue;
+      const taken = e.kind === 'steal' || (e.kind === 'removal' && e.mode === 'exile');
+      const removed = e.kind === 'removal' && e.mode !== 'edict';
+      const deny = taken && (threat(g, q) >= 2 || q.isCommander) ? actions.find((a) => a.type === 'activate' && ((a.effect.kind === 'ownPerm' && (g.targetCandidates(p, a.effect, g.findPerm(a.permId)) ?? []).some((c) => c.kind === 'perm' && c.id === q.id)) || (a.effect.activation?.sacOther?.what === 'permanent' && a.permId !== q.id))) : undefined;
+      const move = !deny && removed && q.counters >= 2 ? actions.find((a) => a.type === 'activate' && a.effect.kind === 'moveCounters' && a.effect.from === 'yours' && (g.targetCandidates(p, a.effect, g.findPerm(a.permId)) ?? []).some((c) => c.kind === 'perm' && c.id !== q.id)) : undefined;
+      if (deny || move) {
+        this.doomed = q.id;
+        return deny ?? move;
+      }
+    }
     // Mother of Runes: protection from the color of a spell or ability aimed at one of our creatures.
     const aimed = top.targets.some((t) => t?.kind === 'perm' && p.battlefield.some((q) => q.id === t.id && q.card.isCreature)) && cardColors(top.card).length > 0
       && top.effects.some((e) => e.kind === 'removal' || e.kind === 'steal' || e.kind === 'stun' || e.kind === 'equip');
@@ -959,6 +997,13 @@ export class Bot implements Agent {
     // Windfall, Wheel of Fortune: when it refills our hand by more than it refills the table's.
     if (kinds.has('wheelAll')) return this.wheelGain(g, p, card) >= 2 ? 40 + this.wheelGain(g, p, card) * 3 : null;
 
+    // Berserker's Frenzy: before our attack, when it makes their creatures die in blocks.
+    if (kinds.has('forceBlocks')) return this.frenzyWorth(g, p) ? 50 : null;
+    // Alter Reality, Whim of Volrath: only with a permanent worth changing (or copying, with Orvar).
+    if (kinds.has('textChange')) {
+      const aim = this.textTarget(g, p, card.effects.some((e) => e.kind === 'textChange' && !!e.landTypes));
+      return aim ? 30 + threat(g, aim) : null;
+    }
     // Purely reactive spells wait for something to react to.
     if (!card.isCreature && card.effects.length > 0 && card.effects.every((e) => REACTIVE_KINDS.has(e.kind))) return null;
     if (kinds.has('overrun')) return g.step === 'main1' && this.readyAttackers(g, p).length >= 3 ? 60 : null;
@@ -1164,6 +1209,8 @@ export class Bot implements Agent {
       }
       if (!perm || (!a.effect.activation?.tap && perm.activations >= 3)) return false;
       const e = a.effect;
+      // Claws of Gix: only in answer to removal (see selfSave). Reconnaissance: see chooseRecon.
+      if (e.activation?.sacOther?.what === 'permanent' || e.kind === 'removeFromCombat') return false;
       // Paying life: only while comfortably healthy.
       if ((e.activation?.cost.life ?? 0) > 0 && p.life < 20) return false;
       if (e.activation?.sacCreature) {
@@ -1203,7 +1250,9 @@ export class Bot implements Agent {
         case 'drain': return !e.emptyHand || g.opponents(p).some((o) => o.hand.length === 0);
         // "Creatures you control gain haste": before combat, with fresh creatures worth sending in.
         case 'overrun': return !e.p && !!e.grant?.includes('haste') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && q.sick && !q.tapped && g.power(q) >= 2 && !g.hasKw(q, 'haste'));
-        case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': case 'discard': case 'scry': return true;
+        // Ritual mana goes to the pool and empties as the step ends (rule 106.4): only worth it to feed a death drain (checked above).
+        case 'treasure': return !e.ritual || !!e.activation?.sacCreature;
+        case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'discard': case 'scry': return true;
         // Impulse draw that has to be played this turn: only in our own main phase with mana left to play it.
         case 'exilePlay': return e.until !== 'turn' || (g.activeSeat === p.seat && g.step === 'main2' && g.availableMana(p) >= 3);
         case 'freeCast': case 'search': return true;
@@ -1258,9 +1307,99 @@ export class Bot implements Agent {
           if (e.until && !(g.step === 'main1' && g.activeSeat === p.seat)) return false;
           return e.from !== 'battlefield' || (g.targetCandidates(p, e, perm) ?? []).length > 0;
         case 'copyNext': return g.activeSeat === p.seat && g.step === 'main1' && p.hand.some((c) => c.isInstant || c.isSorcery);
+        // Despotic Scepter, Tel-Jilad Stylus: take back (or deny) a permanent of ours an opponent controls.
+        case 'ownPerm': return (g.targetCandidates(p, e, perm) ?? []).some((t) => {
+          const q = t.kind === 'perm' ? g.findPerm(t.id) : null;
+          return !!q && q.seat !== p.seat && (threat(g, q) >= 2 || q.isCommander);
+        });
+        // Enhanced Surveillance: the graveyard back into the library before we run out.
+        case 'shuffleGraveyard': return p.library.length <= 6 && p.graveyard.length >= 8;
+        // Moxite Refinery: counters doing nothing move onto our best creature, before combat.
+        case 'moveCounters': {
+          if (e.from !== 'yours' || g.activeSeat !== p.seat || g.step !== 'main1') return false;
+          return (g.targetCandidates(p, e, perm) ?? []).some((t) => {
+            const q = t.kind === 'perm' ? g.findPerm(t.id) : null;
+            const from = q ? g.counterDonor(p, q) : null;
+            return !!q && !!from && q.card.isCreature && !q.sick && from.counters + (from.charge ?? 0) >= 2;
+          });
+        }
+        // Kill Switch: after our own turn's work, when opponents' artifacts matter more than ours.
+        case 'tapArtifacts': return g.activeSeat === p.seat && g.step === 'main2' && this.killSwitchGain(g, p, perm) >= 4;
+        // Isochron Scepter: the imprinted instant when it has something to do.
+        case 'castImprinted': {
+          const card = g.imprinted.get(perm.id);
+          if (!card) return false;
+          const top = g.stack[g.stack.length - 1];
+          if (card.effects.some((f) => f.kind === 'counter')) return !!top && top.kind === 'spell' && top.controller !== p.seat && card.effects.some((f) => f.kind === 'counter' && counterMatches(f.target, top.card)) && this.wantsToCounter(g, p, top);
+          if (g.stack.length) return false;
+          // Dramatic Reversal and other untaps: when our tapped mana rocks give back more than the {2}.
+          if (card.effects.some((f) => f.kind === 'untap')) return g.activeSeat === p.seat && p.battlefield.filter((q) => q !== perm && !q.landInfo && q.tapped && q.card.effects.some((f) => f.kind === 'mana')).length >= 2;
+          const aimed = card.effects.find((f) => f.when === 'resolve' && (f.kind === 'removal' || f.kind === 'tap'));
+          if (aimed) return (g.targetCandidates(p, aimed, perm) ?? []).some((t) => (t.kind === 'perm' && g.findPerm(t.id)?.seat !== p.seat && threat(g, g.findPerm(t.id)!) >= 2));
+          return g.activeSeat !== p.seat && g.step === 'end';
+        }
         default: return false;
       }
     });
+  }
+
+  /** Reconnaissance: pull a blocked attacker that would die for nothing out of combat, or (at end of combat) untap an attacker. */
+  private chooseRecon(g: Game, p: PlayerState, actions: Action[], untap: boolean): Action | undefined {
+    const recon = actions.find((a) => a.type === 'activate' && a.effect.kind === 'removeFromCombat');
+    if (!recon) return undefined;
+    const pull = p.battlefield.find((a) => {
+      if (a.attacking === null) return false;
+      if (untap) return a.tapped && a.card.isCreature;
+      const blockers = g.blockersOf(a);
+      return a.blocked && blockers.length > 0 && blockers.some((b) => g.fightResult(a, b).killsAttacker) && !blockers.some((b) => g.fightResult(a, b).killsBlocker && threat(g, b) >= threat(g, a));
+    });
+    if (!pull) return undefined;
+    this.reconTarget = pull.id;
+    return recon;
+  }
+
+  /** Kill Switch: what opponents lose by having their artifacts tapped until our next turn, less what we lose. */
+  private killSwitchGain(g: Game, p: PlayerState, self: Perm): number {
+    const worth = (q: Perm) => (q.tapped ? 0 : q.card.isCreature ? Math.max(1, g.power(q)) : q.card.effects.some((e) => e.kind === 'mana') ? 2 : 1);
+    const isArtifact = (q: Perm) => q !== self && !q.emblem && (q.card.isArtifact || g.foodAbility(q));
+    const theirs = g.opponents(p).flatMap((o) => o.battlefield).filter(isArtifact).reduce((n, q) => n + worth(q), 0);
+    // Ours stay tapped through our next untap step too, so count them even if tapped now.
+    const ours = p.battlefield.filter(isArtifact).reduce((n, q) => n + Math.max(1, worth(q)), 0);
+    return theirs - ours;
+  }
+
+  /**
+   * Alter Reality, Whim of Volrath: the permanent to change the text of. With Orvar or Vesuvan Duplimancy out, our own best
+   * permanent (the spell gets it copied); otherwise an opponent's protection from our color, or our protection made useful.
+   */
+  textTarget(g: Game, p: PlayerState, landTypes: boolean): Perm | null {
+    let best: Perm | null = null;
+    let bestWorth = 2.5;
+    for (const src of p.battlefield) for (const e of src.card.effects) {
+      if (e.kind !== 'tokenCopy' || e.of !== 'subject' || e.when !== 'cast' || !e.filter || (e.castFilter && e.castFilter !== 'any' && e.castFilter !== 'instantSorcery')) continue;
+      for (const q of p.battlefield) {
+        if (q === src || !g.copyMatches(p, q, e.filter, src) || !g.canTarget(p, q) || (q.card.isLegendary && !e.nonlegendary)) continue;
+        const worth = threat(g, q) + etbWorth(q);
+        if (worth > bestWorth) [best, bestWorth] = [q, worth];
+      }
+    }
+    if (best) return best;
+    const colors = new Set(p.identity);
+    for (const o of g.opponents(p)) for (const q of o.battlefield) {
+      if (!g.canTarget(p, q) || threat(g, q) < 3) continue;
+      if (q.card.keywords.some((k) => /^(pro|hexfrom):[WUBRG]$/.test(k) && colors.has(k.slice(-1) as Color))) return q;
+      if (landTypes && q.card.keywords.some((k) => k.endsWith('walk') && p.battlefield.some((l) => l.landInfo && new RegExp(k.replace('walk', ''), 'i').test(l.card.typeLine)))) return q;
+    }
+    return null;
+  }
+
+  /** Berserker's Frenzy: before our attack, when opponents have creatures that would die blocking ours. */
+  private frenzyWorth(g: Game, p: PlayerState): boolean {
+    if (g.activeSeat !== p.seat || g.step !== 'main1') return false;
+    const mine = this.readyAttackers(g, p).filter((a) => g.power(a) >= 3);
+    if (!mine.length) return false;
+    const victims = g.opponents(p).flatMap((o) => o.battlefield).filter((b) => b.card.isCreature && !b.tapped && mine.some((a) => g.canBlock(b, a) && g.fightResult(a, b).killsBlocker && !g.fightResult(a, b).killsAttacker));
+    return victims.reduce((n, b) => n + threat(g, b), 0) >= 4;
   }
 
   /**
@@ -1419,6 +1558,26 @@ export class Bot implements Agent {
       return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0))) ?? d.candidates[0];
     }
     switch (e.kind) {
+      case 'ownPerm': {
+        const doomed = perms.find((q) => q.id === this.doomed);
+        if (doomed) return asTarget(doomed);
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => threat(g, q) + (q.isCommander ? 5 : 0))) ?? (d.cancellable ? null : d.candidates[0]);
+      }
+      case 'removeFromCombat':
+        return asTarget(perms.find((q) => q.id === this.reconTarget)) ?? asTarget(bestOf(mine, (q) => (q.tapped ? 1 : 0))) ?? d.candidates[0];
+      case 'ozolith': {
+        const src = p.battlefield.find((q) => q.card === d.card);
+        const n = src?.counters ?? 0;
+        if (n > 0) return asTarget(bestOf(mine.filter((q) => q.card.isCreature), (q) => threat(g, q) + (g.hasKw(q, 'flying') || g.hasKw(q, 'trample') ? 2 : 0))) ?? null;
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => threat(g, q))) ?? null;
+      }
+      case 'moveCounters': {
+        const doomed = this.doomed;
+        const pool = mine.filter((q) => q.id !== doomed);
+        return asTarget(bestOf(pool, (q) => (q.card.isCreature ? threat(g, q) + 5 : 0) + (g.hasKw(q, 'flying') || g.hasKw(q, 'trample') ? 2 : 0))) ?? d.candidates[0];
+      }
+      case 'textChange':
+        return asTarget(this.textTarget(g, p, !!e.landTypes)) ?? d.candidates[0];
       case 'fog':
         // The attacker that would hurt us most.
         return asTarget(bestOf(perms, (q) => (q.attacking === p.seat ? 10 : 0) + (q.blocked ? 0 : 5) + g.power(q))) ?? d.candidates[0];
@@ -2140,6 +2299,7 @@ export class Bot implements Agent {
         return top((i) => {
           const q = perm(i);
           if (!q) return d.options[i].label === 'Treasure' ? 100 : 0;
+          if (q.id === this.doomed) return 1000;
           if (q.borrowed) return 50;
           return -threat(g, q) - (q.landInfo ? (g.landCount(p) > 7 ? 1 : 6) : 0) + (q.token ? 1 : 0);
         }, d.min);

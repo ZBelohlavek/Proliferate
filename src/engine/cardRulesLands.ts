@@ -29,7 +29,7 @@ export const LAND_RULES: Record<string, CardRule> = {
     text: 'This land enters tapped unless you control a basic land.\n{T}: Add {R}.',
     add: [{ kind: 'treasure', n: 4, ritual: true, when: 'activated', activation: { cost: { generic: 1, pips: [['R']], x: 0, life: 0 }, tap: true, sacrifice: false, sorcery: true } }],
     notes: ['Activated: four red mana for the turn (firebending 4)'],
-    why: 'Firebending\'s mana lasts until end of combat; as for firebending creatures, it is kept as one-shot mana in the main phase.',
+    why: 'Firebending\'s mana lasts until end of combat; here it is mana in the pool when the ability resolves, which empties at the end of the step (rule 106.4), so bots leave it alone.',
   },
   'Access Tunnel': {
     text: '{T}: Add {C}.\n{3}, {T}: Target creature can\'t be blocked this turn.',

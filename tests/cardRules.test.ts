@@ -71,10 +71,10 @@ describe('card-specific rules', () => {
     b.hand.push(manaDrain());
     t.handlers[0] = castOnce('Craw Wurm');
     t.handlers[1] = castOnce('Mana Drain', (g) => g.stack.length === 1);
-    const before = b.treasures;
     t.finishTurn();
     expect(a.graveyard.map((c) => c.name)).toContain('Craw Wurm');
-    expect(b.treasures - before).toBe(6);
+    // The mana comes at the beginning of b's next main phase (it waits in the pool until then).
+    expect(b.pool).toEqual([expect.objectContaining({ n: 6, until: 'nextMain' })]);
   });
 
   it('Mental Misstep can only counter a spell with mana value 1', () => {

@@ -76,6 +76,10 @@ export type Trigger =
   | 'permDies' // an artifact or enchantment (castFilter) is put into a graveyard from the battlefield: yours (scope 'any') or anyone's ('all')
   | 'proliferate' // you proliferate (rule 701.34)
   | 'discard' // you discard a card (once for each card)
+  | 'leaveGraveyard' // one or more cards leave your graveyard at once (castFilter 'creature': only creature cards; Desecrated Tomb)
+  | 'permLeaves' // a permanent you control leaves the battlefield (castFilter 'creature': only creatures); x = the +1/+1 counters it had (The Ozolith, Resourceful Defense)
+  | 'beginCombat' // the beginning of combat on your turn (The Ozolith)
+  | 'minusCounters' // you put one or more -1/-1 counters on a creature; x = how many (Nest of Scarabs)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -157,8 +161,10 @@ export type Effect = EffectBody & {
     removeCounters?: { n: number; from: 'self' | 'any' };
     /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
     boast?: boolean;
-    /** "Sacrifice a Food", "sacrifice five artifacts": other permanents of yours sacrificed as part of the cost. */
-    sacOther?: { what: 'food' | 'artifact'; n: number };
+    /** "Sacrifice a Food", "sacrifice five artifacts", "sacrifice a permanent" (Claws of Gix): other permanents of yours sacrificed as part of the cost. */
+    sacOther?: { what: 'food' | 'artifact' | 'permanent'; n: number };
+    /** "Exile this enchantment": the source is exiled as a cost (not a sacrifice). */
+    exileSelf?: boolean;
   };
 };
 
@@ -211,7 +217,9 @@ export type EffectBody =
   /** Myr Battlesphere: tap X untapped creatures of this type you control; the source gets +X/+0 and deals X damage to the player it attacks. */
   | { kind: 'tapAllies'; subtype: string }
   /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
-  | { kind: 'treasure'; n: number; ritual?: boolean; /** One more {U} for each untapped Island you control (High Tide). */ islands?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean; /** One mana for each creature you control that shares a creature type with the one that entered (Mana Echoes). */ shareType?: boolean }
+  | { kind: 'treasure'; n: number; ritual?: boolean; /** One more {U} for each untapped Island you control (High Tide). */ islands?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean; /** One mana for each creature you control that shares a creature type with the one that entered (Mana Echoes). */ shareType?: boolean;
+      /** Ritual mana that lasts until end of combat instead of the end of the step (firebending, rule 106.4). */ lasts?: 'combat';
+      /** Ritual mana that can only pay for activated abilities (Thran Turbine). */ abilityOnly?: boolean; /** Colorless mana instead of any color. */ colorless?: boolean }
   | { kind: 'extraLand' }
   /**
    * count: the number drawn is counted as it resolves, and `n` is only the reader's estimate: the greatest power or
@@ -254,16 +262,16 @@ export type EffectBody =
   /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
   | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen' | 'token'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen' | 'token'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** Only nonlegendary creatures (Cybermen Squadron). */ nonlegendary?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
   /** self: the source itself ("~ gains haste until end of turn"), no target. */
-  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean }
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean; /** "Double its power": +X/+0 where X is its power as this resolves (p is the bots' estimate). */ doublePower?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
   | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean; /** The enchanted permanent loses all abilities: a vanilla creature of `lockSize` (Amphibian Downpour) or a land that taps for {C} (Imprisoned in the Moon). */ lock?: 'blank' | 'land'; lockSize?: { p: number; t: number } }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
-  | { kind: 'protect'; all?: boolean; player?: boolean }
+  | { kind: 'protect'; all?: boolean; player?: boolean; /** Undying Malice, Not Dead After All: instead of protection, it returns tapped if it dies this turn, with this many +1/+1 counters. */ returns?: number }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   /** devotion: n is your devotion to this color instead (Gray Merchant). */
   | { kind: 'drain'; n: number; gain: number; devotion?: Color; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean; /** "Deals N damage to each opponent": damage, so Torbran and prevention apply. */ damage?: boolean }
@@ -293,7 +301,7 @@ export type EffectBody =
   /** Put the top (or bottom) card of your library into your graveyard; a creature card with power up to the source's goes onto the battlefield (Grenzo). */
   | { kind: 'millReanimate'; fromBottom: boolean }
   /** Persist and undying: the creature that just died returns with a -1/-1 (persist) or +1/+1 (undying) counter. */
-  | { kind: 'returnSelf'; counters: number }
+  | { kind: 'returnSelf'; counters: number; tapped?: boolean }
   /** proliferate: only creatures that already have a counter. */
   /** byExperience: as many counters as you have experience counters (Kratos). */
   | { kind: 'counters'; n: number; all: boolean; /** "Each artifact creature you control" (Steel Overseer). */ artifact?: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
@@ -762,7 +770,45 @@ export type EffectBody =
   /** Hideaway (rule 702.75): play the card exiled with the source without paying its mana cost, if your graveyard holds `graveyard` cards. */
   | { kind: 'playHidden'; graveyard?: number; /** Hideaway lands: creatures you control have total power 10+ (Mosswort Bridge), you attacked with three or more creatures this turn (Windbrisk Heights), an opponent was dealt 7+ damage this turn (Spinerock Knoll). */ cond?: 'power10' | 'attacked3' | 'damage7' }
   /** Exile a nonland card with mana value up to `maxCmc` from your hand; it becomes plotted (rule 702.170, Jace Reawakened). */
-  | { kind: 'plotFromHand'; maxCmc: number };
+  | { kind: 'plotFromHand'; maxCmc: number }
+  // --- The last rules-bending cards (see cardRulesFinal.ts) ---------------------
+  /** Static: mana you would lose as a step or phase ends becomes colorless and stays (Horizon Stone, rule 106.4). */
+  | { kind: 'keepMana' }
+  /**
+   * Static: permanents have these card types in addition to their others (rule 205.1b): every permanent (Enchanted Evening),
+   * or your nonland permanents and the permanent spells you cast (Encroaching Mycosynth).
+   */
+  | { kind: 'addTypes'; types: ('enchantment' | 'artifact')[]; who: 'all' | 'yoursNonland' }
+  /** Static: players can't get counters, and counters can't be put on artifacts, creatures, enchantments or lands (Solemnity). */
+  | { kind: 'noCounters' }
+  /** Tap all other artifacts; they don't untap during their controllers' untap steps for as long as the source stays tapped (Kill Switch). */
+  | { kind: 'tapArtifacts' }
+  /** Isochron Scepter: copy the card exiled with this and cast the copy without paying its mana cost. */
+  | { kind: 'castImprinted' }
+  /** Target permanent you own (even one an opponent controls) is destroyed or put on the bottom of your library (Despotic Scepter, Tel-Jilad Stylus). */
+  | { kind: 'ownPerm'; to: 'destroy' | 'bottom' }
+  /** Remove target attacking creature you control from combat and untap it (Reconnaissance, rule 506.4). */
+  | { kind: 'removeFromCombat' }
+  /** Berserker's Frenzy: roll two d20 and keep the higher; 1-14 chosen creatures block this turn if able, 15-20 you choose how creatures block. */
+  | { kind: 'forceBlocks' }
+  /** Static: you look at `n` more cards each time you surveil (Enhanced Surveillance). */
+  | { kind: 'surveilBoost'; n: number }
+  /** Shuffle your graveyard into your library (Enhanced Surveillance). */
+  | { kind: 'shuffleGraveyard' }
+  /** The Ozolith: keep the counters ('store': of the creature that left), or move the kept counters onto target creature you control ('release'). */
+  | { kind: 'ozolith'; act: 'store' | 'release' }
+  /**
+   * Move +1/+1 counters onto target permanent you control: those the permanent that left had ('subject', Resourceful Defense's trigger),
+   * or ones removed from another permanent you control ('yours', Resourceful Defense's activated ability, Moxite Refinery).
+   */
+  | { kind: 'moveCounters'; from: 'subject' | 'yours' }
+  /** Knowledge Pool: each player exiles the top three cards of their library ('exile'); a spell cast from hand is exiled and swapped for one in the pool ('static'). */
+  | { kind: 'knowledgePool' }
+  /**
+   * Text change (rule 612): replace a color word (or, with `landTypes`, a basic land type) in target permanent's text with another,
+   * until end of turn or for good. The engine changes what that reads as: protection from a color and landwalk.
+   */
+  | { kind: 'textChange'; until: 'eot' | 'forever'; landTypes?: boolean };
 
 /** Which spells a flash grant covers. 'creatureFirst': the first creature spell you cast each turn (The Blue Spirit). */
 export type FlashFilter = 'all' | 'sorcery' | 'artifact' | 'colorless' | 'artifactOrColorless' | 'noncreature' | 'auraEquipment' | 'creatureFirst';
@@ -843,7 +889,7 @@ export type EffectKind = EffectBody['kind'];
  * - shrink: their creatures get -n/-n. double: damage to them is doubled. hospitality: creatures attacking them have trample,
  *   and each one that connects exiles their top card for its controller to play.
  */
-export type CurseAct = 'gold' | 'zombie' | 'gainLife' | 'draw' | 'attackerZombie' | 'thirst' | 'torment' | 'surveil' | 'unbinding' | 'cruel' | 'drain' | 'burn' | 'hex' | 'spite' | 'restless' | 'fraying' | 'obsessionDraw' | 'obsessionDiscard' | 'misfortunes' | 'shrink' | 'double' | 'hospitality';
+export type CurseAct = 'echoes' | 'gold' | 'zombie' | 'gainLife' | 'draw' | 'attackerZombie' | 'thirst' | 'torment' | 'surveil' | 'unbinding' | 'cruel' | 'drain' | 'burn' | 'hex' | 'spite' | 'restless' | 'fraying' | 'obsessionDraw' | 'obsessionDiscard' | 'misfortunes' | 'shrink' | 'double' | 'hospitality';
 
 /**
  * When a Curse's ability happens. attacked: the enchanted player is attacked. theirUpkeep, theirDraw, theirEnd: steps of

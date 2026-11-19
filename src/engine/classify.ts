@@ -634,7 +634,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
   if ((m = line.match(/^firebending (\d+|x)$/))) {
     const n = m[1] === 'x' ? 3 : parseInt(m[1], 10);
-    out.push({ body: { kind: 'treasure', n, ritual: true }, note: `Firebending: ${m[1] === 'x' ? 'X' : n} red mana when it attacks` });
+    out.push({ body: { kind: 'treasure', n, ritual: true, lasts: 'combat' }, note: `Firebending: ${m[1] === 'x' ? 'X' : n} red mana when it attacks` });
   }
   // Draw replacement and limits.
   if (/^if you would draw a card except the first one you draw in each of your draw steps, draw two cards instead/.test(line)) out.push({ body: { kind: 'drawRule', rule: 'double' }, note: 'Your extra draws are doubled' });
@@ -1708,6 +1708,8 @@ function curseLine(line: string): CurseAbility[] | null {
   if ((m = line.match(/^whenever enchanted player casts a spell other than the first spell they cast each turn[^,]*, ~ deals (\d+) damage to them/))) return [{ on: 'casts', act: 'burn', n: parseInt(m[1], 10), filter: 'notFirst' }];
   if (/^whenever enchanted player casts a noncreature spell, roll a d6\. ~ deals damage to that player equal to the result\. then attach ~ to another one of your opponents/.test(line)) return [{ on: 'casts', act: 'hex', n: 1, filter: 'noncreature' }];
   if (/^whenever enchanted player casts a spell, put a spite counter on ~/.test(line)) return [{ on: 'casts', act: 'spite', n: 1 }];
+  // Curse of Echoes: each other player may copy the enchanted player's instants and sorceries.
+  if (/^whenever enchanted player casts an instant or sorcery spell, each other player may copy that spell/.test(line)) return [{ on: 'casts', act: 'echoes', n: 1, filter: 'instantSorcery' }];
   if (/^when enchanted player loses the game, you gain x life and draw x cards, where x is the number of spite counters/.test(line)) return [];
   if ((m = line.match(/^whenever a creature enchanted player controls enters, that player loses (\d+) life and you gain \d+ life/))) return [{ on: 'creatureEnters', act: 'drain', n: parseInt(m[1], 10) }];
   if (/^whenever a land enchanted player controls enters, you create a 2\/2 black zombie/.test(line)) return [{ on: 'landEnters', act: 'restless', n: 1 }];
@@ -1726,7 +1728,7 @@ function describeCurse(c: CurseAbility): string {
     unbinding: 'you get the first creature off their library', cruel: `they sacrifice a creature or lose ${c.n}`, drain: `they lose ${c.n}, you gain ${c.n}`, burn: `${c.n} damage to them`,
     hex: 'a d6 of damage, then it moves on', spite: 'a spite counter (you gain and draw that many when they lose)', restless: 'you make a 2/2 Zombie', fraying: 'they mill what went to their graveyard this turn',
     obsessionDraw: `they draw ${c.n} more`, obsessionDiscard: 'they discard their hand', misfortunes: 'put another Curse on them from your library', shrink: `their creatures get -${c.n}/-${c.n}`,
-    double: 'damage to them is doubled', hospitality: 'attackers have trample and steal their top card',
+    double: 'damage to them is doubled', hospitality: 'attackers have trample and steal their top card', echoes: 'each other player may copy their instants and sorceries',
   };
   return `${when}: ${what[c.act]}`;
 }

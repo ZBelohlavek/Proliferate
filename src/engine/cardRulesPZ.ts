@@ -256,10 +256,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: 'Flying',
     why: 'Unearth for Cleric, Rogue, Warrior and Wizard cards in your graveyard is left out.',
   },
-  Solemnity: {
-    text: '',
-    why: 'Stopping all counters is not modelled. The engine plays it as an enchantment that does nothing.',
-  },
   Soulherder: {
     text: 'At the beginning of your end step, you may exile another target creature you control, then return that card to the battlefield under its owner\'s control.\nAt the beginning of your end step, put a +1/+1 counter on ~.',
     why: 'Grows whenever any creature is exiled from the battlefield; its own blink each turn does that, so it gets one counter a turn. Other exiles are left out.',
@@ -350,10 +346,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     add: [{ kind: 'proliferateTwice', when: 'static' }],
     notes: ['If you would proliferate, you proliferate twice instead'],
     why: 'Removing three counters as part of the cost is left out.',
-  },
-  'Tel-Jilad Stylus': {
-    text: '',
-    why: 'Putting your own permanent on the bottom of your library is left out: bots don\'t use it to dodge removal.',
   },
   'Termination Facilitator': {
     text: '{T}: Put a bounty counter on target creature or planeswalker. Activate only as a sorcery.',
@@ -583,10 +575,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     add: [{ kind: 'tokens', n: 1, power: 3, toughness: 2, keywords: [], when: 'discard', chance: 0.4 }],
     notes: ['When you discard a creature card: pay {2} for a 3/2 Eldrazi Horror (≈ 40% of discards)'],
     why: 'The discard trigger has no card-type filter or optional payment: the 3/2 comes on 40% of your discards, about how often the card is a creature and {2} is spare.',
-  },
-  'Whim of Volrath': {
-    text: '',
-    why: 'Changing a color word or land type on a permanent is not modelled: it does nothing here.',
   },
   'Wild-Magic Sorcerer': {
     text: 'Whenever you cast a spell from exile, discover 3.',

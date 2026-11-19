@@ -28,6 +28,7 @@ import type { Effect, SimCard } from './types';
 import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
 import { LAND_RULES } from './cardRulesLands';
 import { LATE_RULES } from './cardRulesLate';
+import { FINAL_RULES } from './cardRulesFinal';
 
 export interface CardRule {
   text?: string;
@@ -193,6 +194,9 @@ export const CARD_RULES: Record<string, CardRule> = {
   // --- Lands, and the leftovers of the mechanic groups (cardRulesLands.ts, cardRulesLate.ts) ---
   ...LAND_RULES,
   ...LATE_RULES,
+
+  // --- The last rules-bending cards (cardRulesFinal.ts) -------------------------------------
+  ...FINAL_RULES,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */

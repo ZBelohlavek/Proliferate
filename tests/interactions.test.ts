@@ -343,9 +343,10 @@ describe('token and counter doublers', () => {
     const ritual = castOnce('Dark Ritual', (g) => g.stack.length === 0 && a.treasures > 0);
     t.handlers[0] = (g, d) => rich(g, d) ?? ritual(g, d);
     t.finishTurn();
-    // Strike It Rich: 2 Treasures. Dark Ritual, paid with the second Forest: 3 mana, not 6.
+    // Strike It Rich: 2 Treasures. Dark Ritual, paid with the second Forest: 3 mana in the pool (rule 106.4), not 6, and no Treasures.
     expect(names(a.graveyard)).toEqual(['Strike It Rich', 'Dark Ritual']);
-    expect(a.treasures).toBe(5);
+    expect(a.treasures).toBe(2);
+    expect(t.game.log!.some((l) => /gets 3 mana/.test(l))).toBe(true);
   });
 
   it('Doubling Season doubles a planeswalker\'s starting loyalty and X +1/+1 counters it enters with', () => {
