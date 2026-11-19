@@ -62,6 +62,8 @@ export interface Perm {
   stun?: number;
   /** Goaded by these seats, until each one's next turn (rule 701.15). */
   goadedBy?: number[];
+  /** An emblem (rule 114): kept with its owner's permanents so its abilities work, but it can't be touched. */
+  emblem?: boolean;
   /** Suspected (rule 701.60): it has menace and can't block for as long as it stays suspected. */
   suspected?: boolean;
   /** "As ~ enters, choose a creature type": the type chosen (Metallic Mimic, Leyline of Transformation). */
@@ -326,6 +328,8 @@ export interface StackItem {
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
   kicked?: number;
+  /** A Room cast as its other door: what enters (`card` is still the card that goes to the graveyard). */
+  door?: SimCard;
   /** Seat of the card's owner, when its controller cast it from someone else's library, exile or graveyard. */
   owner?: number;
   /** Exiled instead of going anywhere else when it leaves the stack (Wrexial, Mizzix's Mastery's copies are copies). */
@@ -371,9 +375,11 @@ export type Action =
   /** From exile: 'foretell' (for its foretell cost), 'plot' (free, as a sorcery), 'warp' (a warped card, for its mana cost). 'madness' and 'miracle': for that cost, right after it was discarded or drawn. */
   /** `exile`: a card the player may play from exile (PlayerState.mayPlay). `library`: the top card of their library (playTop). */
   /** `modes`: spree or tiered modes chosen, as bits (rule 702.172). */
-  | { type: 'cast'; card: SimCard; from: CastFrom; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number; modes?: number; /** Without paying its mana cost, once each turn (One with the Multiverse). */ free?: boolean }
+  | { type: 'cast'; card: SimCard; from: CastFrom; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number; modes?: number; /** Without paying its mana cost, once each turn (One with the Multiverse). */ free?: boolean; /** `door`: cast a Room's other door (`card.room.door`) instead of the one the card shows (rule 709.5d). */ door?: boolean }
   /** Use a card from hand without casting it: foretell, plot or suspend it (exile it to cast later), transmute or channel it. */
   | { type: 'hand'; card: SimCard; how: 'foretell' | 'plot' | 'suspend' | 'transmute' | 'channel' }
+  /** Pay a Room's locked door's mana cost to unlock it (rule 709.5e). A special action. */
+  | { type: 'unlock'; permId: number }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
