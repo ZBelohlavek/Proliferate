@@ -11,6 +11,7 @@
 // Most of these are approximations, and each note says so with "≈". Kept in
 // its own file so the rest of the reader stays easy to follow.
 
+import { boardTrigger, recogniseBoard } from './classifyBoard';
 import type { CastFilter, EffectBody, Trigger, TriggerScope } from './types';
 
 type Found = { body: EffectBody; note: string; chance?: number };
@@ -43,6 +44,8 @@ export function rewriteRare(l: string): string {
 /** Trigger wordings classify.ts doesn't know. Returns null to let classify.ts carry on. */
 export function rareTrigger(l: string): RareContext | null {
   let m: RegExpMatchArray | null;
+  const board = boardTrigger(l);
+  if (board) return board;
   // Lotus Petal, Lion's Eye Diamond: mana once, by sacrificing it: kept as Treasures.
   if ((m = l.match(/^(?:discard your hand, )?\{t\}, sacrifice ~: add (one|two|three) mana of any (?:one )?color|^(?:discard your hand, )?sacrifice ~: add (one|two|three) mana of any (?:one )?color/))) {
     const n = count(m[1] ?? m[2]);
@@ -115,6 +118,7 @@ export function rareTrigger(l: string): RareContext | null {
 export function recogniseRare(line: string, out: Found[], card: { isPermanent: boolean; isCreature: boolean }, fullLine: string) {
   let m: RegExpMatchArray | null;
   const push = (body: EffectBody, note: string, chance?: number) => out.push({ body, note, ...(chance !== undefined ? { chance } : {}) });
+  if (recogniseBoard(line, out)) return;
 
   // --- Free spells and card advantage ------------------------------------------
   if (/^you may cast (?:the copy|the copies|the exiled card|target instant or sorcery card from an opponent's graveyard) without paying/.test(line) || /you may cast (?:the copy|the copies) without paying/.test(line)) {
