@@ -111,6 +111,16 @@ export interface Perm {
   fragile?: 'spell' | 'any';
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
+  /** A permanent made a creature "until your next turn" (Karn, the Great Creator): `uncrewed` goes back at the start of this seat's turn instead of at cleanup. */
+  animatedUntil?: number;
+  /** Sacrificed at the beginning of the next end step (Depthshaker Titan's animated artifacts). */
+  sacAtEnd?: boolean;
+  /** A slime counter (Sludge Monster). */
+  slime?: boolean;
+  /** Has lost all abilities until this seat's next turn (Azure Beastbinder). */
+  blankUntil?: number;
+  /** A Treasure that is a 3/3 creature until end of turn (Vihaan): it goes back to being a Treasure at cleanup. */
+  treasureCreature?: boolean;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
@@ -167,6 +177,8 @@ export interface PlayerState {
   landsPlayed: number;
   /** Seat of the last opponent who milled this player's cards, credited if they run out (null: nobody). */
   milledBy: number | null;
+  /** An effect said this player loses the game (rule 104.3); they leave at the next state-based check unless they can't lose. */
+  lost?: boolean;
   /** Poison counters; ten lose the game (rule 704.5c). */
   poison: number;
   /** Spells cast this turn (Rule of Law). */
@@ -270,7 +282,7 @@ export interface ChoiceOption {
 }
 
 export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player';
-export type ConfirmReason = 'mulligan' | 'commandZone';
+export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate';
 
 export type Decision =
   /** The player has priority: take one of these actions (the first is always "pass"). */

@@ -56,13 +56,14 @@ export type Trigger =
   | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
+  | 'crewed' // this Vehicle becomes crewed (Mobilizer Mech)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
 /** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
 export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'flash';
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
@@ -149,7 +150,7 @@ export type EffectBody =
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean }
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
-  | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean }
+  | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean; /** "Counter that spell": the spell that set off this trigger. */ subject?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
   | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any' }
   /**
@@ -358,6 +359,67 @@ export type EffectBody =
   | { kind: 'colorlessBoost' }
   /** Target non-Aura enchantment you control becomes a creature with base power and toughness equal to its mana value, for good (Zur). */
   | { kind: 'animate' }
+  // --- Lockouts, animation and winning or losing (see classifyLocks.ts) ---------
+  /**
+   * Static: activated abilities of these permanents can't be activated, mana abilities included (rule 602.5):
+   * creatures (Cursed Totem), artifacts (Karn, the Great Creator) or artifacts, creatures and enchantments (Grand Abolisher).
+   * who: whose permanents. yourTurn: only during the source controller's turn.
+   */
+  | { kind: 'abilityLock'; perms: 'creatures' | 'artifacts' | 'nonland'; who: 'all' | 'opponents'; yourTurn?: boolean }
+  /**
+   * Static: who can't cast which spells (rule 101.2). 'all': nothing at all; 'yourTurn': nothing during the source
+   * controller's turn (Kutzil); 'sorcerySpeed': only when they could cast a sorcery (Teferi, Time Raveler); 'evenCmc'
+   * (Void Winnower); 'overLands': noncreature spells with mana value above their land count (Lavinia); 'graveyard':
+   * noncreature spells from graveyards or exile (Soulless Jailer); 'oneNonPhyrexian': one non-Phyrexian spell a turn (Phyrexian Censor).
+   */
+  | { kind: 'castLock'; who: 'all' | 'opponents'; rule: 'all' | 'yourTurn' | 'sorcerySpeed' | 'evenCmc' | 'overLands' | 'graveyard' | 'oneNonPhyrexian' }
+  /** Your opponents can't cast spells this turn (Silence). */
+  | { kind: 'silence' }
+  /** Static: spells you control can't be countered: all of them (Chimil), spells with flash (Cunning Nightbonder), creature and enchantment spells (Destiny Spinner). */
+  | { kind: 'uncounterable'; filter: 'any' | 'flash' | 'creatureOrEnchantment' }
+  /** Static: whenever a player (or an opponent) casts a spell with no mana spent on it, counter it (Vexing Bauble, Lavinia). */
+  | { kind: 'counterFree'; who: 'all' | 'opponents' }
+  /** Static: creatures lose all abilities (Dress Down), or only non-Horror creatures with slime counters, which are also 2/2 (Sludge Monster). */
+  | { kind: 'loseAbilities'; what: 'creatures' | 'slimed' }
+  /**
+   * Target permanent an opponent controls loses all abilities: while the source stays ('source', Tishana's Tidebinder),
+   * or until your next turn ('yourNextTurn', Azure Beastbinder). `size`: a creature also has this base power and toughness.
+   */
+  | { kind: 'blank'; until: 'source' | 'yourNextTurn'; size?: { p: number; t: number } }
+  /** Put a slime counter on another target creature (Sludge Monster). */
+  | { kind: 'slime' }
+  /** Static: these events don't make abilities trigger: creatures entering or dying, for everyone (Hushbringer), or permanents entering, for your opponents' permanents (Elesh Norn). */
+  | { kind: 'triggerLock'; event: 'creatures' | 'enters'; who: 'all' | 'opponents' }
+  /** Static: this isn't a creature unless your devotion to these colors is at least `n` (Theros gods), or you control `n` permanents you don't own (Arvinox). */
+  | { kind: 'notCreature'; devotion?: Color[]; stolen?: boolean; n: number }
+  /**
+   * Permanents become creatures (rule 613.1d): the source itself ('self'), a target noncreature artifact or Vehicle, every
+   * noncreature artifact or Vehicle you control, a land you control, or your Treasures. size: base power and toughness
+   * ('cmc': its mana value; 'enchantments': the number of enchantments you control); a Vehicle keeps its own when there is none.
+   * until: end of turn, your next turn, or sacrificed at the next end step ('sacAtEnd').
+   */
+  | { kind: 'becomeCreature'; what: 'self' | 'artifact' | 'artifacts' | 'vehicle' | 'vehicles' | 'land' | 'treasures'; size?: { p: number; t: number } | 'cmc' | 'enchantments'; keywords?: string[]; until: 'eot' | 'yourNextTurn' | 'sacAtEnd' }
+  /** Target permanent becomes an artifact in addition to its other types until end of turn (Argent Mutation). */
+  | { kind: 'becomeArtifact' }
+  /** Target creature becomes a Treasure and loses its other types and abilities (Vraska, Betrayal's Sting): its controller gets a Treasure for it. */
+  | { kind: 'becomeTreasure' }
+  /**
+   * "You win the game" when a count is reached, checked as the ability resolves: Treasures (Revel in Riches), artifacts
+   * (Hellkite Tyrant), exactly `n` cards in hand (Triskaidekaphile), `n` counters on the source or `orHand` cards in hand (Twenty-Toed Toad).
+   */
+  | { kind: 'winIf'; cond: 'treasures' | 'artifacts' | 'handExactly' | 'counters'; n: number; orHand?: number }
+  /**
+   * Static: you can't lose the game (and, with `opponentsCantWin`, your opponents can't win: Platinum Angel), or only
+   * not for having 0 or less life (`lifeOnly`: Phyrexian Unlife; `attached`: while this Equipment is on a creature, Pact Weapon).
+   * `infect`: while you have 0 or less life, damage to you is dealt as poison counters.
+   */
+  | { kind: 'cantLose'; lifeOnly?: boolean; opponentsCantWin?: boolean; attached?: boolean; infect?: boolean }
+  /** "At the beginning of your next upkeep, pay this. If you don't, you lose the game." (Pacts) */
+  | { kind: 'pact'; cost: ManaCost }
+  /** Static: drawing from an empty library returns a creature card from your graveyard to the battlefield instead; with none, you lose (Out of the Tombs). */
+  | { kind: 'emptyDrawReanimate' }
+  /** Static: sacrificed at the beginning of each end step (Dress Down, Ball Lightning). */
+  | { kind: 'endSacrifice' }
   /** Static: your creatures of this subtype have protection from ring-bearers (Lord of the Nazgûl). */
   | { kind: 'ringProtection'; subtype: string }
   /** Static: when an opponent's spell or ability makes you discard this card, create a token copy of target permanent (Orvar). */
