@@ -31,6 +31,19 @@ export interface CardRule {
 }
 
 export const CARD_RULES: Record<string, CardRule> = {
+  // --- Playing cards from exile and the top of the library (classifyExile.ts) -------------
+  'Chaos Channeler': {
+    text: 'Whenever ~ attacks, exile the top card of your library. You may play that card this turn.',
+    why: 'Wild Magic Surge rolls a d20 for one, two or three cards (1–9, 10–19, 20); read as one card, the usual result, played this turn (rule 611.2).',
+  },
+  'Zur the Enchanter': {
+    text: 'Flying\nWhenever ~ attacks, you may search your library for an enchantment card with mana value 3 or less, put it onto the battlefield, then shuffle.',
+    why: 'The card calls itself just "Zur", which the reader does not take for its own name.',
+  },
+  'Hedron Detonator': {
+    text: 'Whenever an artifact you control enters, ~ deals 1 damage to target opponent.\n{2}, {T}: Exile the top card of your library. You may play that card this turn.',
+    why: 'Sacrificing two artifacts is read as paying {2}: in an artifact deck they are mostly Treasures and Clues. The exiled card is playable this turn (rule 611.2).',
+  },
   // --- Misread: the reader found something, but not what the card is about ---------------
   'Breach the Multiverse': {
     effects: [
@@ -93,7 +106,7 @@ export const CARD_RULES: Record<string, CardRule> = {
   // --- Lines that are deliberately not played --------------------------------------------
   "Sensei's Divining Top": {
     text: '{1}: Look at the top three cards of your library, then put them back in any order.',
-    why: 'Its draw puts the Top back on the library, so it is card selection, not card advantage. Only the look is played.',
+    why: 'Its draw puts the Top back on the library, so it is card selection, not card advantage. Only the look is played: it really puts the top three back in the order the player picks.',
   },
   'Animate Dead': {
     text: 'When ~ enters, put target creature card from a graveyard onto the battlefield under your control.',

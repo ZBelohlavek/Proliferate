@@ -17,8 +17,9 @@ import type {
   CastFilter, Color, CurseAbility, CurseAct, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
-  Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
+  Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, MayPlay, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
 } from './types';
+import type { CardKind, Who } from '../engine/typesExile';
 import { assembledCombo, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
 
 /** A piece of the game that may stop to ask players for decisions. */
@@ -43,6 +44,23 @@ interface ManaSource {
   energy?: number;
   /** How the source's charge counters pay (see the 'mana' effect). */
   charge?: 'tap' | 'grow' | 'spend';
+}
+
+/**
+ * How a spell is cast from somewhere other than its usual zone (rule 601.2): from exile or the top of a library under
+ * a permission, or during the resolution of another spell or ability without paying its mana cost.
+ */
+interface CastVia {
+  zone: SimCard[];
+  owner: PlayerState;
+  /** 'free': without paying its mana cost. 'life': life equal to its mana value instead. 'anyMana': mana of any type. */
+  mode: 'free' | 'life' | 'anyMana' | 'normal';
+  /** Cast a copy of the card; the card itself stays where it is (rule 707.12). */
+  copy?: boolean;
+  exileAfter?: boolean;
+  entry?: MayPlay;
+  /** Added to the log line after the card's name. */
+  label: string;
 }
 
 /** A triggered ability waiting to be put on the stack (rule 603.3). */
@@ -137,6 +155,8 @@ export class Game {
   private readonly finality = new Set<number>();
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
+  /** Leonin Arbiter: the turn on which each seat last paid {2} to search. */
+  private readonly arbiterPaid = new Map<number, number>();
   /** Isochron Scepter: the card exiled with each one (keyed by permanent id). */
   readonly imprinted = new Map<number, SimCard>();
   /** Life each seat lost this turn (Bloodchief Ascension). */
@@ -324,6 +344,7 @@ export class Game {
   private *turn(p: PlayerState): Flow<void> {
     this.activeSeat = p.seat;
     this.turnNumber++;
+    p.turnsTaken = (p.turnsTaken ?? 0) + 1;
     this.triggerBudget = 300;
     this.lifeLostThisTurn.fill(0);
     this.say(`— Round ${this.round}, ${p.name} (life ${p.life}) —`);
@@ -461,6 +482,7 @@ export class Game {
       }
       this.say(`${p.name} discards ${cards.map((c) => c.name).join(', ')}.`);
     }
+    if (this.kindsInGame.has('mayPlay')) this.pruneMayPlay();
     for (const q of this.players) {
       for (const perm of q.battlefield) {
         perm.damage = 0;
@@ -657,12 +679,12 @@ export class Game {
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
     const mutateHosts = this.mutateTargets(p).length > 0;
-    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt', mutate = false, kick = 0): boolean => {
+    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'exile' | 'library', mutate = false, kick = 0): boolean => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return false;
       if (!sorcery && !isInstantSpeed(card)) return false;
       if (mutate && !mutateHosts) return false;
       const fromCommand = from === 'command';
-      const priced = kick ? this.kickedCard(card, kick) : this.castCard(card, mutate ? 'mutate' : from);
+      const priced = kick ? this.kickedCard(card, kick) : this.castCard(card, mutate ? 'mutate' : from, p.seat);
       if (mana < this.effectiveCost(p, priced, fromCommand)) return false;
       if (!this.canAfford(p, priced, fromCommand, 0)) return false;
       if (from !== 'overload' && !this.hasTargets(p, kick ? priced : card)) return false;
@@ -698,6 +720,17 @@ export class Game {
       if (this.graveyardCastable(p, card)) consider(card, 'graveyard');
       if (card.mutate?.fromGraveyard) consider(card, 'graveyard', true);
       if (card.graveyard?.how === 'return' && this.canReturnFromGraveyard(p, card, sorcery)) actions.push({ type: 'graveyard', card });
+    }
+    seen.clear();
+    // Impulse draw and theft (rule 611.2), Future Sight and friends.
+    if (this.kindsInGame.has('mayPlay') || this.kindsInGame.has('playTop')) this.exileActions(p, sorcery, actions, (card, from) => consider(card, from));
+    // One with the Multiverse: one spell from hand or the top of the library without paying its mana cost, each turn.
+    if (mayCast && this.freeSpellAvailable(p)) {
+      const tops = this.topPermission(p) ? [p.library[0]] : [];
+      for (const card of new Set([...p.hand, ...tops])) {
+        if (card.isLand || (!sorcery && !isInstantSpeed(card)) || !this.castableNow(p, card, 'free')) continue;
+        actions.push({ type: 'cast', card, from: card === tops[0] && !p.hand.includes(card) ? 'library' : 'hand', maxX: 0, free: true });
+      }
     }
     seen.clear();
     // Cycling works at any time you have priority (rule 702.29).
@@ -811,6 +844,7 @@ export class Game {
   private *perform(p: PlayerState, action: Action, x: number): Flow<boolean> {
     switch (action.type) {
       case 'land': {
+        if (action.from) return this.sorcerySpeed(p) && p.landsPlayed < 1 + this.statics(p, 'extraLand') && this.playLandFrom(p, action.card, action.from);
         const zone = action.fromGraveyard ? p.graveyard : p.hand;
         const idx = zone.indexOf(action.card);
         if (idx === -1 || (action.fromGraveyard && !this.graveyardPermission(p, action.card))) return false;
@@ -825,6 +859,14 @@ export class Game {
       }
       case 'cast':
         if (action.faceDown) return this.castFaceDown(p, action.card);
+        if (action.free) {
+          if (!this.freeSpellAvailable(p)) return false;
+          const zone = action.from === 'library' ? p.library : p.hand;
+          if (action.from === 'library' && p.library[0] !== action.card) return false;
+          const done = yield* this.cast(p, action.card, false, 0, 'hand', false, 0, { zone, owner: p, mode: 'free', label: action.from === 'library' ? ' from the top of their library' : '' });
+          if (done) p.freeSpellTurn = this.turnNumber;
+          return done;
+        }
         return yield* this.cast(p, action.card, action.from === 'command', Math.max(action.kick && action.card.kicker?.cost.x ? 1 : 0, Math.min(action.maxX, Math.floor(x) || 0)), action.from, !!action.mutate, action.kick ?? 0);
       case 'crew': {
         const perm = this.findPerm(action.permId);
@@ -915,6 +957,463 @@ export class Game {
       default:
         return false;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Playing cards from exile and the top of a library, free spells, searching
+  // -------------------------------------------------------------------------
+
+  /** Whether a permission to play a card from exile still holds (rule 611.2). */
+  private mayPlayValid(p: PlayerState, m: MayPlay): boolean {
+    const owner = this.players[m.owner];
+    if (!owner.exile.includes(m.card)) return false;
+    if (m.until === 'turn' && this.turnNumber !== m.turn) return false;
+    if (m.until === 'nextTurn' && (p.turnsTaken ?? 0) > m.turnsAt + 1) return false;
+    if (m.sourceId !== undefined && !p.battlefield.some((q) => q.id === m.sourceId)) return false;
+    return true;
+  }
+
+  /** The cards `p` may play from exile right now, each with its permission. */
+  exilePlayable(p: PlayerState): MayPlay[] {
+    if (!p.mayPlay?.length) return [];
+    const ownTurn = this.activeSeat === p.seat;
+    return p.mayPlay.filter((m) => this.mayPlayValid(p, m) && (!m.ownTurn || ownTurn));
+  }
+
+  /** Drop permissions that ran out (end of turn) or whose card left exile. */
+  private pruneMayPlay() {
+    for (const q of this.players) if (q.mayPlay?.length) q.mayPlay = q.mayPlay.filter((m) => this.players[m.owner].exile.includes(m.card) && !(m.until === 'turn' && m.turn < this.turnNumber) && !(m.until === 'nextTurn' && (q.turnsTaken ?? 0) > m.turnsAt + 1));
+  }
+
+  /** Give `p` permission to play `card` (in `owner`'s exile). */
+  private grantPlay(p: PlayerState, card: SimCard, owner: PlayerState, opts: Omit<MayPlay, 'card' | 'owner' | 'turn' | 'turnsAt'>) {
+    (p.mayPlay ??= []).push({ card, owner: owner.seat, turn: this.turnNumber, turnsAt: p.turnsTaken ?? 0, ...opts });
+    this.kindsInGame.add('mayPlay');
+  }
+
+  /** The playTop permission (Future Sight, Bolas's Citadel) that lets `p` play the top card of their library, if any. */
+  topPermission(p: PlayerState): Extract<Effect, { kind: 'playTop' }> | null {
+    if (!this.kindsInGame.has('playTop')) return null;
+    const card = p.library[0];
+    if (!card) return null;
+    let best: Extract<Effect, { kind: 'playTop' }> | null = null;
+    for (const perm of p.battlefield) {
+      for (const e of perm.card.effects) {
+        if (e.kind !== 'playTop' || e.when !== 'static') continue;
+        if (!matchesKind(card, e.what)) continue;
+        if (e.subtypes && !e.subtypes.some((s) => hasSubtype(card, s))) continue;
+        if (e.coven && new Set(p.battlefield.filter((q) => q.card.isCreature).map((q) => this.power(q))).size < 3) continue;
+        // A permission that costs mana beats one that costs life, for anyone not flush with life.
+        if (!best || (best.payLife && !e.payLife)) best = e;
+      }
+    }
+    return best;
+  }
+
+  /** One with the Multiverse: a spell from hand or the top of the library free, once during each of your turns. */
+  freeSpellAvailable(p: PlayerState): boolean {
+    return this.kindsInGame.has('freeEachTurn') && this.activeSeat === p.seat && p.freeSpellTurn !== this.turnNumber && this.statics(p, 'freeEachTurn') > 0;
+  }
+
+  /** How a card is cast from exile or the top of the library: from which zone, priced how. */
+  private viaFor(p: PlayerState, card: SimCard, from: 'exile' | 'library'): CastVia | null {
+    if (from === 'library') {
+      const perm = p.library[0] === card ? this.topPermission(p) : null;
+      if (!perm || card.isLand) return null;
+      return { zone: p.library, owner: p, mode: perm.payLife ? 'life' : 'normal', label: ' from the top of their library' };
+    }
+    const m = this.exilePlayable(p).find((e) => e.card === card && !card.isLand && matchesKind(card, e.only ?? 'any'));
+    if (!m) return null;
+    const owner = this.players[m.owner];
+    return { zone: owner.exile, owner, mode: m.free ? 'free' : m.payLife ? 'life' : m.anyMana ? 'anyMana' : 'normal', entry: m, label: owner === p ? ' from exile' : ` from ${owner.name}'s exile` };
+  }
+
+  /** The card cast without paying its mana cost. */
+  freeCard(card: SimCard): SimCard {
+    return this.pricedAs(card, 'free');
+  }
+
+  /** The card priced the way it is being cast (free, life instead of mana, mana of any type). */
+  private pricedAs(card: SimCard, mode: CastVia['mode']): SimCard {
+    if (mode === 'normal') return card;
+    let cache = this.altCards.get(`via:${mode}`);
+    if (!cache) this.altCards.set(`via:${mode}`, (cache = new WeakMap()));
+    let alt = cache.get(card);
+    if (!alt) {
+      const c = card.cost;
+      const cost: ManaCost = mode === 'free' ? NO_COST : mode === 'life' ? { generic: 0, pips: [], x: 0, life: card.cmc } : { generic: c.generic + c.pips.length, pips: [], x: c.x, life: c.life };
+      cache.set(card, (alt = { ...card, cost }));
+    }
+    return alt;
+  }
+
+  /** The playable cards of a permission to play from exile or the top of the library, as legal actions. */
+  private exileActions(p: PlayerState, sorcery: boolean, actions: Action[], consider: (card: SimCard, from: 'exile' | 'library') => boolean) {
+    const landDrop = sorcery && p.landsPlayed < 1 + this.statics(p, 'extraLand');
+    const seen = new Set<SimCard>();
+    for (const m of this.exilePlayable(p)) {
+      if (seen.has(m.card) || !matchesKind(m.card, m.only ?? 'any')) continue;
+      seen.add(m.card);
+      if (m.card.isLand) {
+        if (landDrop && !m.castOnly && m.card.land) actions.push({ type: 'land', card: m.card, back: false, from: 'exile' });
+      } else consider(m.card, 'exile');
+    }
+    const top = this.topPermission(p);
+    if (top) {
+      const card = p.library[0];
+      if (card.isLand) {
+        if (landDrop && card.land) actions.push({ type: 'land', card, back: false, from: 'library' });
+      } else consider(card, 'library');
+    }
+  }
+
+  /** Play a land from exile or the top of the library. */
+  private playLandFrom(p: PlayerState, card: SimCard, from: 'exile' | 'library'): boolean {
+    if (from === 'library') {
+      if (p.library[0] !== card || !this.topPermission(p)) return false;
+      p.library.shift();
+      this.say(`${p.name} plays ${card.name} from the top of their library.`);
+    } else {
+      const m = this.exilePlayable(p).find((e) => e.card === card && !e.castOnly);
+      if (!m) return false;
+      const owner = this.players[m.owner];
+      owner.exile.splice(owner.exile.indexOf(card), 1);
+      this.usePermission(p, m);
+      this.say(`${p.name} plays ${card.name} from ${owner === p ? 'exile' : `${owner.name}'s exile`}.`);
+    }
+    this.putLand(p, card, card.land!);
+    p.landsPlayed++;
+    p.castNames.add(card.name);
+    return true;
+  }
+
+  /** A permission is used up when its card is played; "one of those cards" ends the others too. */
+  private usePermission(p: PlayerState, m: MayPlay) {
+    p.mayPlay = (p.mayPlay ?? []).filter((e) => e !== m && (m.group === undefined || e.group !== m.group));
+  }
+
+  /** The players an effect's `from`/`who` names. */
+  private playersFor(p: PlayerState, who: Who, target: Target | null, e?: Effect): PlayerState[] {
+    if (who === 'you') return [p];
+    if (who === 'active') return this.activeSeat !== p.seat && this.players[this.activeSeat].alive ? [this.players[this.activeSeat]] : [];
+    if (who === 'opponents') return this.opponents(p);
+    if (who === 'each') return this.alivePlayers();
+    if (target?.kind === 'player') return this.players[target.seat].alive ? [this.players[target.seat]] : [];
+    if (target?.kind === 'perm') {
+      const q = this.findPerm(target.id);
+      return q ? [this.players[q.seat]] : [];
+    }
+    if (this.aimedSeat !== null && this.players[this.aimedSeat].alive) return [this.players[this.aimedSeat]];
+    // "That player" on a combat damage trigger: the player the creature hit (the trigger's subject), else the opponent with the most cards left.
+    const struck = e?.when === 'combatDamage' ? this.resolving?.subject : undefined;
+    if (struck !== undefined && this.players[struck]?.alive && struck !== p.seat) return [this.players[struck]];
+    const opps = this.opponents(p);
+    return opps.length ? [opps.reduce((a, b) => (b.library.length > a.library.length ? b : a))] : [];
+  }
+
+  /** Put cards from the bottom of a library in a random order (rule 701.24c-style "random order"). */
+  private toBottom(v: PlayerState, cards: SimCard[]) {
+    const rest = [...cards];
+    this.rng.shuffle(rest);
+    for (const c of rest) {
+      const i = v.library.indexOf(c);
+      if (i !== -1) v.library.splice(i, 1);
+      v.library.push(c);
+    }
+  }
+
+  private *resolveExilePlay(p: PlayerState, e: Extract<Effect, { kind: 'exilePlay' }>, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    const count = e.n === -1 ? Math.max(x, 1) : e.n;
+    const group = e.oneOf ? this.nextId++ : undefined;
+    const source = this.resolvingCard?.name ?? src?.card.name ?? 'an effect';
+    for (const v of this.playersFor(p, e.from, target, e)) {
+      let exiled: SimCard[] = [];
+      if (e.zone === 'hand') {
+        const n = Math.min(count, v.hand.length);
+        if (!n) continue;
+        const picks = yield* this.choose(v, 'discard', `Exile ${n} card${n > 1 ? 's' : ''} from your hand (${source}).`, v.hand.map((c) => ({ label: c.name, card: c })), n, n);
+        exiled = picks.map((i) => v.hand[i]);
+        for (const c of exiled) v.hand.splice(v.hand.indexOf(c), 1);
+      } else if (e.zone === 'graveyard') {
+        const pool = v.graveyard.filter((c) => matchesKind(c, e.only ?? 'any'));
+        if (!pool.length) continue;
+        // "Exile all opponents' graveyards" (Mnemonic Betrayal): every card, no choice.
+        const picks = count >= 99 ? pool.map((_, i) => i) : yield* this.choose(p, 'recursion', `Exile a card from ${v === p ? 'your' : `${v.name}'s`} graveyard to play it later (${source}).`, pool.map((c) => ({ label: c.name, card: c })), 1, Math.min(count, pool.length));
+        exiled = picks.map((i) => pool[i]);
+        for (const c of exiled) v.graveyard.splice(v.graveyard.indexOf(c), 1);
+      } else if (e.untilKind) {
+        // Exile cards until one of the kind; only that one may be played, the rest go to the bottom.
+        const at = v.library.findIndex((c) => matchesKind(c, e.untilKind!));
+        const revealed = at === -1 ? [...v.library] : v.library.slice(0, at + 1);
+        if (!revealed.length) continue;
+        const hit = at === -1 ? null : revealed[revealed.length - 1];
+        v.library.splice(0, revealed.length);
+        if (hit) exiled = [hit];
+        v.library.push(...this.rng.shuffle(revealed.filter((c) => c !== hit)));
+      } else if (e.look) {
+        const seen = v.library.slice(0, e.look);
+        if (!seen.length) continue;
+        const pool = seen.filter((c) => matchesKind(c, e.only ?? 'any'));
+        const n = Math.min(count, pool.length);
+        const picks = n ? yield* this.choose(p, 'impulse', `Exile ${n} of the top ${seen.length} cards of ${v === p ? 'your' : `${v.name}'s`} library to play later (${source}).`, pool.map((c) => ({ label: c.name, card: c })), n, n) : [];
+        exiled = picks.map((i) => pool[i]);
+        v.library.splice(0, seen.length);
+        v.library.push(...this.rng.shuffle(seen.filter((c) => !exiled.includes(c))));
+      } else {
+        exiled = e.bottom ? v.library.splice(Math.max(0, v.library.length - count), count) : v.library.splice(0, count);
+      }
+      if (!exiled.length) continue;
+      v.exile.push(...exiled);
+      const playable = exiled.filter((c) => matchesKind(c, e.only ?? 'any') && !(e.castOnly && c.isLand));
+      this.say(`${v === p ? p.name : v.name} exiles ${exiled.map((c) => c.name).join(', ')}${v.library.length || e.zone ? '' : ''}${playable.length ? `; ${p.name} may play ${playable.length > 1 ? (e.oneOf ? 'one of them' : 'them') : 'it'}${e.until === 'turn' ? ' this turn' : e.until === 'nextTurn' ? ' until the end of their next turn' : ''}${e.free ? ' without paying its mana cost' : e.payLife ? ' for life instead of mana' : ''}` : ''} (${source}).`);
+      for (const card of playable) {
+        this.grantPlay(p, card, v, {
+          until: e.until, source, ...(e.anyMana ? { anyMana: true } : {}), ...(e.payLife ? { payLife: true } : {}), ...(e.free ? { free: true } : {}),
+          ...(e.castOnly ? { castOnly: true } : {}), ...(e.ownTurn ? { ownTurn: true } : {}), ...(group !== undefined ? { group } : {}),
+          ...(e.only && e.only !== 'any' ? { only: e.only } : {}), ...(e.whileSource && src ? { sourceId: src.id } : {}),
+        });
+      }
+    }
+  }
+
+  /** Cast spells without paying their mana costs while this resolves (rule 608.2g): Etali, Villainous Wealth, discover. */
+  private *resolveFreeCast(p: PlayerState, e: Extract<Effect, { kind: 'freeCast' }>, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    const n = e.n === -1 ? Math.max(x, 0) : e.n === -2 ? this.triggeringCmc() : e.n;
+    const maxCmc = e.maxCmc === undefined ? Infinity : e.maxCmc === -1 ? x : e.maxCmc === -2 ? this.triggeringCmc() - 1 : e.maxCmc === -3 ? this.triggeringCmc() : e.maxCmc;
+    const fits = (c: SimCard) => !c.isLand && matchesKind(c, e.only ?? 'any') && c.cmc <= maxCmc;
+    const source = this.resolvingCard?.name ?? src?.card.name ?? 'an effect';
+    type Cand = { card: SimCard; zone: SimCard[]; owner: PlayerState };
+    const cands: Cand[] = [];
+    /** Cards looked at or revealed, and where they go afterwards if not cast. */
+    const looked: { card: SimCard; owner: PlayerState; zone: SimCard[] }[] = [];
+    const victims = e.who === 'you' ? [p] : this.playersFor(p, e.who, target, e);
+    for (const v of victims) {
+      if (e.from === 'top') {
+        for (const c of v.library.slice(0, n)) {
+          looked.push({ card: c, owner: v, zone: v.library });
+          if (fits(c)) cands.push({ card: c, zone: v.library, owner: v });
+        }
+      } else if (e.from === 'until') {
+        // Reveal (exile) cards until a card that fits (discover: a nonland card with mana value N or less).
+        const at = v.library.findIndex(fits);
+        const revealed = at === -1 ? [...v.library] : v.library.slice(0, at + 1);
+        v.library.splice(0, revealed.length);
+        v.exile.push(...revealed);
+        for (const c of revealed) looked.push({ card: c, owner: v, zone: v.exile });
+        if (at !== -1) cands.push({ card: revealed[revealed.length - 1], zone: v.exile, owner: v });
+        if (revealed.length) this.say(`${v.name} reveals ${revealed.length} card${revealed.length > 1 ? 's' : ''}${at !== -1 ? `, stopping at ${revealed[revealed.length - 1].name}` : ''} (${source}).`);
+      } else if (e.from === 'hand') {
+        for (const c of new Set(v.hand)) if (fits(c)) cands.push({ card: c, zone: v.hand, owner: v });
+      } else if (e.from === 'graveyard') {
+        if (this.graveyardLocked()) continue;
+        if (e.random) {
+          // Kefka: a card at random from each opponent's graveyard is exiled; it may be cast if it is a spell.
+          if (!v.graveyard.length) continue;
+          const c = v.graveyard[Math.floor(this.rng.next() * v.graveyard.length)];
+          v.graveyard.splice(v.graveyard.indexOf(c), 1);
+          v.exile.push(c);
+          this.say(`${p.name} exiles ${c.name} from ${v.name}'s graveyard (${source}).`);
+          if (fits(c)) cands.push({ card: c, zone: v.exile, owner: v });
+          continue;
+        }
+        for (const c of new Set(v.graveyard)) if (fits(c)) cands.push({ card: c, zone: v.graveyard, owner: v });
+      } else if (e.from === 'search') {
+        const pool = yield* this.searchLibrary(p);
+        if (!pool) continue;
+        const found = [...new Set(pool.filter(fits))];
+        if (!found.length) {
+          this.rng.shuffle(p.library);
+          continue;
+        }
+        const pick = yield* this.choose(p, 'tutor', `Search your library for a card to cast without paying its mana cost (${source}).`, found.map((c) => ({ label: c.name, card: c })), 1, 1);
+        const card = found[pick[0] ?? 0];
+        const kept = this.foundInSearch(p, [card]);
+        p.library.splice(p.library.indexOf(card), 1);
+        this.rng.shuffle(p.library);
+        if (!kept.length) continue;
+        p.exile.push(card);
+        cands.push({ card, zone: p.exile, owner: p });
+        looked.push({ card, owner: p, zone: p.exile });
+      }
+    }
+    const cast = new Set<SimCard>();
+    const mode: CastVia['mode'] = e.pay ? (e.anyMana ? 'anyMana' : 'normal') : 'free';
+    for (let i = 0; i < e.casts; i++) {
+      const open = cands.filter((c) => !cast.has(c.card) && c.zone.includes(c.card) && this.castableNow(p, c.card, mode));
+      if (!open.length) break;
+      const pick = yield* this.choose(p, 'freeCast', `Cast a spell${mode === 'free' ? ' without paying its mana cost' : ''} (${source})?`, open.map((c) => ({ label: c.owner === p ? c.card.name : `${c.card.name} (${c.owner.name})`, card: c.card })), 0, 1);
+      if (!pick.length) break;
+      const chosen = open[pick[0]];
+      const copies = e.copy ? Math.max(1, e.copies ?? 1) : 1;
+      let any = false;
+      for (let k = 0; k < copies; k++) {
+        const via: CastVia = { zone: chosen.zone, owner: chosen.owner, mode, copy: !!e.copy, label: e.copy ? ' (a copy)' : chosen.owner === p ? '' : ` from ${chosen.owner.name}'s ${chosen.zone === chosen.owner.hand ? 'hand' : chosen.zone === chosen.owner.graveyard ? 'graveyard' : chosen.zone === chosen.owner.library ? 'library' : 'exile'}`, ...(e.exileAfter ? { exileAfter: true } : {}) };
+        if (yield* this.cast(p, chosen.card, false, 0, 'hand', false, 0, via)) any = true;
+      }
+      if (any) {
+        cast.add(chosen.card);
+        // Mizzix's Mastery, Psionic Ritual: the card itself is exiled and only its copy is cast.
+        if (e.copy && chosen.zone === chosen.owner.graveyard && chosen.zone.includes(chosen.card)) {
+          chosen.zone.splice(chosen.zone.indexOf(chosen.card), 1);
+          chosen.owner.exile.push(chosen.card);
+        }
+      } else cands.splice(cands.indexOf(chosen), 1);
+    }
+    // What wasn't cast goes where the card says.
+    const left = looked.filter((l) => !cast.has(l.card) && l.zone.includes(l.card));
+    if (e.elseHand) {
+      for (const l of left.filter((l) => cands.some((c) => c.card === l.card))) {
+        l.zone.splice(l.zone.indexOf(l.card), 1);
+        p.hand.push(l.card);
+        this.say(`${p.name} puts ${l.card.name} into their hand.`);
+        left.splice(left.indexOf(l), 1);
+      }
+    }
+    for (const v of new Set(left.map((l) => l.owner))) {
+      const mine = left.filter((l) => l.owner === v);
+      for (const l of mine) l.zone.splice(l.zone.indexOf(l.card), 1);
+      const cards = mine.map((l) => l.card);
+      const rest = e.rest ?? (e.from === 'top' ? 'top' : 'bottom');
+      if (rest === 'graveyard') for (const c of cards) this.toGraveyard(v, c, false);
+      else if (rest === 'hand') v.hand.push(...cards);
+      else if (rest === 'exile') v.exile.push(...cards);
+      else if (rest === 'top') v.library.unshift(...cards);
+      else {
+        v.library.push(...cards);
+        if (rest === 'shuffle') this.rng.shuffle(v.library);
+        else this.toBottom(v, cards);
+      }
+    }
+  }
+
+  /** The mana value of the spell that set off the ability now resolving (Rashmi, Sunbird's Invocation). */
+  private triggeringCmc(): number {
+    const subject = this.resolving?.subject;
+    const spell = subject !== undefined ? this.stack.find((s) => s.id === subject) : undefined;
+    return spell?.card.cmc ?? 3;
+  }
+
+  /** Could `p` cast this card right now, priced `mode`, with targets for it? */
+  private castableNow(p: PlayerState, card: SimCard, mode: CastVia['mode']): boolean {
+    if (card.isLand) return false;
+    const priced = this.pricedAs(card, mode);
+    if (!this.canAfford(p, priced, false, 0)) return false;
+    return this.hasTargets(p, card);
+  }
+
+  /**
+   * `p` searches `v`'s library (rule 701.23). Returns the cards they may find, or null when they can't search:
+   * Ashiok, Dream Render; Leonin Arbiter unless they pay {2}; Aven Mindcensor shows only the top four.
+   */
+  private *searchLibrary(p: PlayerState, v: PlayerState = p): Flow<SimCard[] | null> {
+    if (this.kindsInGame.has('when:opponentSearch') && v === p) for (const o of this.opponents(p)) this.fire(o, 'opponentSearch');
+    if (!this.kindsInGame.has('searchRule')) return v.library;
+    const rules = (q: PlayerState, rule: string) => q.battlefield.some((perm) => perm.card.effects.some((e) => e.kind === 'searchRule' && e.when === 'static' && e.rule === rule));
+    if (v === p && this.opponents(p).some((o) => rules(o, 'noSearch'))) {
+      this.say(`${p.name} can't search their library (Ashiok).`);
+      return null;
+    }
+    if (this.alivePlayers().some((q) => rules(q, 'pay2')) && this.arbiterPaid.get(p.seat) !== this.turnNumber) {
+      const plan = this.planPayment(p, { generic: 2, pips: [], x: 0, life: 0 }, 0, 0);
+      if (!plan) {
+        this.say(`${p.name} can't search a library (Leonin Arbiter).`);
+        return null;
+      }
+      this.commitPayment(p, plan);
+      this.arbiterPaid.set(p.seat, this.turnNumber);
+      this.say(`${p.name} pays {2} to search this turn (Leonin Arbiter).`);
+    }
+    if (this.opponents(p).some((o) => rules(o, 'top4'))) return v.library.slice(0, 4);
+    return v.library;
+  }
+
+  /** Opposition Agent: what an opponent finds while searching their library is exiled, for the Agent's controller to play. Returns what the searcher keeps. */
+  private foundInSearch(p: PlayerState, cards: SimCard[]): SimCard[] {
+    if (!cards.length || !this.kindsInGame.has('searchRule')) return cards;
+    const agent = this.opponents(p).find((o) => o.battlefield.some((perm) => perm.card.effects.some((e) => e.kind === 'searchRule' && e.when === 'static' && e.rule === 'agent')));
+    if (!agent) return cards;
+    for (const c of cards) {
+      const i = p.library.indexOf(c);
+      if (i !== -1) p.library.splice(i, 1);
+      p.exile.push(c);
+      this.grantPlay(agent, c, p, { until: 'exiled', anyMana: true, source: 'Opposition Agent' });
+    }
+    this.say(`${p.name} exiles ${cards.map((c) => c.name).join(', ')} instead; ${agent.name} may play ${cards.length > 1 ? 'them' : 'it'} (Opposition Agent).`);
+    return [];
+  }
+
+  /** Search for cards beyond a plain tutor (Tezzeret, Zur, Protean Hulk, Sunforger, Varragoth). */
+  private *resolveSearch(p: PlayerState, e: Extract<Effect, { kind: 'search' }>, src: Perm | null, x: number, target: Target | null): Flow<void> {
+    const searcher = e.who === 'target' && target?.kind === 'player' ? this.players[target.seat] : p;
+    if (!searcher.alive) return;
+    const pool = yield* this.searchLibrary(searcher);
+    if (!pool) return;
+    const maxCmc = e.maxCmc === undefined ? Infinity : e.maxCmc === -1 ? x : e.maxCmc;
+    const fits = (c: SimCard) => matchesKind(c, e.what) && c.cmc <= maxCmc && (!e.colors || e.colors.some((col) => cardColors(c).includes(col as Color)));
+    let found = [...new Set(pool.filter(fits))].sort((a, b) => a.name.localeCompare(b.name));
+    const source = this.resolvingCard?.name ?? src?.card.name ?? 'an effect';
+    const chosen: SimCard[] = [];
+    let budget = e.totalCmc ?? Infinity;
+    for (let i = 0; i < e.n && found.length; i++) {
+      const pick = yield* this.choose(searcher, e.to === 'top' ? 'tutor' : e.to === 'battlefield' && e.what === 'creature' ? 'take' : 'tutor', `Search your library for ${e.n > 1 ? 'a card (one at a time)' : 'a card'} (${source}).`, found.map((c) => ({ label: c.name, card: c })), e.n > 1 ? 0 : 1, 1);
+      if (!pick.length) break;
+      const card = found[pick[0]];
+      chosen.push(card);
+      budget -= card.cmc;
+      // Another copy of the same card is still in the library.
+      const left = pool.filter((c) => c === card).length - chosen.filter((c) => c === card).length;
+      found = found.filter((c) => (c !== card || left > 0) && (e.totalCmc === undefined || c.cmc <= budget));
+    }
+    const kept = this.foundInSearch(searcher, chosen);
+    for (const c of kept) searcher.library.splice(searcher.library.indexOf(c), 1);
+    this.rng.shuffle(searcher.library);
+    if (!kept.length) {
+      this.say(`${searcher.name} searches their library${chosen.length ? '' : ' and finds nothing'}.`);
+      return;
+    }
+    if (e.to === 'hand') {
+      searcher.hand.push(...kept);
+      this.say(`${searcher.name} searches their library for ${kept.length > 1 ? `${kept.length} cards` : 'a card'}.`);
+    } else if (e.to === 'top') {
+      searcher.library.unshift(...kept);
+      this.say(`${searcher.name} searches their library and puts a card on top.`);
+    } else if (e.to === 'battlefield') {
+      this.say(`${searcher.name} searches their library and puts ${kept.map((c) => c.name).join(', ')} onto the battlefield.`);
+      for (const c of kept) {
+        if (c.isLand && c.land) this.putLand(searcher, c, c.land, e.tapped);
+        else {
+          const perm = yield* this.enter(searcher, c, false, 0, null);
+          if (perm && e.tapped) perm.tapped = true;
+        }
+      }
+    } else {
+      // 'cast' and 'exilePlay': exiled, then cast free now or played this turn.
+      searcher.exile.push(...kept);
+      if (e.to === 'exilePlay') {
+        for (const c of kept) this.grantPlay(searcher, c, searcher, { until: 'turn', free: true, castOnly: true, source });
+        this.say(`${searcher.name} exiles ${kept.map((c) => c.name).join(', ')} and may cast ${kept.length > 1 ? 'them' : 'it'} free this turn.`);
+      } else {
+        for (const c of kept) {
+          if (this.castableNow(searcher, c, 'free')) yield* this.cast(searcher, c, false, 0, 'hand', false, 0, { zone: searcher.exile, owner: searcher, mode: 'free', label: '' });
+        }
+        // A card that couldn't be cast stays in exile.
+      }
+    }
+  }
+
+  /** Look at the top cards and put them back in any order; Ponder may shuffle instead. */
+  private *rearrange(p: PlayerState, e: Extract<Effect, { kind: 'rearrange' }>): Flow<void> {
+    const top = p.library.slice(0, e.n);
+    if (!top.length) return;
+    const picks = yield* this.choose(p, 'rearrange', `Put the top ${top.length} cards of your library back: choose them from the top down${e.shuffle ? ', or choose none to shuffle your library' : ''}.`, top.map((c) => ({ label: c.name, card: c })), e.shuffle ? 0 : top.length, top.length);
+    if (!picks.length && e.shuffle) {
+      this.rng.shuffle(p.library);
+      this.say(`${p.name} looks at the top ${top.length} cards and shuffles their library.`);
+      return;
+    }
+    const order = [...picks.map((i) => top[i]), ...top.filter((_, i) => !picks.includes(i))];
+    p.library.splice(0, top.length, ...order);
+    this.say(`${p.name} looks at the top ${top.length} cards of their library and puts them back in any order.`);
   }
 
   // -------------------------------------------------------------------------
@@ -1504,6 +2003,10 @@ export class Game {
         return this.allPerms().filter((q) => q.landInfo && !this.blighted.has(q.id) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'animate':
         return p.battlefield.filter((q) => q.card.isEnchantment && !q.card.isCreature && !q.unlocked && !isAura(q.card) && !q.card.curse && !/\bAura\b/.test(q.card.typeLine) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'exilePlay':
+        return e.from === 'target' ? this.opponents(p).filter((o) => (e.zone === 'hand' ? o.hand : e.zone === 'graveyard' ? o.graveyard : o.library).length > 0).map((o) => ({ kind: 'player', seat: o.seat })) : null;
+      case 'freeCast':
+        return e.who === 'target' ? this.opponents(p).filter((o) => (e.from === 'hand' ? o.hand : e.from === 'graveyard' ? o.graveyard : o.library).length > 0).map((o) => ({ kind: 'player', seat: o.seat })) : null;
       case 'steal':
         if (e.payEnergy !== undefined && e.from === 'battlefield') return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && q.card.cmc <= p.energy + e.payEnergy! && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
         if (e.from === 'library') return this.opponents(p).filter((o) => o.library.some((c) => c.isCreature)).map((o) => ({ kind: 'player', seat: o.seat }));
@@ -1602,8 +2105,14 @@ export class Game {
   }
 
   /** The card as it is cast: priced at its flashback or mutate cost, or with its overload cost and effects. */
-  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed' | 'mutate' | 'faceDown' | 'alt'): SimCard {
+  /** `seat`: who casts it, for cards cast from exile or the top of a library (their permission sets the price). */
+  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed' | 'mutate' | 'faceDown' | 'alt' | 'exile' | 'library', seat?: number): SimCard {
     if (from === 'hand' || from === 'command') return card;
+    if (from === 'exile' || from === 'library') {
+      const p = this.players[seat ?? this.activeSeat];
+      const via = this.viaFor(p, card, from);
+      return via ? this.pricedAs(card, via.mode) : card;
+    }
     let cache = this.altCards.get(from);
     if (!cache) this.altCards.set(from, (cache = new WeakMap()));
     let alt = cache.get(card);
@@ -1624,17 +2133,24 @@ export class Game {
     return alt;
   }
 
-  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' = 'hand', mutate = false, kicks = 0): Flow<boolean> {
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'exile' | 'library' = 'hand', mutate = false, kicks = 0, via?: CastVia): Flow<boolean> {
+    if (from === 'exile' || from === 'library') {
+      const v = this.viaFor(p, card, from);
+      if (!v) return false;
+      via = v;
+    }
+    if (via && (kicks || mutate || fromCommand)) return false;
+    if (via?.mode === 'free') x = 0;
     if (kicks && (!card.kicker || (from !== 'hand' && from !== 'command') || mutate || (!card.kicker.multi && kicks > 1))) return false;
     const flashback = from === 'graveyard' && !mutate;
-    const zone = fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : p.hand;
+    const zone = via ? via.zone : fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : p.hand;
     if (!zone.includes(card) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
     if (mutate && (!card.mutate || (from === 'graveyard' && !card.mutate.fromGraveyard))) return false;
     if (from === 'alt' && !(card.altCost && this.altCostAllowed(p, card))) return false;
     /** How it is cast from the graveyard: flashback, the card's own keyword (escape, retrace, disturb), or a permission (Muldrotha). */
     const graveyardWay = !flashback ? null : card.flashback ? 'flashback' : card.graveyard?.how === 'cast' ? card.graveyard.label : 'permission';
     let finality = false;
-    const priced = kicks ? this.kickedCard(card, kicks) : this.castCard(card, mutate ? 'mutate' : from);
+    const priced = via ? this.pricedAs(card, via.mode) : kicks ? this.kickedCard(card, kicks) : this.castCard(card, mutate ? 'mutate' : from);
     const permanent = !card.isInstant && !card.isSorcery;
     const effects = permanent ? [] : priced.effects.filter((e) => e.when === 'resolve');
 
@@ -1748,18 +2264,24 @@ export class Game {
     this.commitPayment(p, plan);
     p.life -= priced.cost.life + (card.xFromLife ? x : 0);
 
-    zone.splice(zone.indexOf(card), 1);
+    if (!via?.copy) zone.splice(zone.indexOf(card), 1);
+    if (via?.entry) this.usePermission(p, via.entry);
     if (fromCommand) {
       p.commanderCasts.set(card.name, (p.commanderCasts.get(card.name) ?? 0) + 1);
       if (p.commanderRound === null) p.commanderRound = this.round;
-    } else {
+    } else if (!via || via.owner === p) {
       p.castNames.add(card.name);
     }
     p.spellsThisTurn++;
     const item: StackItem = {
       id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
-      isCommander: p.deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
+      isCommander: !via?.copy && (via ? via.owner : p).deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
     };
+    if (via) {
+      if (via.owner !== p && !via.copy) item.owner = via.owner.seat;
+      if (via.copy) item.copy = true;
+      if (via.exileAfter) item.exileAfter = true;
+    }
     if (graveyardWay === 'flashback' || (graveyardWay !== 'permission' && card.graveyard?.exiled && flashback)) item.flashback = true;
     if (finality) item.finality = true;
     if (mutateOnto !== undefined) item.mutateOnto = mutateOnto;
@@ -1768,7 +2290,7 @@ export class Game {
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
     const kickText = !kicks ? '' : card.kicker!.offspring ? ' paying offspring' : card.kicker!.multi ? ` kicked ${kicks} time${kicks > 1 ? 's' : ''}` : ' kicked';
-    this.say(`${p.name} casts ${card.name}${kickText}${priced.cost.x ? ` (X=${x})` : ''}${mutate ? ` for its mutate cost onto ${this.findPerm(mutateOnto ?? null)?.card.name ?? 'a creature'}` : ''}${fromCommand ? ' from the command zone' : graveyardWay === 'permission' ? ' from their graveyard' : graveyardWay ? ` with ${graveyardWay}` : from === 'graveyard' ? ' from the graveyard' : from === 'overload' ? ' with overload' : item.alt ? ` with ${item.alt}` : from === 'alt' ? ' without paying its mana cost' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${card.name}${kickText}${priced.cost.x ? ` (X=${x})` : ''}${mutate ? ` for its mutate cost onto ${this.findPerm(mutateOnto ?? null)?.card.name ?? 'a creature'}` : ''}${via ? `${via.label}${via.mode === 'free' ? ' without paying its mana cost' : via.mode === 'life' ? ` for ${card.cmc} life` : ''}` : fromCommand ? ' from the command zone' : graveyardWay === 'permission' ? ' from their graveyard' : graveyardWay ? ` with ${graveyardWay}` : from === 'graveyard' ? ' from the graveyard' : from === 'overload' ? ' with overload' : item.alt ? ` with ${item.alt}` : from === 'alt' ? ' without paying its mana cost' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
 
     // "Becomes the target of a spell" triggers (rule 603.2): the spell is on the stack with its targets chosen.
     for (const t of aimed) this.becameTarget(p, t, true);
@@ -2105,7 +2627,7 @@ export class Game {
     }
     if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
       // A copy of a permanent spell becomes a token (rule 707.10f).
-      const perm = yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo, undefined, item.copy ? 'token' : item.alt, item.kicked);
+      const perm = yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo, item.owner !== undefined ? this.players[item.owner] : undefined, item.copy ? 'token' : item.alt, item.kicked);
       if (perm && item.finality) this.finality.add(perm.id);
       return;
     }
@@ -2145,8 +2667,10 @@ export class Game {
   /** Where a spell goes after it resolves or is countered: exile if it was cast with flashback (rule 702.34). */
   private leaveStack(p: PlayerState, item: StackItem) {
     if (item.copy) return;
-    if (item.flashback) p.exile.push(item.card);
-    else this.toGraveyard(p, item.faceDown ?? item.card, item.isCommander);
+    // A card cast from someone else's library or exile goes to its owner's graveyard (rule 400.3).
+    const owner = item.owner !== undefined ? this.players[item.owner] : p;
+    if (item.flashback || item.exileAfter) owner.exile.push(item.card);
+    else this.toGraveyard(owner, item.faceDown ?? item.card, item.isCommander);
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
@@ -2675,14 +3199,32 @@ export class Game {
     }
 
     switch (e.kind) {
+      case 'exilePlay':
+        yield* this.resolveExilePlay(p, e, src, x, target);
+        break;
+      case 'freeCast':
+        yield* this.resolveFreeCast(p, e, src, x, target);
+        break;
+      case 'search':
+        yield* this.resolveSearch(p, e, src, x, target);
+        break;
+      case 'rearrange':
+        yield* this.rearrange(p, e);
+        break;
       case 'ramp': {
+        const pool = yield* this.searchLibrary(p);
+        if (!pool) break;
         let found = 0;
+        const window = pool === p.library ? null : [...pool];
         for (let i = 0; i < e.lands + e.toHand; i++) {
-          const names = [...new Set(p.library.filter((c) => c.isBasic && c.land).map((c) => c.name))];
+          const looking = window ?? p.library;
+          const names = [...new Set(looking.filter((c) => c.isBasic && c.land).map((c) => c.name))];
           if (!names.length) break;
           const toBattlefield = i < e.lands;
-          const pick = names.length === 1 ? [0] : yield* this.choose(p, 'ramp', `Search for a basic land${toBattlefield ? ' to put onto the battlefield' : ' for your hand'}.`, names.map((name) => ({ label: name, card: p.library.find((c) => c.name === name) })), 1, 1);
-          const land = p.library.find((c) => c.isBasic && c.land && c.name === names[pick[0] ?? 0])!;
+          const pick = names.length === 1 ? [0] : yield* this.choose(p, 'ramp', `Search for a basic land${toBattlefield ? ' to put onto the battlefield' : ' for your hand'}.`, names.map((name) => ({ label: name, card: looking.find((c) => c.name === name) })), 1, 1);
+          const land = looking.find((c) => c.isBasic && c.land && c.name === names[pick[0] ?? 0])!;
+          if (window) window.splice(window.indexOf(land), 1);
+          if (!this.foundInSearch(p, [land]).length) continue;
           p.library.splice(p.library.indexOf(land), 1);
           if (toBattlefield) this.putLand(p, land, land.land!, e.tapped);
           else p.hand.push(land);
@@ -2875,20 +3417,31 @@ export class Game {
       }
       case 'tutor': {
         if (!p.library.length) break;
+        const pool = yield* this.searchLibrary(p);
+        if (!pool) break;
         if (e.creatureToBattlefield) {
-          const found = [...new Set(p.library.filter((c) => c.isCreature && (!e.xLimit || c.cmc <= x)))].sort((a, b) => a.name.localeCompare(b.name));
+          const found = [...new Set(pool.filter((c) => c.isCreature && (!e.xLimit || c.cmc <= x)))].sort((a, b) => a.name.localeCompare(b.name));
           if (!found.length) break;
           const pick = yield* this.choose(p, 'take', 'Search your library for a creature to put onto the battlefield.', found.map((card) => ({ label: card.name, card })), 1, 1);
           const card = found[pick[0] ?? 0];
+          if (!this.foundInSearch(p, [card]).length) {
+            this.rng.shuffle(p.library);
+            break;
+          }
           p.library.splice(p.library.indexOf(card), 1);
           this.rng.shuffle(p.library);
           this.say(`${p.name} searches their library and puts ${card.name} onto the battlefield.`);
           yield* this.enter(p, card, false, 0, null);
           break;
         }
-        const cards = [...new Set(p.library)].sort((a, b) => a.name.localeCompare(b.name));
+        const cards = [...new Set(pool)].sort((a, b) => a.name.localeCompare(b.name));
+        if (!cards.length) break;
         const pick = yield* this.choose(p, 'tutor', 'Search your library for a card to put into your hand.', cards.map((card) => ({ label: card.name, card })), 1, 1);
         const card = cards[pick[0] ?? 0];
+        if (!this.foundInSearch(p, [card]).length) {
+          this.rng.shuffle(p.library);
+          break;
+        }
         p.library.splice(p.library.indexOf(card), 1);
         p.hand.push(card);
         this.rng.shuffle(p.library);
@@ -5038,10 +5591,10 @@ export class Game {
     for (const a of hitPlayer) {
       const own = a.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
       // "You get that many {E}" (Aurora Shifter): the damage it dealt.
-      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0));
+      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined);
       for (const eq of this.attachments(a)) {
         const hits = eq.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
-        if (hits.length) this.trigger(p, eq.card, eq.id, hits);
+        if (hits.length) this.trigger(p, eq.card, eq.id, hits, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined);
       }
     }
     if (hitPlayer.size) {
@@ -5129,6 +5682,35 @@ export function chargeUse(card: SimCard): number {
 
 function sameActivation(a: Effect, b: Effect): boolean {
   return !!a.activation && !!b.activation && a.activation.tap === b.activation.tap && JSON.stringify(a.activation.cost) === JSON.stringify(b.activation.cost);
+}
+
+/** Does a card match a CardKind (see typesExile.ts)? */
+export function matchesKind(card: SimCard, kind: CardKind): boolean {
+  switch (kind) {
+    case 'any': return true;
+    case 'nonland': return !card.isLand;
+    case 'land': return card.isLand;
+    case 'basicLand': return card.isLand && card.isBasic;
+    case 'permanent': return !card.isInstant && !card.isSorcery;
+    case 'nonlandPermanent': return !card.isLand && !card.isInstant && !card.isSorcery;
+    case 'creature': return card.isCreature;
+    case 'instantSorcery': return card.isInstant || card.isSorcery;
+    case 'instant': return card.isInstant;
+    case 'artifact': return card.isArtifact;
+    case 'enchantment': return card.isEnchantment;
+    case 'artifactOrColorless': return !card.isLand && (card.isArtifact || cardColors(card).length === 0);
+    case 'colorlessNonland': return !card.isLand && cardColors(card).length === 0;
+    case 'legendaryCreature': return card.isCreature && card.isLegendary;
+    case 'creatureInstantSorcery': return card.isCreature || card.isInstant || card.isSorcery;
+    case 'none': return false;
+  }
+}
+
+/** A card's colors, from the colored symbols in its mana cost (rule 202.2). */
+export function cardColors(card: SimCard): Color[] {
+  const out = new Set<Color>();
+  for (const pip of card.cost.pips) for (const m of pip) if (m !== 'C') out.add(m);
+  return [...out];
 }
 
 export function isInstantSpeed(card: SimCard): boolean {
