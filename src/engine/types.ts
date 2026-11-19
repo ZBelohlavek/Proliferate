@@ -64,13 +64,16 @@ export type Trigger =
   | 'playerAttacks' // a player attacks: 'all' any player, 'opponents' an opponent attacks one of your other opponents (see minAttackers)
   | 'playerSacrifice' // a player ('all') or an opponent ('opponents') sacrifices a permanent (castFilter 'noncreature': only a Treasure or other noncreature token)
   | 'opponentCrime' // an opponent commits a crime: targets a player other than themselves, or a permanent or spell another player controls (rule 700.13)
+  | 'opponentSacrifice' // an opponent sacrifices a nontoken permanent, the trigger is about that card (scope 'all': or discards a permanent card, Tergrid)
+  | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
+  | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
 /** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
 export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery';
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
@@ -90,6 +93,8 @@ export type Effect = EffectBody & {
   chapters?: number[];
   /** Creature-enters triggers that only watch nontoken creatures. */
   nontoken?: boolean;
+  /** Enters and dies triggers: only creatures of this subtype ("whenever another Dragon you control enters"), or of the source's chosen type ('chosen'). */
+  ofType?: string;
   /** "Do this only once each turn." */
   oncePerTurn?: boolean;
   /** Die-roll triggers: the lowest result that counts ("whenever you roll a 4 or higher"). */
@@ -204,12 +209,12 @@ export type EffectBody =
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
-  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any' }
+  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any'; /** The tokens' creature types ("1/1 white Soldier creature token"), lowercased, for tribal rules. */ subtypes?: string[] }
   /**
    * Create token copies of the source permanent (Skyclave Relic, Jace, Mirror Mage; offspring makes a 1/1 one).
    * size: the copy's power and toughness. loyalty: its starting loyalty.
    */
-  | { kind: 'copySelf'; n: number; tapped?: boolean; nonlegendary?: boolean; loyalty?: number; size?: number }
+  | { kind: 'copySelf'; n: number; tapped?: boolean; nonlegendary?: boolean; loyalty?: number; size?: number; /** Opponents get the copy: one target opponent, or each opponent (Wedding Ring, Life of the Party). goaded: goaded for the rest of the game. */ give?: 'target' | 'each'; goaded?: boolean }
   /** Shuffle the source into its owner's library (Fblthp, the Lost). */
   | { kind: 'shuffleSelf' }
   /** Sacrifice the source (Phantasmal Image's "when this becomes the target ..."). */
@@ -221,7 +226,7 @@ export type EffectBody =
   /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
   | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
@@ -274,7 +279,7 @@ export type EffectBody =
    */
   | { kind: 'etbDoubler'; event?: 'enters' | 'permanentEnters' | 'attack' | 'dies' | 'magecraft' }
   /** Creatures can't attack you unless their controller pays this much for each. */
-  | { kind: 'attackTax'; amount: number }
+  | { kind: 'attackTax'; amount: number; /** Only creatures with counters, `amount` for each counter on them (Nils). */ perCounter?: boolean }
   /** Each player can't cast more than one spell each turn. */
   | { kind: 'spellLimit' }
   /** Spells cost more: your opponents' (or everyone's, with `all`), optionally only noncreature spells. */
@@ -292,12 +297,67 @@ export type EffectBody =
   /** Exile graveyards: every opponent's, or everyone's. `cards`: only that many cards, the best ones in opponents' graveyards. */
   | { kind: 'exileGraveyards'; all: boolean; cards?: number }
   /** Enters as a copy of a creature on the battlefield: any, only yours (Spark Double) or only an opponent's (Imposter Mech). */
-  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean; /** Phantasmal Image: "when this becomes the target of a spell or ability, sacrifice it". */ fragile?: boolean }
+  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** Copy Enchantment, Copy Artifact: copies an enchantment or an artifact instead of a creature. */ what?: 'enchantment' | 'artifact'; /** Enters tapped (Callidus Assassin). */ tapped?: boolean; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean; /** Phantasmal Image: "when this becomes the target of a spell or ability, sacrifice it". */ fragile?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
   /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
   /** what: an artifact instead of a creature (Thieving Skydiver; an Equipment is then attached to the source). maxCmc: only mana value up to this; -1 = X. */
   /** payEnergy: Confiscation Coup gives this much energy, then the steal costs energy equal to the target's mana value. */
-  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number; what?: 'artifact'; maxCmc?: number }
+  /**
+   * until: control ends at the end of this turn ('eot', Act of Treason) or of the taker's next turn ('nextTurn', Treasure Nabber).
+   * untap / haste: "untap that creature, it gains haste" (threaten). all: every artifact the player the ability is about controls
+   * (Hellkite Tyrant). from 'hand': put a creature card from target opponent's hand onto the battlefield (Treacherous Urge).
+   * what 'permanent' / 'noncreatureArtifact': what can be taken besides a creature. minPower: only if its power is at most this,
+   * unless you control another creature of `orSubtype` (Reptilian Recruiter). base: it has this base power and toughness and these
+   * keywords until end of turn (Flayer of Loyalties).
+   */
+  | { kind: 'steal'; from: 'battlefield' | 'library' | 'hand'; whileSource?: boolean; payEnergy?: number; what?: 'artifact' | 'noncreatureArtifact' | 'permanent'; maxCmc?: number; until?: 'eot' | 'nextTurn'; untap?: boolean; haste?: boolean; all?: 'artifacts'; maxPower?: number; orSubtype?: string; base?: { p: number; t: number; keywords: string[] }; /** "Sacrifice it at the beginning of the next end step." */ sacAtEnd?: boolean }
+  /**
+   * Real token copies (rules 111.10, 707.2): tokens with the copiable values of a permanent, with the card's "except" changes.
+   * of: 'target' (a target permanent that matches `filter`), 'attached' (the equipped or enchanted permanent), 'subject' (the
+   * permanent or card the trigger is about: the creature that entered, attacked or died), 'aimed' (what the previous part of the
+   * spell took or returned: Blue Sun's Twilight, Coiling Rebirth), 'tokens' (each token you control: Second Harvest).
+   * end: sacrificed or exiled at the beginning of the next end step. minX: only if X is at least this.
+   */
+  | { kind: 'tokenCopy'; n: number; of: 'target' | 'attached' | 'subject' | 'aimed' | 'tokens'; filter?: CopyFilter; nonlegendary?: boolean; legendary?: boolean; haste?: boolean; flying?: boolean; /** "Except it's 1/1": its base power and toughness. */ pt?: { p: number; t: number }; end?: 'sacrifice' | 'exile'; tapped?: boolean; attacking?: boolean; minX?: number; /** The copy is an enchantment and no other card type (Myrkul). */ enchantment?: boolean }
+  /**
+   * The source becomes a copy of another permanent (rule 707.2): a target matching `filter`, or a creature card in a graveyard
+   * ('graveyard': yours with mana value X, Lazav the Multifarious; 'subject': the card the trigger is about, Lazav Dimir Mastermind).
+   * untilEot: only until end of turn. keep: "except it has this ability" (it keeps the source's abilities). name: it keeps its name.
+   * pump: both it and the copied creature get +p/+0 and haste until end of turn (Gogo).
+   */
+  | { kind: 'becomeCopy'; of: 'target' | 'graveyard' | 'subject'; filter?: CopyFilter; untilEot?: boolean; keep?: boolean; pump?: number; hexproof?: boolean; /** "Except its name is ~" (and it's legendary, for Lazav). */ name?: boolean }
+  /**
+   * "Return that card to the battlefield under your control": the card the trigger is about (a creature that died, a permanent an
+   * opponent sacrificed or discarded), from its owner's graveyard, or from exile (Kaya's Ghostform: "dies or is put into exile").
+   * samurai: only Samurai cards (Oathkeeper). shrunk: only a creature that had a -1/-1 counter on it (Necroskitter).
+   */
+  | { kind: 'takeCard'; samurai?: boolean; shrunk?: boolean }
+  /** Static: whenever an opponent taps an artifact for mana, you gain control of it until the end of your next turn (Treasure Nabber). */
+  | { kind: 'nabArtifacts' }
+  /** Static: whenever a nonland permanent an opponent owns enters under your control, they lose life equal to its mana value (Brainstealer Dragon). */
+  | { kind: 'stolenDrain' }
+  /**
+   * Static token replacement (rule 614.1a). 'oneOfEach': a Clue, Food or Treasure becomes one of each (Academy Manufactor).
+   * 'treasure': one more Treasure (Xorn). 'squirrels': that many 1/1 Squirrels too (Chatterfang). 'food': one more Food (Peregrin Took).
+   * 'copies': the first tokens each turn are copies of the enchanted permanent instead (Moonlit Meditation).
+   */
+  | { kind: 'tokenReplace'; add: 'oneOfEach' | 'treasure' | 'squirrels' | 'food' | 'copies' }
+  /**
+   * Change the target of a spell or ability with a single target (rule 115.7). to 'choose': any new legal target (Deflecting Swat,
+   * Misdirection); 'self': the source itself (Spellskite, Hydroelectric Specimen). spells: only instants and sorceries ('instantSorcery'),
+   * or any spell; abilities: abilities too. copy: then copy it, and the copy may have new targets too (Wyll's Reversal on 15+).
+   * damage: you take damage equal to the spell's mana value (Imp's Mischief).
+   */
+  | { kind: 'redirect'; to: 'choose' | 'self'; spells: 'any' | 'instantSorcery'; abilities?: boolean; copy?: boolean; damage?: boolean }
+  /**
+   * Delayed copies (rule 707.10): the next instant or sorcery spell you cast this turn is copied ('next', Teach by Example),
+   * or every spell you cast this turn ('turn', Jace Reawakened).
+   */
+  | { kind: 'copyNext'; until: 'next' | 'turn' }
+  /** Static: whenever you would copy a spell, copy it once more (Twinning Staff). */
+  | { kind: 'copyDoubler' }
+  /** Static: the source enters under the control of an opponent and attacks each combat, but never its owner (Xantcha). */
+  | { kind: 'givenAway' }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
@@ -340,7 +400,7 @@ export type EffectBody =
   /** A token copy of another nonlegendary artifact or enchantment; only while you're the monarch when `monarch` (Court of Vantress). */
   | { kind: 'copyPermanent'; monarch?: boolean }
   /** Gev: your other creatures enter with this many extra +1/+1 counters for each opponent who lost life this turn. */
-  | { kind: 'enterCounters'; n: number }
+  | { kind: 'enterCounters'; n: number; /** Metallic Mimic: only creatures of the chosen type, one counter each, no life-loss scaling. */ chosen?: boolean }
   /** Kudo: other creatures have this base power and toughness. */
   | { kind: 'baseSize'; p: number; t: number }
   /** You get this many energy counters (rule 122.1, 107.14). -1: "that many" / X. */
@@ -397,7 +457,7 @@ export type EffectBody =
    * than you if able, until your next turn. all: every creature your opponents control.
    * weaker: static, only creatures with less power than the source (Baeloth Barrityl).
    */
-  | { kind: 'goad'; all: boolean; weaker?: boolean }
+  | { kind: 'goad'; all: boolean; weaker?: boolean; /** Tap it too (Karazikar). */ tap?: boolean }
   /** Exile your own permanents and return them at once, so their enters abilities happen again. */
   | { kind: 'blink'; n: number; what: 'creature' | 'permanent' }
   /** The Ring tempts you (rule 701.54): choose a ring-bearer; each time adds one of the Ring's four abilities. */
@@ -422,6 +482,43 @@ export type EffectBody =
   | { kind: 'curse'; act: CurseAct; n: number }
   /** Static: a Curse put into your graveyard from the battlefield returns attached to you at the next end step (Lynde). */
   | { kind: 'returnCurses' }
+  /**
+   * Static attack and block rules (rules 508.1c-d, 509.1b-c), see classifyCombat.ts.
+   * rule: 'mustAttack' (attacks each combat if able), 'cantAttack', 'cantBlock', 'cantAttackYou' (can't attack the
+   * source's controller), 'maxAttackers' (no more than `n` creatures can attack you each combat).
+   * who: whose creatures it covers: 'self' (the source), 'attached' (the creature this Aura is on), 'opponents'
+   * (creatures the source's controller's opponents control), 'all'.
+   * filter: only creatures that are goaded, have even mana value, power `maxPower` or less, a subtype, a name,
+   * -1/-1 counters, or less power than the source ('weaker'). vsYours: only when blocking the source controller's creatures.
+   * unlessCreatures: the rule lifts while its controller controls this many other creatures (Oketra).
+ * 'cantAttackOwner': can't attack its owner (Xantcha). 'allAttack': once one of an opponent's creatures attacks, all of theirs must (War's Toll).
+   */
+  | { kind: 'combatRule'; rule: 'mustAttack' | 'cantAttack' | 'cantBlock' | 'cantAttackYou' | 'cantAttackOwner' | 'maxAttackers' | 'allAttack'; who: 'self' | 'attached' | 'opponents' | 'all'; n?: number; filter?: { goaded?: boolean; evenMv?: boolean; maxPower?: number; subtype?: string; name?: string; minusCounters?: boolean; weaker?: boolean }; vsYours?: boolean; unlessCreatures?: number; /** Only during extra turns (Medomai). */ extraTurns?: boolean }
+  /** Creatures your opponents control attack each combat if able, this turn ('turn') or until your next turn ('yourNextTurn') (Bident of Thassa, The Akroan War). */
+  | { kind: 'forceAttack'; until: 'turn' | 'yourNextTurn' }
+  /** Until your next turn, creatures can't attack you unless their controller pays this much for each (Summon: Yojimbo). */
+  | { kind: 'tempAttackTax'; amount: number }
+  /** Target creature can't attack and/or can't block this turn (Endbringer, Zirda). */
+  | { kind: 'pacify'; attack: boolean; block: boolean }
+  /** Suspect target creature (rule 701.60): it has menace and can't block for as long as it's suspected. thenGoad: then goad all suspected creatures (Nelly Borca). */
+  | { kind: 'suspect'; thenGoad?: boolean }
+  /** Static: whenever a goaded creature attacks, it deals this much damage to its controller (Vengeful Ancestor). */
+  | { kind: 'goadPunish'; n: number }
+  /** Return the blocked creature that set this off to its owner's hand (Grazilaxx). */
+  | { kind: 'returnBlocked' }
+  /**
+   * The player this creature attacked, when it attacked and wasn't blocked: loses life for each card in their graveyard
+   * ('graveyard', Guiltfeeder) or discards `n` cards after you sacrifice the creature ('discard', Dauthi Mindripper).
+   */
+  | { kind: 'punishDefender'; what: 'graveyard' | 'discard'; n: number }
+  /** Static: you have protection from each of your opponents (rule 702.16j, Absolute Virtue). */
+  | { kind: 'playerProtection' }
+  /** Static: commanders you control have these keywords (Vexilus Praetor: protection from everything). */
+  | { kind: 'commanderKeywords'; keywords: string[] }
+  /** Target creature you control gains protection from the color of your choice until end of turn (Mother of Runes). */
+  /** Static: creatures you control are every creature type (Maskwood Nexus), or also the type chosen as the source entered (Leyline of Transformation). */
+  | { kind: 'creatureTypes'; every: boolean }
+  | { kind: 'protectColor'; /** It also gains toxic this turn (Skrelv). */ toxic?: number }
   /** You may move a Curse attached to you onto an opponent; if you do, draw n cards (Lynde). */
   | { kind: 'passCurse'; n: number }
   /**
@@ -526,7 +623,79 @@ export type EffectBody =
    * Copy a spell or ability on the stack. 'spell': target instant or sorcery spell; 'trigger': the spell
    * that set off this ability ("whenever you cast ..., copy that spell"); 'ability': target ability you control.
    */
-  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability'; /** Only spells you control. */ yours?: boolean };
+  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability' | 'permanentSpell' | 'creatureSpell'; /** Only spells you control. */ yours?: boolean; /** The copy isn't legendary (Double Major). */ nonlegendary?: boolean; /** "The copy targets ~" (Ivy): the copy's target is the source, and only spells that help it are copied. */ toSource?: boolean; /** "They may pay {2}. If they don't, ..." (Wandering Archaic): the caster pays when they can spare it. */ unlessPay?: number }
+  /**
+   * You may cast spells of this kind as though they had flash (rule 702.8): static on a permanent, or for a while
+   * when it resolves ('turn': this turn, Borne Upon a Wind; 'yourNextTurn': until your next turn, Teferi, Time Raveler).
+   */
+  | { kind: 'flashGrant'; what: FlashFilter; until?: 'turn' | 'yourNextTurn' }
+  /** Hideaway (rule 702.75): play the card exiled with the source without paying its mana cost, if your graveyard holds `graveyard` cards. */
+  | { kind: 'playHidden'; graveyard?: number; /** Hideaway lands: creatures you control have total power 10+ (Mosswort Bridge), you attacked with three or more creatures this turn (Windbrisk Heights), an opponent was dealt 7+ damage this turn (Spinerock Knoll). */ cond?: 'power10' | 'attacked3' | 'damage7' }
+  /** Exile a nonland card with mana value up to `maxCmc` from your hand; it becomes plotted (rule 702.170, Jace Reawakened). */
+  | { kind: 'plotFromHand'; maxCmc: number };
+
+/** Which spells a flash grant covers. 'creatureFirst': the first creature spell you cast each turn (The Blue Spirit). */
+export type FlashFilter = 'all' | 'sorcery' | 'artifact' | 'colorless' | 'artifactOrColorless' | 'noncreature' | 'auraEquipment' | 'creatureFirst';
+
+/**
+ * Ways to cast a card other than paying its mana cost from hand, and things done with it from hand
+ * (see src/engine/classifyCasting.ts). Optional additional costs (entwine, buyback, bargain, gift, cleave,
+ * replicate, casualty) live in SimCard.kicker instead, since they work like kicker.
+ */
+export interface Casting {
+  /** The card has no mana cost, so it can't be cast from hand the usual way (rule 202.1b): suspend only. */
+  noCost?: boolean;
+  /** Foretell (702.143): on your turn pay {2} to exile it face down; on a later turn cast it for `cost`. `effects`: what it does "if this spell was cast from exile". */
+  foretell?: { cost: ManaCost; effects?: Effect[] };
+  /**
+   * Suspend N—cost (702.62): exile it with N time counters; one comes off each upkeep, and with the last it is cast
+   * without paying its mana cost (a creature has haste). `again`: it exiles itself with that many time counters as
+   * it resolves (Inspiring Refrain). `onOpponentCast`: a counter also comes off when an opponent casts a spell (Deep-Sea Kraken).
+   */
+  suspend?: { n: number; cost: ManaCost; again?: number; onOpponentCast?: boolean };
+  /** Plot (702.170): pay this and exile it as a sorcery; cast it on a later turn as a sorcery without paying its mana cost. */
+  plot?: ManaCost;
+  /** Transmute (702.53): pay this and discard it, as a sorcery, to find a card with the same mana value. */
+  transmute?: ManaCost;
+  /** Channel: pay this and discard it from your hand for `effects`. */
+  channel?: { cost: ManaCost; effects: Effect[] };
+  /** Hideaway N (702.75): as it enters, look at the top N cards and exile one face down (see Effect playHidden). */
+  hideaway?: number;
+  /** Madness (702.35): when discarded it is exiled, and may be cast for this right away. */
+  madness?: ManaCost;
+  /** Miracle (702.94): when it is the first card drawn in a turn, it may be cast for this right away. */
+  miracle?: ManaCost;
+  /** Cipher (702.99): as it resolves, encode it on a creature you control; whenever that creature deals combat damage to a player, cast a copy. */
+  cipher?: boolean;
+  /** Spree (702.172) or tiered: modes with their own additional costs; choose one or more (`one`: exactly one). */
+  spree?: { modes: { cost: ManaCost; effects: Effect[]; label: string }[]; one?: boolean };
+  /** "If this card is in your opening hand, you may begin the game with it on the battlefield." (Leylines) */
+  leyline?: boolean;
+  /** "Cast ~ only ..." (rule 601.3): during combat on an opponent's turn, in the declare blockers step of an opponent's turn, or before blockers are declared. */
+  timing?: 'opponentCombat' | 'opponentBlockers' | 'beforeBlockers';
+  /** "You can't cast ~ during your first, second, or third turns of the game." */
+  fromTurn?: number;
+  /** Flashback paid by sacrificing this many creatures (Dread Return). */
+  flashbackSac?: number;
+  /** "You may cast ~ as though it had flash by tapping three untapped creatures you control with flying" (Tegwyll's Scouring). */
+  flashByTapping?: number;
+}
+
+
+/** What a token copy or "becomes a copy" effect may copy. */
+export interface CopyFilter {
+  /** Card types that qualify (any of them). */
+  types: ('creature' | 'artifact' | 'enchantment')[];
+  /** Only permanents you control. */
+  yours?: boolean;
+  nonlegendary?: boolean;
+  /** "Another" / "other": not the source. */
+  other?: boolean;
+  /** Both types at once ("artifact creature"). */
+  both?: boolean;
+  attacking?: boolean;
+  nontoken?: boolean;
+}
 
 export type EffectKind = EffectBody['kind'];
 
@@ -621,11 +790,13 @@ export interface SimCard {
   /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */
   freeWithCommander?: boolean;
   /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
-  cycling?: { cost: ManaCost; land?: boolean };
+  cycling?: { cost: ManaCost; land?: boolean; /** "When you cycle ~" (Fractured Sanity). */ effects?: Effect[] };
   /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
   cumulativeUpkeep?: ManaCost;
   /** Toxic N (rule 702.164): combat damage to a player also gives that many poison counters. */
   toxic?: number;
+  /** "As ~ enters, choose a creature type" (see Perm.chosenType). */
+  choosesType?: boolean;
   /** Overload: for this cost the spell hits everything it could target instead of one target. */
   overload?: { cost: ManaCost; effects: Effect[] };
   /** Storm: copied for each spell cast before it this turn. */
@@ -676,7 +847,21 @@ export interface SimCard {
     creatures?: number;
     evoke?: boolean;
     dash?: boolean;
+    /** Warp (702.185): exiled at the next end step, then castable from exile on a later turn. */
+    warp?: boolean;
+    /** Blitz (702.152): haste and "when this dies, draw a card"; sacrificed at the next end step. */
+    blitz?: boolean;
+    /** Impending N (702.176): enters with N time counters and isn't a creature until the last is removed. */
+    impending?: number;
+    /** Prowl (702.76): only if a Rogue of yours dealt combat damage to a player this turn. */
+    prowl?: boolean;
+    /** Emerge (702.119): sacrifice a creature (or an artifact), and the cost is reduced by its mana value. */
+    emerge?: 'creature' | 'artifact';
+    /** What the spell does when cast this way, when that differs (prowl: "if this spell's prowl cost was paid"). */
+    effects?: Effect[];
   };
+  /** Alternative casting keywords and things done from hand (foretell, suspend, plot, transmute, spree ...). */
+  casting?: Casting;
   /**
    * Station (rule 702.184): tap another creature you control to put charge counters equal to its power on this,
    * as a sorcery. Each tier's abilities and keywords apply from `n` charge counters on; a Spacecraft becomes an
@@ -712,7 +897,18 @@ export interface SimCard {
    * Kicker, multikicker or offspring (rules 702.33, 702.175): an optional additional cost. `effects` is what the card
    * does when it was paid (its `effects` are the unkicked version). Multikicker may be paid any number of times.
    */
-  kicker?: { cost: ManaCost; multi?: boolean; offspring?: boolean; effects: Effect[]; /** Enters with a charge counter for each time it was kicked (Everflowing Chalice). */ charge?: boolean };
+  kicker?: {
+    cost: ManaCost; multi?: boolean; offspring?: boolean; effects: Effect[]; /** Enters with a charge counter for each time it was kicked (Everflowing Chalice). */ charge?: boolean;
+    /**
+     * Other optional costs that work like kicker (see classifyCasting.ts): entwine (702.42, all modes), buyback (702.27, back
+     * to hand), bargain (702.166, sacrifice an artifact, enchantment or token), gift (702.174, an opponent gets `gift`),
+     * cleave (702.148, `cost` replaces the mana cost), replicate (702.56, a copy per payment), casualty (702.153, sacrifice a
+     * creature with power `casualty` or more for a copy).
+     */
+    as?: 'entwine' | 'buyback' | 'bargain' | 'gift' | 'cleave' | 'replicate' | 'casualty';
+    gift?: 'card' | 'fish' | 'extraTurn' | 'food' | 'treasure' | 'octopus';
+    casualty?: number;
+  };
   /** Mutate (rule 702.140): cast for this cost onto a non-Human creature you own, merging with it. */
   mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
   /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */

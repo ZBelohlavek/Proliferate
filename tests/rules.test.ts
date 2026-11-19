@@ -128,7 +128,8 @@ describe('rules engine: whole games', () => {
       addResult(stats, playGame([...decks.slice(shift), ...decks.slice(0, shift)], seed).result);
     }
     expect(stats.decks.strong.wins / stats.decks.strong.games).toBeGreaterThan(0.32);
-  });
+    // 200 whole games: about 4 s alone, more alongside the rest of the suite.
+  }, 30_000);
 
   it('keeps library, hand, battlefield and graveyard cards accounted for', () => {
     const decks = ['a', 'b', 'c', 'd'].map((id) => toolboxDeck(id));
