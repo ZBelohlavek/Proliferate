@@ -80,6 +80,8 @@ const KNOWN_KEYWORDS = [
   'flying', 'trample', 'haste', 'vigilance', 'deathtouch', 'lifelink', 'menace', 'first strike',
   'double strike', 'indestructible', 'hexproof', 'shroud', 'reach', 'defender', 'flash', 'ward', 'infect', 'wither',
   'shadow', 'fear',
+  // Evasion and attack keywords handled in the rules engine's canBlock and combat (rules 702.14, 702.118, 702.116).
+  'skulk', 'islandwalk', 'swampwalk', 'forestwalk', 'mountainwalk', 'plainswalk', 'myriad',
 ];
 
 // ---------------------------------------------------------------------------
@@ -171,6 +173,9 @@ function parseKeywords(raw: RawCard, text: string): string[] {
   // "Hexproof from each color" isn't hexproof (rule 702.11d), though card data lists the keyword.
   if (kws.has('hexproof') && /hexproof from/.test(text) && !/(^|, )hexproof(,|$)/m.test(text)) kws.delete('hexproof');
   if (/~ can't be blocked(\.|$)/m.test(text)) kws.add('unblockable');
+  // Stormkeld Vanguard, Azure Beastbinder: evasion against small or big blockers (checked in the rules engine's canBlock).
+  const evade = text.match(/^~ can't be blocked by creatures with power (\d+) or (less|greater)\.?$/m);
+  if (evade) kws.add(`can't be blocked by power ${evade[1]} or ${evade[2]}`);
   if (/^~ can't block\.?$/m.test(text)) kws.add("can't block");
   if (/^~ can't be countered/m.test(text)) kws.add('uncounterable');
   return [...kws];
@@ -1506,6 +1511,12 @@ export function classifyCard(raw: RawCard): SimCard {
     card.cumulativeUpkeep = parseManaCost(cumulative[1]);
     card.notes.push(`Cumulative upkeep ${cumulative[1].toUpperCase()}: pays more each turn, then is sacrificed`);
   }
+  // Vanishing N (rule 702.63): N time counters, one comes off each upkeep, sacrificed when the last does.
+  const vanishing = isPermanent && text.match(/^vanishing (\d+)$/m);
+  if (vanishing) {
+    card.vanishing = parseInt(vanishing[1], 10);
+    card.notes.push(`Vanishing ${vanishing[1]}: sacrificed at your ${vanishing[1] === "1" ? "next upkeep" : `upkeep ${vanishing[1]} turns after it enters`}`);
+  }
   const morph = isPermanent && text.match(/^(morph|megamorph|disguise) ((?:\{[^}]+\})+)/m);
   if (morph) {
     card.morph = { cost: parseManaCost(morph[2]), ...(morph[1] === 'megamorph' ? { counter: true } : {}), ...(morph[1] === 'disguise' ? { ward: true } : {}) };
@@ -1637,7 +1648,6 @@ export function classifyCard(raw: RawCard): SimCard {
   if (kickLine) readKicker(raw, card, kickLine, fullText);
   // Foretell, suspend, plot, spree, bargain, gift and the other casting keywords (classifyCasting.ts).
   castingKeywords(raw, fullText, card, classifyCard, parseManaCost);
-  if (rule) applyCardRule(card, rule);
 
   // Rooms (rule 709.5): the other door is read on its own, and unlocked later for its mana cost.
   if (raw.back && raw.subTypes.some((t) => t.toLowerCase() === 'room')) {
@@ -1652,6 +1662,8 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Room: ${b.name} is the other door (cast it, or unlock it for ${manaCost.toUpperCase()})${door.effects.length ? `: ${door.notes.filter((n) => !/^Not /.test(n)).join('; ')}` : ''}`);
     for (const u of door.unread ?? []) (card.unread ??= []).push(u);
   }
+  // After the Room's other door, so an entry for a Room covers both doors.
+  if (rule) applyCardRule(card, rule);
   card.modeled = !!card.room?.door.modeled || !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station || !!card.casting;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
@@ -1731,7 +1743,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line) || castingLineHandled(line) || lockLineHandled(line)) return true;
-  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
+  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^vanishing \d+$|^~ can't be blocked by creatures with power \d+ or (less|greater)\.?$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
 
@@ -1797,7 +1809,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'handSize', 'combatRule', 'goadPunish', 'playerProtection', 'oppAnthem', 'oppEnterTapped', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'handSize', 'combatRule', 'goadPunish', 'playerProtection', 'oppAnthem', 'oppEnterTapped', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS, 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1867,6 +1879,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'blocked': return ctx.scope === 'self' ? 'When it becomes blocked: ' : 'When a creature you control becomes blocked: ';
     case 'unblocked': return 'When it attacks and isn\'t blocked: ';
     case 'opponentSearch': return 'When an opponent searches their library: ';
+    case 'proliferate': return 'When you proliferate: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
     case 'crewed': return 'When it becomes crewed: ';
     case 'unlock': return 'When this door unlocks: ';

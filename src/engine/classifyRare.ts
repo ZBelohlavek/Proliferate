@@ -51,6 +51,8 @@ export function rareTrigger(l: string): RareContext | null {
     const n = count(m[1] ?? m[2]);
     return { when: 'resolve', body: `create ${['', 'a', 'two', 'three'][n]} treasure token${n > 1 ? 's' : ''}` };
   }
+  // Scheming Aspirant, Thrummingbird payoffs: "whenever you proliferate" (each time, Tekuthal's second time too).
+  if ((m = l.match(/^whenever you proliferate,\s*(.*)$/))) return { when: 'proliferate', body: m[1] };
   // Exquisite Blood.
   if ((m = l.match(/^whenever an opponent loses life, (?!that player mills)(.*)$/))) return { when: 'opponentLoseLife', body: m[1] };
   // Geth's Grimoire, Liliana's Caress, Megrim, Waste Not, Entropic Battlecruiser.
