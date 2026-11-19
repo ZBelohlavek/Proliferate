@@ -503,8 +503,8 @@ button.link.danger { color: var(--bad); }
 .stack-list li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border: 1px solid var(--border); background: var(--panel); }
 .stack-list li:first-child { border-color: #4dabf7; box-shadow: 0 0 10px 1px rgba(77, 171, 247, 0.35); }
 .stack-list li.ability:first-child { border-color: #fab005; box-shadow: 0 0 10px 1px rgba(250, 176, 5, 0.35); }
-.stack-thumb { flex: none; width: 34px; height: 47px; overflow: hidden; border-radius: 3px; }
-.stack-thumb .card-face { width: 84px; height: 117px; transform: scale(0.405); transform-origin: top left; }
+.stack-thumb { flex: none; width: 60px; height: 84px; overflow: hidden; border-radius: 4px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); }
+.stack-thumb .card-face { width: 84px; height: 117px; transform: scale(0.715); transform-origin: top left; }
 .stack-thumb .card-frame { font-size: 15px; }
 
 /* Effects drawn above the page. */
@@ -545,4 +545,21 @@ button.link.danger { color: var(--bad); }
 .fx-banner.lose strong { font-size: 46px; }
 @media (prefers-reduced-motion: reduce) {
   .play .board-card.can .card-face, .play .board-card.target .card-face, .play .mat.active { animation: none !important; }
+}
+
+/* Lands as small cards, one per name, with a count. */
+.play .land-row { gap: 6px; align-items: flex-end; }
+.board-card.land, .board-card.land .card-face { width: 60px; height: 84px; }
+.board-card.land.tapped { width: 84px; height: 60px; }
+.board-card.land.tapped .card-face { left: 12px; top: -12px; }
+.board-card.land .card-frame { font-size: 9px; }
+.land-count { position: absolute; right: 2px; bottom: 2px; font-size: 11px; font-weight: 800; background: rgba(0, 0, 0, 0.8); color: #fff; border-radius: 4px; padding: 0 4px; pointer-events: none; }
+.board-card.land.tapped .land-count { right: 2px; bottom: 2px; }
+.play .card-preview { width: 300px; }
+/* Bigger cards on wide screens, so the art is easy to recognise. */
+@media (min-width: 1200px) {
+  .play .board-card:not(.land), .play .board-card:not(.land) .card-face { width: 96px; height: 134px; }
+  .play .board-card.tapped:not(.land) { width: 134px; height: 96px; }
+  .play .board-card.tapped:not(.land) .card-face { left: 19px; top: -19px; }
+  .play .hand-mat .board-card, .play .hand-mat .board-card .card-face { width: 112px; height: 156px; }
 }
