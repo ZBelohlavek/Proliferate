@@ -389,7 +389,11 @@ export class Referee {
         if (!g.players[d].alive) this.flag('attack-gone', '800.4a', `${who} attacks a player who left the game`);
         if (a.attackingPw !== undefined) {
           const pw = g.findPerm(a.attackingPw);
-          if (pw && (!pw.card.isPlaneswalker || pw.seat !== d)) this.flag('attack-planeswalker', '508.1b', `${who} attacks ${pw.card.name}, which isn't a planeswalker controlled by the defending player`);
+          if (pw && pw.card.isBattle) {
+            // A battle is attacked through its protector, by anyone else (rules 506.2, 508.1b).
+            if (pw.protector !== d) this.flag('attack-battle', '506.2', `${who} attacks ${pw.card.name}, but the defending player isn't its protector`);
+            if (pw.protector === a.seat) this.flag('attack-battle', '508.1b', `${who} attacks ${pw.card.name}, which its controller protects`);
+          } else if (pw && (!pw.card.isPlaneswalker || pw.seat !== d)) this.flag('attack-planeswalker', '508.1b', `${who} attacks ${pw.card.name}, which isn't a planeswalker controlled by the defending player`);
         }
         // Tokens put onto the battlefield attacking (myriad, Kiki-Jiki's copies) were never declared, so restrictions don't apply (rule 508.4).
         if (!a.token && !g.canAttack(a, d)) this.flag('attack-restricted', '508.1c', `${who} attacks ${g.players[d].name} despite a restriction`);
@@ -492,6 +496,10 @@ export class Referee {
           else if (perm.damage >= t && !g.hasKw(perm, 'indestructible') && !(g as unknown as AnyGame).regenerated?.(perm)) this.flag('sba-damage', '704.5g', `${perm.card.name} (${p.name}) has ${perm.damage} damage and toughness ${t}`);
         }
         if (perm.loyalty !== undefined && perm.loyalty <= 0 && perm.card.isPlaneswalker) this.flag('sba-loyalty', '704.5i', `${perm.card.name} (${p.name}) has no loyalty left`);
+        if (perm.card.isBattle) {
+          if ((perm.defense ?? 0) <= 0) this.flag('sba-defense', '704.5v', `${perm.card.name} (${p.name}) has no defense left`);
+          if (perm.protector === undefined || perm.protector === p.seat || !g.players[perm.protector].alive) this.flag('sba-protector', '704.5w', `${perm.card.name} (${p.name}) has no protector`);
+        }
       }
     }
     for (const s of g.stack) if (!g.players[s.controller].alive) this.flag('left-stack', '800.4a', `${s.label} on the stack is controlled by a player who left`);

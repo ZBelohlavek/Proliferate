@@ -58,6 +58,10 @@ export interface Perm {
   loyalty?: number;
   /** Planeswalkers: a loyalty ability was activated this turn (rule 606.3). */
   loyaltyUsed?: boolean;
+  /** Battles: defense counters (rule 310.4). */
+  defense?: number;
+  /** Battles: seat of the player protecting it (rule 310.8). That player is the defending player when it is attacked. */
+  protector?: number;
   /** Stun counters: each replaces one untap. */
   stun?: number;
   /** Goaded by these seats, until each one's next turn (rule 701.15). */
@@ -170,7 +174,7 @@ export interface Perm {
   landInfo?: LandInfo;
   /** Combat: seat of the player this creature is attacking, or null. */
   attacking: number | null;
-  /** Combat: id of the planeswalker this creature is attacking (`attacking` is then its controller), or undefined when it attacks the player. */
+  /** Combat: id of the planeswalker or battle this creature is attacking (`attacking` is then its controller, or the battle's protector), or undefined when it attacks the player. */
   attackingPw?: number;
   /** Combat: true once a blocker was declared for this attacker (it stays blocked even if the blocker leaves, rule 509.1h). */
   blocked: boolean;
@@ -437,7 +441,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost' | 'protector' | 'legend';
 export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate';
 
 export type Decision =
@@ -447,7 +451,7 @@ export type Decision =
   | { kind: 'target'; seat: number; prompt: string; card: SimCard; effect: Effect | null; candidates: Target[]; cancellable: boolean }
   /** Declare attackers: which creatures attack which players (rule 508.1). */
   /** `goaded`: creatures that must attack, and the players each may attack (rule 701.15b). The engine adds them if left out. */
-  /** `planeswalkers`: ids of planeswalkers opponents control, which may be attacked instead of their controller (rule 508.1b). */
+  /** `planeswalkers`: ids of planeswalkers opponents control, and of battles this player doesn't protect, which may be attacked instead of a player (rule 508.1b). */
   | { kind: 'attackers'; seat: number; candidates: number[]; defenders: number[]; goaded?: { attacker: number; defenders: number[] }[]; planeswalkers?: number[] }
   /** Declare blockers for the creatures attacking this player (rule 509.1). */
   | { kind: 'blockers'; seat: number; attackers: number[]; candidates: number[] }
@@ -465,7 +469,7 @@ export interface PriorityAnswer {
 export interface AttackDeclaration {
   attacker: number;
   defender: number;
-  /** Attack this planeswalker (one of the decision's `planeswalkers`) instead of the player; `defender` is then ignored. */
+  /** Attack this planeswalker or battle (one of the decision's `planeswalkers`) instead of a player; `defender` is then ignored. */
   planeswalker?: number;
 }
 export interface BlockDeclaration {
