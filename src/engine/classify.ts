@@ -404,7 +404,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const t = num(m[5], 1);
     // "Other Elves you control", "creatures you control of the chosen type": one creature type only (see classifyCombat.ts).
     const plural = m[2].replace(/^other /, '');
-    const subtype = m[3] ? 'chosen' : /^\w+s$/.test(plural) && plural !== 'creatures' ? tribeOf(plural) ?? undefined : undefined;
+    // "Other Goblin creatures you control": a creature type before "creatures" (not a color or card type).
+    const typed = plural.match(/^(\w+) creatures$/);
+    const subtype = m[3] ? 'chosen' : /^\w+s$/.test(plural) && plural !== 'creatures' ? tribeOf(plural) ?? undefined
+      : typed && !/^(artifact|enchantment|legendary|nontoken|token|attacking|blocking|tapped|untapped|white|blue|black|red|green|colorless|multicolored|monocolored|nonland|snow|other|commander|nonlegendary|modified|outlaw|nonhuman)$/.test(typed[1]) ? typed[1] : undefined;
     if (/until end of turn/.test(line)) {
       const scale = p !== -1 ? undefined : /x is the number of creatures/.test(line) ? 'creatures' as const : /greatest power/.test(line) ? 'power' as const : undefined;
       const size = scale === 'creatures' ? 'your creature count' : scale === 'power' ? 'your greatest power' : p === -1 ? 'X' : String(p);
@@ -1562,6 +1565,14 @@ export function classifyCard(raw: RawCard): SimCard {
     card.altCost = { mana: parseManaCost(alt[1]), dash: true };
     card.notes.push(`Dash ${alt[1].toUpperCase()}: haste, back to hand at end of turn`);
   }
+  // Cascade (rule 702.85), once for each instance ("cascade, cascade").
+  const cascade = text.match(/^cascade((?:, cascade)*)$/m);
+  if (cascade) {
+    card.cascade = 1 + (cascade[1].match(/cascade/g)?.length ?? 0);
+    card.notes.push(`Cascade${card.cascade > 1 ? ` ×${card.cascade}` : ''}: as it is cast, exile cards until a cheaper nonland card and cast it free`);
+  }
+  // Assist (rule 702.132): another player may help pay. Bots always pay the whole cost themselves.
+  if (/^assist$/m.test(text)) card.notes.push('Assist: another player may help pay (bots pay it all themselves)');
   if (!isPermanent && /^storm\b/m.test(text)) {
     card.storm = true;
     card.notes.push('Storm: copied for each spell cast before it this turn');
@@ -1722,7 +1733,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
-  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^you may cast ~ from your graveyard using its mutate ability|^(morph|megamorph|disguise) \{|^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
+  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^you may cast ~ from your graveyard using its mutate ability|^(morph|megamorph|disguise) \{|^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^cascade(, cascade)*$|^assist$|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
@@ -1793,7 +1804,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'handSize', 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1833,6 +1844,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'opponentCast': return `When an opponent casts ${ctx.castFilter === 'any' ? 'a spell' : `${ctx.castFilter} spells`}: `;
     case 'opponentDraw': return 'When an opponent draws: ';
     case 'opponentDiscard': return 'When an opponent discards: ';
+    case 'discard': return 'When you discard: ';
     case 'opponentLoseLife': return 'When an opponent loses life: ';
     case 'leaves': return ctx.scope === 'self' ? (ctx.zones ? 'When it dies or is exiled: ' : 'When it leaves the battlefield: ') : 'When a token of yours leaves the battlefield: ';
     case 'opponentActivate': return 'When an opponent activates an ability: ';
@@ -1983,12 +1995,16 @@ export function cardValue(card: SimCard): number {
       case 'triggerDoubler': v += 3; break;
       case 'copyOpponentEtb': v += 2; break;
       case 'preventNext': case 'deathShield': v += 1.5; break;
+      case 'handSize': v += e.who === 'opponents' ? Math.min(4, -e.n) : 0; break;
+      case 'attachSelf': break;
       default: v += controlValue(e, mult) ?? graveyardValue(e, mult) + exileValue(e, mult) + lockValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;
   if (card.graveyard) v += card.graveyard.how === 'cast' ? v * 0.3 + 1 : 2;
   if (card.persist) v += 2;
+  // Cascade: a free spell of lesser mana value for each instance.
+  if (card.cascade) v += Math.min(card.cmc, 5) * 0.8 * card.cascade;
   for (const level of card.levels ?? []) for (const e of level.effects) v += e.kind === 'draw' ? 1.5 * e.n : 1;
   // Station: what the thresholds give, discounted for the creatures it takes to get there; a Spacecraft's body too.
   if (card.station) {

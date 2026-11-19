@@ -73,6 +73,7 @@ export type Trigger =
   | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
   | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
   | 'proliferate' // you proliferate (rule 701.34)
+  | 'discard' // you discard a card (once for each card)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -221,7 +222,7 @@ export type EffectBody =
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean; /** "Counter that spell": the spell that set off this trigger. */ subject?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
-  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any'; /** The tokens' creature types ("1/1 white Soldier creature token"), lowercased, for tribal rules. */ subtypes?: string[] }
+  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any'; /** The tokens' creature types ("1/1 white Soldier creature token"), lowercased, for tribal rules. */ subtypes?: string[]; /** Living weapon, job select: attach the source Equipment to the first token (rules 702.92, 702.182). */ attachSource?: boolean }
   /**
    * Create token copies of the source permanent (Skyclave Relic, Jace, Mirror Mage; offspring makes a 1/1 one).
    * size: the copy's power and toughness. loyalty: its starting loyalty.
@@ -230,7 +231,11 @@ export type EffectBody =
   /** Shuffle the source into its owner's library (Fblthp, the Lost). */
   | { kind: 'shuffleSelf' }
   /** Sacrifice the source (Phantasmal Image's "when this becomes the target ..."). */
-  | { kind: 'sacrificeSelf' }
+  | { kind: 'sacrificeSelf'; /** "Sacrifice it unless it escaped" (Kroxa, rule 702.138c). */ unlessEscaped?: boolean }
+  /** Static: the maximum hand size of `who` changes by n (rule 402.2; Gnat Miser -1, Jin-Gitaxias -7). */
+  | { kind: 'handSize'; n: number; who: 'opponents' | 'you' }
+  /** "When ~ enters, attach it to target legendary creature you control" (Mithril Coat). */
+  | { kind: 'attachSelf'; legendary?: boolean }
   /** Reveal the top card of your library: a land goes onto the battlefield, anything else into your hand (Nadu). */
   | { kind: 'revealTop' }
   /** Put this many hour counters on the source; the twelfth sets off its 'hourTwelve' abilities (Midnight Clock). */
@@ -238,7 +243,7 @@ export type EffectBody =
   /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
   | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen' | 'token'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
@@ -911,6 +916,8 @@ export interface SimCard {
   overload?: { cost: ManaCost; effects: Effect[] };
   /** Storm: copied for each spell cast before it this turn. */
   storm?: boolean;
+  /** Cascade (rule 702.85): how many times; each exiles cards until a cheaper nonland card and casts it free. */
+  cascade?: number;
   /** Power (and toughness, if `toughness`) equal to a count, e.g. cards in your hand. */
   scales?: {
     by: 'hand' | 'graveyard' | 'oppGraveyards' | 'oneGraveyard' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'

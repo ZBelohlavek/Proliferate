@@ -580,9 +580,9 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   },
   'Wharf Infiltrator': {
     text: 'Skulk\nWhenever ~ deals combat damage to a player, you may draw a card. If you do, discard a card.',
-    add: [{ kind: 'tokens', n: 1, power: 3, toughness: 2, keywords: [], when: 'combatDamage', scope: 'self', chance: 0.4 }],
-    notes: ['When it loots away a creature card: pay {2} for a 3/2 Eldrazi Horror (≈ 40%)'],
-    why: 'No trigger watches your own discards; the 3/2 comes with its loot, when the discard is a creature and {2} is spare.',
+    add: [{ kind: 'tokens', n: 1, power: 3, toughness: 2, keywords: [], when: 'discard', chance: 0.4 }],
+    notes: ['When you discard a creature card: pay {2} for a 3/2 Eldrazi Horror (≈ 40% of discards)'],
+    why: 'The discard trigger has no card-type filter or optional payment: the 3/2 comes on 40% of your discards, about how often the card is a creature and {2} is spare.',
   },
   'Whim of Volrath': {
     text: '',
