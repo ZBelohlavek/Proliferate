@@ -15,7 +15,7 @@ describe('rarer wordings', () => {
     ['Mox Opal', '{0}', 'Legendary Artifact', 'Metalcraft — {T}: Add one mana of any color. Activate only if you control three or more artifacts.', ['static:mana']],
     ['Duress', '{B}', 'Sorcery', 'Target opponent reveals their hand. You choose a noncreature, nonland card from it. That player discards that card.', ['resolve:discard']],
     ['Disallow', '{1}{U}{U}', 'Instant', 'Counter target spell, activated ability, or triggered ability.', ['resolve:counter']],
-    ['Deflecting Swat', '{2}{R}', 'Instant', 'If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.', ['resolve:counter']],
+    ['Deflecting Swat', '{2}{R}', 'Instant', 'If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.', ['resolve:redirect']],
     ['Duneblast', '{4}{W}{B}{G}', 'Sorcery', 'Choose up to one creature. Destroy the rest.', ['resolve:wipe']],
     ["Council's Judgment", '{1}{W}{W}', 'Sorcery', "Will of the council — Starting with you, each player votes for a nonland permanent you don't control. Exile each permanent with the most votes or tied for most votes.", ['resolve:removal']],
     ['Howling Mine', '{2}', 'Artifact', "At the beginning of each player's draw step, if Howling Mine is untapped, that player draws an additional card.", ['upkeep:draw']],

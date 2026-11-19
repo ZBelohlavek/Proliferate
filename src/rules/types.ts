@@ -87,6 +87,19 @@ export interface Perm {
   faceDown?: SimCard;
   /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
   heldBy?: number;
+  /**
+   * Taken only for a while (Act of Treason, Treasure Nabber): control goes back at the cleanup step of turn `turn` ('eot'),
+   * or at the end of seat `by`'s next turn after turn `turn` ('nextTurn').
+   */
+  borrowed?: { until: 'eot' | 'nextTurn'; by: number; turn: number };
+  /** Sacrificed or exiled at the beginning of the next end step (Kiki-Jiki's tokens, Treacherous Urge). */
+  atEnd?: 'sacrifice' | 'exile';
+  /** A copy "until end of turn" (Gogo, Mirage Mirror): what it goes back to at cleanup. */
+  copiedUntilEot?: SimCard;
+  /** Xantcha: attacks each combat if able, but never this seat (its owner). */
+  neverAttacks?: number;
+  /** Goaded by this seat for the rest of the game (Life of the Party's tokens). */
+  goadForever?: number;
   /** Taken "for as long as that player is the monarch" (Garland, Royal Kidnapper): control ends when that seat stops being the monarch. */
   heldWhileMonarch?: number;
   /** Under a lockdown Aura (Amphibian Downpour, Imprisoned in the Moon): its real card. `card` is then the vanilla version. */
@@ -176,6 +189,8 @@ export interface PlayerState {
   /** How many times the Ring has tempted this player, up to 4 (rule 701.54), and the current ring-bearer. */
   ringLevel: number;
   ringBearer: number | null;
+  /** Teach by Example, Jace Reawakened: copy the next instant or sorcery spell cast this turn, or every spell cast this turn. */
+  copyNext?: 'next' | 'turn';
   /** Permanent types already cast or played from the graveyard this turn (Muldrotha). */
   graveyardTypes?: Set<string>;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
@@ -231,6 +246,17 @@ export interface StackItem {
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
   kicked?: number;
+  /** Triggered abilities: the card or permanent the trigger is about (the creature that died, entered or attacked; the card an opponent sacrificed). */
+  about?: About;
+}
+
+/** What a triggered ability is about: a card that left (with the seat that owned it), or a permanent still on the battlefield. */
+export interface About {
+  card: SimCard;
+  owner: number;
+  permId?: number;
+  /** It had a -1/-1 counter on it when it died (Necroskitter). */
+  shrunk?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +295,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | /** Ivy: copy this spell, aimed at the source? */ 'copySpell' | /** Wandering Archaic: pay to stop a copy? */ 'payCost';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

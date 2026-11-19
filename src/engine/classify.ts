@@ -24,6 +24,7 @@ import type {
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
+import { controlLineHandled, controlTrigger, controlValue, recogniseControl } from './classifyControl';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
 /** Card data normalised from either Archidekt or Scryfall. */
@@ -174,6 +175,9 @@ function removalTargetOf(phrase: string): RemovalTarget | null {
 
 /** `line` is one sentence; `fullLine` is the whole ability, for context that spans sentences. */
 function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature: boolean }, fullLine = line): Found[] {
+  // Gaining control, copies, token replacement, changing targets (classifyControl.ts): read whole there.
+  const control = recogniseControl(line, fullLine, card);
+  if (control) return control;
   const out: Found[] = [];
   let m: RegExpMatchArray | null;
 
@@ -799,6 +803,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   l = rewriteRare(l);
   const rare = rareTrigger(l);
   if (rare) return rare;
+  const control = controlTrigger(l);
+  if (control) return control;
 
   const mech = mechanicTrigger(l);
   if (mech) return mech;
@@ -1583,6 +1589,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^(enchant |equip\b|choose (one|two|one or both|one or more|up to \w+)\b)/.test(line) || /choose (one|two|one or both|one or more|up to one|up to two) —$/.test(line)) return true;
   if (/^~ can't be blocked\.?$/.test(line) && keywords.includes('unblockable')) return true;
   if (/^~ can't block\.?$/.test(line)) return true;
+  if (controlLineHandled(line)) return true;
   if (/^toxic \d+$/.test(line)) return true;
   if (/enters with (x|\w+) \+1\/\+1 counters?/.test(line)) return true;
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
@@ -1652,7 +1659,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1684,6 +1691,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'opponentDraw': return 'When an opponent draws: ';
     case 'opponentDiscard': return 'When an opponent discards: ';
     case 'opponentLoseLife': return 'When an opponent loses life: ';
+    case 'opponentSacrifice': return ctx.scope === 'all' ? 'When an opponent sacrifices or discards a permanent card: ' : 'When an opponent sacrifices a nontoken permanent: ';
     case 'ringTempts': return 'When the Ring tempts you: ';
     case 'lore': return 'When you add a lore counter to a Saga: ';
     case 'sacrifice': return 'When you sacrifice: ';
@@ -1803,7 +1811,7 @@ export function cardValue(card: SimCard): number {
       case 'enterCounters': v += 1.5; break;
       case 'manifest': v += e.who === 'targetController' ? -1 : 2 * mult; break;
       case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
-      default: v += graveyardValue(e, mult);
+      default: v += controlValue(e, mult) ?? graveyardValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;

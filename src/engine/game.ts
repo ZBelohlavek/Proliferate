@@ -1688,6 +1688,7 @@ function matchesFilter(card: SimCard, filter: CastFilter): boolean {
     case 'artifact': return card.isArtifact;
     case 'enchantment': return card.isEnchantment;
     case 'mutate': return !!card.mutate;
+    case 'artifactInstantSorcery': return card.isArtifact || card.isInstant || card.isSorcery;
   }
 }
 
