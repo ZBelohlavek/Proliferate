@@ -121,6 +121,9 @@ function* ask<T>(decision: Decision): Flow<T> {
   return (yield decision) as T;
 }
 
+/** Cascade's trigger: exile until a nonland card with lesser mana value, cast it free, the rest to the bottom. */
+const CASCADE: Effect = { kind: 'freeCast', from: 'until', n: 0, who: 'you', only: 'nonland', maxCmc: -2, casts: 1, rest: 'bottom', when: 'resolve' };
+
 export class Game {
   readonly players: PlayerState[];
   readonly rng: Rng;
@@ -179,6 +182,8 @@ export class Game {
   private readonly unearthed = new Set<number>();
   /** Permanents with a finality counter: exiled instead of going to a graveyard. */
   private readonly finality = new Set<number>();
+  /** Permanents that escaped (rule 702.138c), for Kroxa's "sacrifice it unless it escaped". */
+  private readonly escapedPerms = new Set<number>();
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
   /** The spell or ability choosing or checking its targets right now, for protection and "hexproof from" (rules 702.16b, 702.11d). */
@@ -570,9 +575,10 @@ export class Game {
 
     // Cleanup step (514): discard to hand size, then damage and "until end of turn" effects wear off.
     this.step = 'cleanup';
-    if (p.hand.length > MAX_HAND && this.statics(p, 'noMaxHand') === 0) {
-      const n = p.hand.length - MAX_HAND;
-      const picks = yield* this.choose(p, 'discard', `Discard ${n} card${n > 1 ? 's' : ''} (hand size is ${MAX_HAND}).`, p.hand.map((card) => ({ label: card.name, card })), n, n);
+    const maxHand = this.maxHandSize(p);
+    if (p.hand.length > maxHand && this.statics(p, 'noMaxHand') === 0) {
+      const n = p.hand.length - maxHand;
+      const picks = yield* this.choose(p, 'discard', `Discard ${n} card${n > 1 ? 's' : ''} (hand size is ${maxHand}).`, p.hand.map((card) => ({ label: card.name, card })), n, n);
       const cards = picks.map((i) => p.hand[i]);
       for (const c of cards) {
         p.hand.splice(p.hand.indexOf(c), 1);
@@ -681,6 +687,19 @@ export class Game {
   }
 
   /** How many of a static effect `p` controls, or everyone controls when `p` is null. */
+  /** Maximum hand size (rule 402.2): seven, changed by Gnat Miser, Jin-Gitaxias and the like. */
+  private maxHandSize(p: PlayerState): number {
+    if (!this.kindsInGame.has('handSize')) return MAX_HAND;
+    let n = MAX_HAND;
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) for (const e of perm.card.effects) {
+        if (e.kind === 'handSize' && e.when === 'static' && ((e.who === 'opponents') === (q !== p))) n += e.n;
+      }
+    }
+    return Math.max(0, n);
+  }
+
   private statics(p: PlayerState | null, kind: Effect['kind']): number {
     if (!this.kindsInGame.has(kind)) return 0;
     let n = 0;
@@ -1350,6 +1369,7 @@ export class Game {
       return;
     }
     this.toGraveyard(p, card, false);
+    if (this.kindsInGame.has('when:discard')) this.fire(p, 'discard', 1);
   }
 
   /** `p` passed with a madness or miracle card waiting: it wasn't cast that way. A madness card goes to the graveyard. */
@@ -3151,6 +3171,7 @@ export class Game {
     /** How it is cast from the graveyard: flashback, the card's own keyword (escape, retrace, disturb), or a permission (Muldrotha). */
     const graveyardWay = !flashback ? null : card.flashback ? 'flashback' : card.graveyard?.how === 'cast' ? card.graveyard.label : 'permission';
     let finality = false;
+    let escaped = false;
     // Emerge: the sacrificed creature (or artifact) is chosen first, since it sets the price (rule 702.119).
     let emergeFodder: Perm | null = null;
     if (from === 'alt' && card.altCost?.emerge) {
@@ -3234,6 +3255,7 @@ export class Game {
       const use = card.graveyard!;
       // Escape: exile other cards from your graveyard. Retrace: discard a land card.
       if (use.exileOthers) {
+        escaped = true;
         const others = p.graveyard.filter((c) => c !== card);
         const picks = yield* this.choose(p, 'exileCard', `Exile ${use.exileOthers} other cards from your graveyard to escape ${card.name}.`, others.map((c) => ({ label: c.name, card: c })), use.exileOthers, use.exileOthers);
         const gone = picks.map((i) => others[i]);
@@ -3303,6 +3325,7 @@ export class Game {
     }
     if (graveyardWay === 'flashback' || (graveyardWay !== 'permission' && card.graveyard?.exiled && flashback)) item.flashback = true;
     if (finality) item.finality = true;
+    if (escaped) item.escaped = true;
     if (mutateOnto !== undefined) item.mutateOnto = mutateOnto;
     if (from === 'alt' && card.altCost) {
       const a = card.altCost;
@@ -3339,6 +3362,11 @@ export class Game {
         this.stack.push({ ...item, id: this.nextId++, kind: 'ability', isCommander: false, label: `${card.name} (storm copy)` });
       }
       if (before > 0) this.say(`Storm copies ${card.name} ${before} time${before === 1 ? '' : 's'}.`);
+    }
+
+    // Cascade (rule 702.85): a trigger for each instance, about this spell (so "costs less" compares with its mana value).
+    if (card.cascade && !copy) {
+      for (let i = 0; i < card.cascade; i++) this.trigger(p, card, null, [CASCADE], 0, null, item.id);
     }
 
     // "Their second spell each turn", "your first spell during each opponent's turn".
@@ -3766,6 +3794,7 @@ export class Game {
       // A copy of a permanent spell becomes a token (rule 707.10f).
       const perm = yield* this.enter(p, item.door ?? item.card, item.isCommander, item.x, item.attachTo, item.owner !== undefined ? this.players[item.owner] : undefined, item.copy ? 'token' : item.alt, item.kicked);
       if (perm && item.finality) this.finality.add(perm.id);
+      if (perm && item.escaped) this.escapedPerms.add(perm.id);
       // A Room cast as its other door is still the whole card underneath (it goes to the graveyard as one).
       if (perm && item.door) perm.printed = item.card;
       // The door that was cast is unlocked as the Room enters, so "when you unlock this door" triggers (rule 709.5h).
@@ -4772,6 +4801,11 @@ export class Game {
           const token = this.makePerm(p, tokenCard(e.power, e.toughness, e.keywords, e.subtypes), true);
           if (e.fragile) token.fragile = e.fragile;
           p.battlefield.push(token);
+          // Living weapon, job select: the Equipment is attached to the first token (rules 702.92a, 702.182a).
+          if (e.attachSource && i === 0 && src && p.battlefield.includes(src)) {
+            src.attachedTo = token.id;
+            this.anyAttached = true;
+          }
           this.creatureEntered(p, token);
         }
         if (count > 0) this.say(`${p.name} makes ${count} ${e.power}/${e.toughness} token${count > 1 ? 's' : ''}.`);
@@ -5914,8 +5948,19 @@ export class Game {
         this.removePerm(src, 'library');
         break;
       }
+      case 'attachSelf': {
+        // Mithril Coat: attached to the best (legendary) creature you control as it enters.
+        if (!src || !p.battlefield.includes(src)) break;
+        const hosts = p.battlefield.filter((q) => q.card.isCreature && q !== src && (!e.legendary || q.card.isLegendary)).sort((a, b) => b.card.value - a.card.value);
+        if (!hosts.length) break;
+        src.attachedTo = hosts[0].id;
+        this.anyAttached = true;
+        this.say(`${src.card.name} is attached to ${hosts[0].card.name}.`);
+        break;
+      }
       case 'sacrificeSelf': {
         if (!src || !this.players[src.seat].battlefield.includes(src)) break;
+        if (e.unlessEscaped && this.escapedPerms.has(src.id)) break;
         this.say(`${this.players[src.seat].name} sacrifices ${src.card.name}.`);
         this.removePerm(src, 'graveyard');
         this.sacrificed(this.players[src.seat], src);
@@ -6317,6 +6362,7 @@ export class Game {
       case 'enchantment': return perm.card.isEnchantment;
       case 'artifact': return perm.card.isArtifact;
       case 'stolen': return perm.owner !== undefined && perm.owner !== perm.seat;
+      case 'token': return perm.token;
       default: return true;
     }
   }

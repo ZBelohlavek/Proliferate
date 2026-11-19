@@ -144,6 +144,10 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: 'Whenever you cast an artifact or creature spell, you lose 1 life and create a 2/2 black Necron Warrior artifact creature token.',
     why: 'Your creatures being artifacts is played only through its own trigger, which now counts creature spells. Other artifact-matters cards don\'t see your creatures as artifacts.',
   },
+  "Black Mage's Rod": {
+    text: 'Job select\nEquipped creature gets +1/+0.\nWhenever you cast a noncreature spell, ~ deals 1 damage to each opponent.\nEquip {3}',
+    why: 'The 1 damage on each noncreature spell is the equipped creature\'s ability; here it comes from the Rod, which is nearly always on a creature (the Hero from job select first).',
+  },
   'Blind Obedience': {
     text: 'Extort\nArtifacts and creatures your opponents control enter tapped.',
     why: 'Read as written; opponents\' artifacts and creatures entering tapped was added to the engine with this card.',
@@ -240,6 +244,10 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: 'This spell costs {X} less to cast, where X is the greatest number of artifacts an opponent controls.\nFlying, trample, haste\nWhenever ~ deals combat damage to a player, you create a Treasure token for each artifact that player controls.',
     why: 'Read as written; the cost reduction was added to the engine with this card.',
   },
+  'Cayth, Famed Mechanist': {
+    text: 'Fabricate 1\nWhenever another nontoken creature you control enters, create a 1/1 colorless Servo artifact creature token.\n{2}, {T}: Proliferate.',
+    why: 'Other nontoken creatures having fabricate 1 is played as a Servo for each (bots take the token). Of the {2}, {T} modes, proliferate is kept and populate left out.',
+  },
   'Celebr-8000': {
     text: 'At the beginning of combat on your turn, ~ gets +1/+1 and gains menace until end of turn.',
     keywords: [],
@@ -330,6 +338,10 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Davriel, Rogue Shadowmage': {
     text: '−1: Target player discards a card.',
     why: 'The 2 damage to opponents with one or fewer cards in hand at their upkeep is left out.',
+  },
+  'Deadeye Navigator': {
+    text: "{1}{U}: Exile another target creature you control, then return it to the battlefield under its owner's control.",
+    why: 'Soulbond (rule 702.95) pairs it with a creature, and both can blink themselves for {1}{U}; played as blinking another creature you control for {1}{U}, its usual use (the paired creature\'s enters ability again).',
   },
   "Death's Oasis": {
     text: 'Whenever a nontoken creature you control dies, mill two cards. Then return a creature card with lesser mana value than the creature that died from your graveyard to your hand.\n{1}, Sacrifice ~: You gain 4 life.',

@@ -24,6 +24,7 @@
 
 import { CARD_RULES_A_TO_F } from './cardRulesAtoF';
 import type { Effect, SimCard } from './types';
+import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
 
 export interface CardRule {
   text?: string;
@@ -178,6 +179,9 @@ export const CARD_RULES: Record<string, CardRule> = {
     why: 'Only creatures attacking you: in multiplayer the bot casts it when it is attacked.',
   },
 
+  // --- One-off cards, G to O (cardRulesGtoO.ts) ----------------------------------------------
+  ...CARD_RULES_G_TO_O,
+  // --- One-off cards, A to F (cardRulesAtoF.ts) ----------------------------------------------
   ...CARD_RULES_A_TO_F,
 };
 
