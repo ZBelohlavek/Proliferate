@@ -17,7 +17,7 @@ import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect', 'preventNext', 'deathShield']);
 /** What a copy aimed at our own creature can carry and still help it (Ivy). */
 const KIND_TO_US = new Set(['pump', 'protect', 'counters', 'kwCounter', 'untap', 'gainLife', 'draw']);
 
@@ -533,7 +533,7 @@ export class Bot implements Agent {
     }
     // A board wipe that would cost us a real board: protect all of it if we can.
     if (top.controller !== p.seat && top.effects.some((e) => e.kind === 'wipe') && boardThreat(g, p, true) > 6) {
-      const shield = casts.find((a) => isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' && f.all));
+      const shield = casts.find((a) => isInstantSpeed(a.card) && a.card.effects.some((f) => (f.kind === 'protect' && f.all) || f.kind === 'deathShield'));
       if (shield) return shield;
     }
     // Is one of our better permanents about to be removed?
@@ -607,7 +607,9 @@ export class Bot implements Agent {
       if (shield) return shield;
     }
     return actions.find((a) => {
-      if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !a.effect.grant?.includes('indestructible')) return false;
+      if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !(a.effect.grant?.includes('indestructible') || a.effect.grant?.includes('regenerate'))) return false;
+      // Regenerate (rule 701.19) also answers "destroy all creatures".
+      if (a.effect.grant.includes('regenerate') && top.effects.some((e) => e.kind === 'wipe' && (e.mode === 'destroy' || e.mode === 'damage') && e.target !== 'artifacts')) return true;
       return top.effects.some((e, i) => e.kind === 'removal' && (e.mode === 'destroy' || e.mode === 'damage') && top.targets[i]?.kind === 'perm' && (top.targets[i] as { id: number }).id === a.permId);
     });
   }
@@ -1263,7 +1265,7 @@ export class Bot implements Agent {
     // Haste: in the first main phase, so a summoning-sick creature can attack.
     if (grant.includes('haste')) return perm.sick && !perm.tapped && g.step === 'main1' && g.activeSeat === p.seat && !g.hasKw(perm, 'haste');
     // Indestructible / regenerate: when removal is aimed at it, or it is about to die in combat.
-    if (grant.includes('indestructible') || e.protect) {
+    if (grant.includes('indestructible') || grant.includes('regenerate') || e.protect) {
       if (this.threatened(g, p, [perm])) return true;
       if (g.step !== 'declareBlockers') return false;
       const foes = perm.attacking !== null ? g.blockersOf(perm) : perm.blocking !== null ? [g.findPerm(perm.blocking)].filter((q): q is Perm => !!q) : [];
@@ -1576,15 +1578,17 @@ export class Bot implements Agent {
     const total = coming.reduce((n, a) => n + hitDamage(g, a), 0);
     const biggest = Math.max(...coming.map((a) => hitDamage(g, a)));
     const lethal = total >= p.life || coming.some((a) => a.isCommander && hitDamage(g, a) >= 21 - Math.max(0, ...[...p.commanderDamage.values()]));
-    const fogOf = (a: Action) => (a.type === 'cast' && a.from !== 'alt' ? a.card.effects.find((e) => e.kind === 'fog') : a.type === 'activate' && a.effect.kind === 'fog' ? a.effect : undefined);
+    const fogOf = (a: Action) => (a.type === 'cast' && a.from !== 'alt' ? a.card.effects.find((e) => e.kind === 'fog' || e.kind === 'preventNext') : a.type === 'activate' && a.effect.kind === 'fog' ? a.effect : undefined);
     let best: Action | undefined;
     let bestSaved = 0;
     for (const a of actions) {
       const f = fogOf(a);
-      if (!f || f.kind !== 'fog') continue;
-      const saved = f.who === 'creature' ? biggest : total;
+      if (!f || (f.kind !== 'fog' && f.kind !== 'preventNext') || (f.kind === 'preventNext' && p.preventNext)) continue;
+      // Deflecting Palm: one source (the biggest hit), and it hits back.
+      const one = f.kind === 'preventNext' || f.who === 'creature';
+      const saved = one ? biggest * (f.kind === 'preventNext' && f.reflect ? 2 : 1) : total;
       // A one-creature answer only matters if it takes us out of lethal, or blunts a big hit.
-      if (f.who === 'creature' && lethal && total - saved >= p.life) continue;
+      if (one && lethal && total - biggest >= p.life) continue;
       if (saved > bestSaved) {
         best = a;
         bestSaved = saved;

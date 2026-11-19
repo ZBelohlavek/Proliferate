@@ -190,6 +190,12 @@ export interface PlayerState {
   energy: number;
   /** Energy paid this turn (Blaster Hulk). */
   energyPaid?: number;
+  /** Turn number on which a permanent last left the battlefield under this player's control (revolt). */
+  revoltTurn?: number;
+  /** Deflecting Palm: the next damage from one source to this player this turn is prevented (`reflect`: and dealt to that source's controller). */
+  preventNext?: { reflect: boolean; card: SimCard };
+  /** Cosmic Intervention: on this turn number, this player's permanents going to a graveyard are exiled and return at the next end step. */
+  deathShield?: number;
   /** Creature spells and instant or sorcery spells cast this turn ("the first creature spell you cast each turn"). */
   creatureSpellsThisTurn?: number;
   instantSorceryThisTurn?: number;
@@ -328,8 +334,21 @@ export interface StackItem {
   owner?: number;
   /** Exiled instead of going anywhere else when it leaves the stack (Wrexial, Mizzix's Mastery's copies are copies). */
   exileAfter?: boolean;
+  /** Triggered abilities: the seat of the player the trigger is about ("that player", see Effect.thatPlayer). */
+  aboutSeat?: number;
+  /** Dies triggers: the card of the creature that died, for "return that card" (Minion's Return). */
+  died?: DiedCard;
   /** Triggered abilities: the card or permanent the trigger is about (the creature that died, entered or attacked; the card an opponent sacrificed). */
   about?: About;
+}
+
+/** A creature that just died: its card, its owner, and what it looked like on the battlefield. */
+export interface DiedCard {
+  card: SimCard;
+  owner: number;
+  /** +1/+1 counters (negative: -1/-1 counters) it had. */
+  counters: number;
+  flying: boolean;
 }
 
 /** What a triggered ability is about: a card that left (with the seat that owned it), or a permanent still on the battlefield. */
