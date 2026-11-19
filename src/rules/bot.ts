@@ -1973,7 +1973,8 @@ export class Bot implements Agent {
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
         // A lethal-looking alpha strike, or so many attackers that most get through.
         const alpha = isMain && (totalDamage - blockers.length * 3 >= o.life || candidates.length >= blockers.length + 2);
-        const badBlock = blockers.some((b) => !survives(g, a, b) && survives(g, b, a));
+        // Phyrexian Obliterator blocking: hitting it costs as many permanents as the damage dealt.
+        const badBlock = blockers.some((b) => (!survives(g, a, b) && survives(g, b, a)) || (g.power(a) > 0 && b.card.effects.some((e) => e.kind === 'damagedPunish' && e.what === 'sacrifice')));
         const trade = blockers.some((b) => !survives(g, a, b));
         let go = !badBlock || alpha;
         if (!go && isMain && !trade) go = true;
@@ -1997,11 +1998,14 @@ export class Bot implements Agent {
     const take = (b: Perm) => available.splice(available.indexOf(b), 1);
     const least = (list: Perm[]) => list.reduce((x, y) => (threat(g, y) < threat(g, x) ? y : x));
     const sorted = [...attackers].sort((a, b) => hitDamage(g, b) - hitDamage(g, a));
+    // Phyrexian Obliterator: damaging it costs us that many permanents, so only blockers with no power block it by choice.
+    const costly = (a: Perm, b: Perm) => g.power(b) > 0 && a.card.effects.some((e) => e.kind === 'damagedPunish' && e.what === 'sacrifice');
+    const canBlock = (b: Perm, a: Perm) => g.canBlock(b, a) && !costly(a, b);
 
     // 1. Blocks where our creature kills the attacker and survives.
     for (const a of sorted) {
       if (g.hasKw(a, 'menace')) continue;
-      const good = available.filter((b) => g.canBlock(b, a) && kills(g, b, a) && survives(g, b, a));
+      const good = available.filter((b) => canBlock(b, a) && kills(g, b, a) && survives(g, b, a));
       if (good.length) {
         const b = least(good);
         blocks.set(a, [b]);
@@ -2011,7 +2015,7 @@ export class Bot implements Agent {
     // 2. Trades that favour us.
     for (const a of sorted) {
       if (blocks.has(a) || g.hasKw(a, 'menace')) continue;
-      const trade = available.filter((b) => g.canBlock(b, a) && kills(g, b, a) && threat(g, b) < threat(g, a));
+      const trade = available.filter((b) => canBlock(b, a) && kills(g, b, a) && threat(g, b) < threat(g, a));
       if (trade.length) {
         const b = least(trade);
         blocks.set(a, [b]);
@@ -2021,7 +2025,7 @@ export class Bot implements Agent {
     // 3. Walls: a creature that survives the hit blocks for free.
     for (const a of sorted) {
       if (blocks.has(a) || g.hasKw(a, 'menace')) continue;
-      const wall = available.filter((b) => g.canBlock(b, a) && survives(g, b, a));
+      const wall = available.filter((b) => canBlock(b, a) && survives(g, b, a));
       if (wall.length) {
         const b = least(wall);
         blocks.set(a, [b]);

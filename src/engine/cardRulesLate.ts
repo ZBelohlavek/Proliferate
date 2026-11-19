@@ -1,5 +1,6 @@
 // Card-specific rules for the cards the mechanic threads left out and for cards the reader only approximated
-// (see cardRules.ts for how entries work).
+// (see cardRules.ts for how entries work). Cards the one-off threads also ruled (Gonti, Deadeye Navigator, Mine
+// Layer, Leyline Tyrant, Inti, Gossip's Talent, Lightfoot Rogue, Iron Mastiff, Knowledge Pool) keep their entries there.
 
 import type { CardRule } from './cardRules';
 
@@ -49,21 +50,9 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Whenever a nontoken creature you control dies, return it to the battlefield under its owner\'s control.',
     why: 'The creature is exiled and comes back at your next upkeep with a finality counter; read as coming back right away.',
   },
-  'Gonti, Night Minister': {
-    text: 'Whenever a creature you control deals combat damage to a player, draw a card.',
-    why: 'The Treasure for casting spells you don\'t own is left out. Exiling the top card of the damaged player\'s library to play it later is read as drawing a card.',
-  },
   'Domineering Will': {
     text: 'Prevent all combat damage that would be dealt this turn.',
     why: 'Taking up to three creatures to block with is read as a Fog: it stops an attack on you.',
-  },
-  'Deadeye Navigator': {
-    text: '{1}{U}: Exile target creature you control, then return it to the battlefield under your control.',
-    why: 'Soulbond\'s paired blink is read as Deadeye blinking any creature you control.',
-  },
-  'Mine Layer': {
-    text: '{1}{R}, {T}: Destroy target land.',
-    why: 'A mine counter destroys the land when it is next tapped; read as destroying it right away.',
   },
   'Cemetery Gatekeeper': {
     text: 'First strike\nWhen this creature enters, exile a card from a graveyard.\nWhenever an opponent casts a creature spell, ~ deals 2 damage to that player.',
@@ -157,17 +146,9 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: '',
     why: 'Blinking itself whenever anyone casts a spell or attacks is left out: it stays a 2/1.',
   },
-  'Leyline Tyrant': {
-    text: 'Flying\nWhen ~ dies, it deals 3 damage to any target.',
-    why: 'Keeping red mana between steps is left out; the {R} paid as it dies is read as 3.',
-  },
   'Fire Lord Ozai': {
     text: '{6}: Exile the top card of each opponent\'s library. Until end of turn, you may play one of those cards without paying its mana cost.',
     why: 'Sacrificing a creature for red mana when it attacks is left out.',
-  },
-  'Inti, Seneschal of the Sun': {
-    text: 'Whenever ~ attacks, put a +1/+1 counter on target creature you control.',
-    why: 'The discard that pays for the counter and the impulse draw it sets off are left out; the counter is read as a free one when Inti attacks.',
   },
   'Emrakul, the Promised End': {
     text: 'This spell costs {1} less to cast for each card type among cards in your graveyard.\nFlying, trample, protection from instants',
@@ -259,10 +240,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Flying, lifelink',
     why: 'Casting surveilled cards from the graveyard for life is left out.',
   },
-  'Gossip\'s Talent': {
-    text: '(Gain the next level as a sorcery to add its ability.)\nWhenever a creature you control enters, surveil 1.\n{1}{U}: Level 2\n{3}{U}: Level 3',
-    why: 'Its level 2 and 3 abilities are left out.',
-  },
   'The Ozolith': {
     text: '',
     why: 'Keeping counters from creatures that leave is left out.',
@@ -311,14 +288,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: '{2}, {T}: Draw a card.',
     why: 'The d20 table (minus your hand size) is read as one card.',
   },
-  'Lightfoot Rogue': {
-    text: 'Deathtouch',
-    why: 'Every d20 result gives it deathtouch when it attacks; the +1/+0 and first strike on high rolls are left out.',
-  },
-  'Iron Mastiff': {
-    text: '',
-    why: 'The d20 roll hurts you about as often as the defender, so it is left out: a 4/4 artifact creature.',
-  },
   'Delina, Wild Mage': {
     text: 'Whenever ~ attacks, create a token that\'s a copy of target creature you control, except it\'s not legendary. That token is tapped and attacking. Exile it at end of combat.',
     why: 'Rolling 15 or more lets you roll again for another copy; read as one copy.',
@@ -354,10 +323,6 @@ export const LATE_RULES: Record<string, CardRule> = {
   'Spelltithe Enforcer': {
     text: 'Spells your opponents cast cost {1} more to cast.',
     why: 'Each spell an opponent casts costs them a permanent unless they pay {1}; read as a {1} tax.',
-  },
-  'Knowledge Pool': {
-    text: '',
-    why: 'Swapping spells cast from hand for cards exiled with it is left out.',
   },
   'Teferi, Master of Time': {
     text: '+1: Draw a card, then discard a card.\n-3: Tap target creature an opponent controls.\n−10: Take two extra turns after this one.',

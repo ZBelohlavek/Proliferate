@@ -21,7 +21,7 @@ describe('rarer wordings', () => {
     ['Howling Mine', '{2}', 'Artifact', "At the beginning of each player's draw step, if Howling Mine is untapped, that player draws an additional card.", ['upkeep:draw']],
     ['Villainous Wealth', '{X}{B}{G}{U}', 'Sorcery', 'Target opponent exiles the top X cards of their library. You may cast any number of spells with mana value X or less from among them without paying their mana costs.', ['resolve:freeCast']],
     ['Whispersilk Cloak', '{3}', 'Artifact', "Equipped creature can't be blocked and has shroud.\nEquip {2}", ['static:equip']],
-    ['Blind Obedience', '{1}{W}', 'Enchantment', 'Extort\nArtifacts and creatures your opponents control enter tapped.', ['cast:drain']],
+    ['Blind Obedience', '{1}{W}', 'Enchantment', 'Extort\nArtifacts and creatures your opponents control enter tapped.', ['cast:drain', 'static:oppEnterTapped']],
     ['Invasion of Eldraine', '{3}{B}', 'Battle', 'When this Siege enters, target opponent discards two cards.', ['resolve:discard']],
     ['Fake Your Own Death', '{1}{B}', 'Instant', 'Until end of turn, target creature gets +2/+0 and gains "When this creature dies, return it to the battlefield tapped under its owner\'s control and you create a Treasure token."', ['resolve:pump']],
   ];
@@ -30,7 +30,8 @@ describe('rarer wordings', () => {
       const c = spell(name, cost, 1, type, text);
       expect(c.modeled).toBe(true);
       expect(kinds(c)).toEqual(expected);
-      expect(c.unread ?? []).toEqual(name === 'Chrome Mox' ? [expect.stringMatching(/^imprint/)] : name === 'Blind Obedience' ? [expect.stringMatching(/enter tapped/)] : []);
+      // Chrome Mox's imprint is left out by its own rule (cardRules.ts), which counts as read.
+      expect(c.unread ?? []).toEqual([]);
     });
   }
 

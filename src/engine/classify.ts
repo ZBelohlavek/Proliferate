@@ -22,6 +22,7 @@ import type {
   TriggerScope,
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
+import { recogniseBoard } from './classifyBoard';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { LOCK_STATIC_KINDS, lockLineHandled, lockTrigger, lockValue, recogniseLocks } from './classifyLocks';
 import { EMBLEM_COST, EMBLEM_STATIC_KINDS, emblemCost, emblemTrigger, recogniseEmblems, rewriteEmblems } from './classifyEmblems';
@@ -79,6 +80,8 @@ const KNOWN_KEYWORDS = [
   'flying', 'trample', 'haste', 'vigilance', 'deathtouch', 'lifelink', 'menace', 'first strike',
   'double strike', 'indestructible', 'hexproof', 'shroud', 'reach', 'defender', 'flash', 'ward', 'infect', 'wither',
   'shadow', 'fear',
+  // Evasion and attack keywords handled in the rules engine's canBlock and combat (rules 702.14, 702.118, 702.116).
+  'skulk', 'islandwalk', 'swampwalk', 'forestwalk', 'mountainwalk', 'plainswalk', 'myriad',
 ];
 
 // ---------------------------------------------------------------------------
@@ -170,6 +173,9 @@ function parseKeywords(raw: RawCard, text: string): string[] {
   // "Hexproof from each color" isn't hexproof (rule 702.11d), though card data lists the keyword.
   if (kws.has('hexproof') && /hexproof from/.test(text) && !/(^|, )hexproof(,|$)/m.test(text)) kws.delete('hexproof');
   if (/~ can't be blocked(\.|$)/m.test(text)) kws.add('unblockable');
+  // Stormkeld Vanguard, Azure Beastbinder: evasion against small or big blockers (checked in the rules engine's canBlock).
+  const evade = text.match(/^~ can't be blocked by creatures with power (\d+) or (less|greater)\.?$/m);
+  if (evade) kws.add(`can't be blocked by power ${evade[1]} or ${evade[2]}`);
   if (/^~ can't block\.?$/m.test(text)) kws.add("can't block");
   if (/^~ can't be countered/m.test(text)) kws.add('uncounterable');
   return [...kws];
@@ -301,6 +307,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount, oneSided: true }, note: `One-sided sweeper ${amount}` });
   } else if (/return all (nonland permanents|creatures)( [^.]*)? to their owners'? hands/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'bounce', amount: 0, oneSided: /you don't control|opponents control/.test(line) }, note: 'Mass bounce' });
+  } else if (/^creatures your opponents control get -\d+\/-\d+\.?$/.test(line)) {
+    // Elesh Norn: a lasting -2/-2, not a one-time sweeper (classifyBoard.ts).
+    recogniseBoard(line, out);
   } else if ((m = line.match(/(all creatures|each other creature|each creature|creatures your opponents control|creatures you don't control) gets? -(\d+|x)\/-(\d+|x)/))) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[3], 2), oneSided: /opponents|don't/.test(m[1]), shrink: 'temp' }, note: 'Shrink sweeper' });
   } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on each creature( target player controls| your opponents control| you don't control)?`)))) {
@@ -406,7 +415,10 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const t = num(m[5], 1);
     // "Other Elves you control", "creatures you control of the chosen type": one creature type only (see classifyCombat.ts).
     const plural = m[2].replace(/^other /, '');
-    const subtype = m[3] ? 'chosen' : /^\w+s$/.test(plural) && plural !== 'creatures' ? tribeOf(plural) ?? undefined : undefined;
+    // "Other Goblin creatures you control": a creature type before "creatures" (not a color or card type).
+    const typed = plural.match(/^(\w+) creatures$/);
+    const subtype = m[3] ? 'chosen' : /^\w+s$/.test(plural) && plural !== 'creatures' ? tribeOf(plural) ?? undefined
+      : typed && !/^(artifact|enchantment|legendary|nontoken|token|attacking|blocking|tapped|untapped|white|blue|black|red|green|colorless|multicolored|monocolored|nonland|snow|other|commander|nonlegendary|modified|outlaw|nonhuman)$/.test(typed[1]) ? typed[1] : undefined;
     if (/until end of turn/.test(line)) {
       const scale = p !== -1 ? undefined : /x is the number of creatures/.test(line) ? 'creatures' as const : /greatest power/.test(line) ? 'power' as const : undefined;
       const size = scale === 'creatures' ? 'your creature count' : scale === 'power' ? 'your greatest power' : p === -1 ? 'X' : String(p);
@@ -1133,6 +1145,7 @@ export function classifyCard(raw: RawCard): SimCard {
   // Cards with their own rule may be read from rewritten text (see cardRules.ts).
   const rule = CARD_RULES[raw.name.split(' // ')[0]];
   if (rule?.text !== undefined) raw = { ...raw, text: rule.text };
+  if (rule?.keywords) raw = { ...raw, keywords: rule.keywords };
   const types = raw.types.map((t) => t.toLowerCase());
   const supers = raw.superTypes.map((t) => t.toLowerCase());
   const isLand = types.includes('land');
@@ -1505,6 +1518,12 @@ export function classifyCard(raw: RawCard): SimCard {
     card.cumulativeUpkeep = parseManaCost(cumulative[1]);
     card.notes.push(`Cumulative upkeep ${cumulative[1].toUpperCase()}: pays more each turn, then is sacrificed`);
   }
+  // Vanishing N (rule 702.63): N time counters, one comes off each upkeep, sacrificed when the last does.
+  const vanishing = isPermanent && text.match(/^vanishing (\d+)$/m);
+  if (vanishing) {
+    card.vanishing = parseInt(vanishing[1], 10);
+    card.notes.push(`Vanishing ${vanishing[1]}: sacrificed at your ${vanishing[1] === "1" ? "next upkeep" : `upkeep ${vanishing[1]} turns after it enters`}`);
+  }
   const morph = isPermanent && text.match(/^(morph|megamorph|disguise) ((?:\{[^}]+\})+)/m);
   if (morph) {
     card.morph = { cost: parseManaCost(morph[2]), ...(morph[1] === 'megamorph' ? { counter: true } : {}), ...(morph[1] === 'disguise' ? { ward: true } : {}) };
@@ -1558,6 +1577,14 @@ export function classifyCard(raw: RawCard): SimCard {
     card.altCost = { mana: parseManaCost(alt[1]), dash: true };
     card.notes.push(`Dash ${alt[1].toUpperCase()}: haste, back to hand at end of turn`);
   }
+  // Cascade (rule 702.85), once for each instance ("cascade, cascade").
+  const cascade = text.match(/^cascade((?:, cascade)*)$/m);
+  if (cascade) {
+    card.cascade = 1 + (cascade[1].match(/cascade/g)?.length ?? 0);
+    card.notes.push(`Cascade${card.cascade > 1 ? ` ×${card.cascade}` : ''}: as it is cast, exile cards until a cheaper nonland card and cast it free`);
+  }
+  // Assist (rule 702.132): another player may help pay. Bots always pay the whole cost themselves.
+  if (/^assist$/m.test(text)) card.notes.push('Assist: another player may help pay (bots pay it all themselves)');
   if (!isPermanent && /^storm\b/m.test(text)) {
     card.storm = true;
     card.notes.push('Storm: copied for each spell cast before it this turn');
@@ -1628,7 +1655,6 @@ export function classifyCard(raw: RawCard): SimCard {
   if (kickLine) readKicker(raw, card, kickLine, fullText);
   // Foretell, suspend, plot, spree, bargain, gift and the other casting keywords (classifyCasting.ts).
   castingKeywords(raw, fullText, card, classifyCard, parseManaCost);
-  if (rule) applyCardRule(card, rule);
 
   // Rooms (rule 709.5): the other door is read on its own, and unlocked later for its mana cost.
   if (raw.back && raw.subTypes.some((t) => t.toLowerCase() === 'room')) {
@@ -1643,6 +1669,8 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Room: ${b.name} is the other door (cast it, or unlock it for ${manaCost.toUpperCase()})${door.effects.length ? `: ${door.notes.filter((n) => !/^Not /.test(n)).join('; ')}` : ''}`);
     for (const u of door.unread ?? []) (card.unread ??= []).push(u);
   }
+  // After the Room's other door, so an entry for a Room covers both doors.
+  if (rule) applyCardRule(card, rule);
   card.modeled = !!card.room?.door.modeled || !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station || !!card.casting;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
@@ -1717,12 +1745,12 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
   // Read from the whole text into flags on the card.
   if (/^~ doesn't untap during your untap step|^if you control a commander, you may cast ~ without paying its mana cost|^as an additional cost to cast ~, (sacrifice (a|an) (creature|artifact|artifact or creature)|discard (a|two) cards?|sacrifice an artifact or discard a card)\.?$/.test(line)) return true;
-  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^you may cast ~ from your graveyard using its mutate ability|^(morph|megamorph|disguise) \{|^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
+  if (/^~ enters tapped\.?$|^~ can't be countered|^affinity for artifacts|^improvise|^convoke|^delve|^~ costs \{\d\} less to cast for each (creature on the battlefield|creature card in your graveyard|artifact you control|creature you control)|^as an additional cost to cast ~, pay x life|^mutate |^you may cast ~ from your graveyard using its mutate ability|^(morph|megamorph|disguise) \{|^(basic )?[a-z]*cycling (\{[^}]+\})+|^flashback (\{[^}]+\})+|^overload (\{[^}]+\})+|^crew \d+|^~ enters tapped with \w+ stun counters? on it|^storm\b|^cascade(, cascade)*$|^assist$|^~'s power (and toughness are each|is) equal to the number of (cards in your hand|cards in your graveyard|cards in (your opponents'|the chosen player's|all) graveyards?|creature cards in all graveyards|instant and sorcery cards in your graveyard|[a-z, \/]+ you control)/.test(line)) return true;
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
   if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line) || castingLineHandled(line) || lockLineHandled(line)) return true;
-  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
+  if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^vanishing \d+$|^~ can't be blocked by creatures with power \d+ or (less|greater)\.?$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
 
@@ -1788,7 +1816,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'handSize', 'combatRule', 'goadPunish', 'playerProtection', 'oppAnthem', 'oppEnterTapped', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS, 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1828,6 +1856,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'opponentCast': return `When an opponent casts ${ctx.castFilter === 'any' ? 'a spell' : `${ctx.castFilter} spells`}: `;
     case 'opponentDraw': return 'When an opponent draws: ';
     case 'opponentDiscard': return 'When an opponent discards: ';
+    case 'discard': return 'When you discard: ';
     case 'opponentLoseLife': return 'When an opponent loses life: ';
     case 'leaves': return ctx.scope === 'self' ? (ctx.zones ? 'When it dies or is exiled: ' : 'When it leaves the battlefield: ') : 'When a token of yours leaves the battlefield: ';
     case 'opponentActivate': return 'When an opponent activates an ability: ';
@@ -1857,12 +1886,15 @@ function describeTrigger(ctx: LineContext): string {
     case 'blocked': return ctx.scope === 'self' ? 'When it becomes blocked: ' : 'When a creature you control becomes blocked: ';
     case 'unblocked': return 'When it attacks and isn\'t blocked: ';
     case 'opponentSearch': return 'When an opponent searches their library: ';
+    case 'proliferate': return 'When you proliferate: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
     case 'crewed': return 'When it becomes crewed: ';
     case 'unlock': return 'When this door unlocks: ';
     case 'fullyUnlock': return 'When you fully unlock a Room: ';
     case 'sacrificeFood': return 'When you sacrifice a Food: ';
     case 'postcombatMain': return 'Each postcombat main phase: ';
+    case 'opponentCreatureEnters': return "When an opponent's creature enters: ";
+    case 'permDies': return `When ${ctx.scope === 'all' ? 'an' : 'your'} ${ctx.castFilter ?? 'artifact'} goes to a graveyard: `;
     default: return '';
   }
 }
@@ -1892,6 +1924,8 @@ export function cardValue(card: SimCard): number {
       case 'ramp': v += 2.5 * Math.max(e.lands, 1) + e.toHand; break;
       case 'mana': v += 2.5 * (e.count || e.fromCounters ? 2 : e.corrupted || e.sacArtifact ? 1 : e.amount); break;
       case 'costReduction': v += 2 * e.amount; break;
+      case 'oppAnthem': v -= 4 * (e.p + e.t); break;
+      case 'oppEnterTapped': v += 2; break;
       case 'draw': v += 1.5 * Math.max(e.n, 2) * mult; break;
       case 'wheelAll': v += 4 * mult; break;
       case 'removal': v += 3 * mult; break;
@@ -1978,12 +2012,16 @@ export function cardValue(card: SimCard): number {
       case 'triggerDoubler': v += 3; break;
       case 'copyOpponentEtb': v += 2; break;
       case 'preventNext': case 'deathShield': v += 1.5; break;
+      case 'handSize': v += e.who === 'opponents' ? Math.min(4, -e.n) : 0; break;
+      case 'attachSelf': break;
       default: v += controlValue(e, mult) ?? graveyardValue(e, mult) + exileValue(e, mult) + lockValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;
   if (card.graveyard) v += card.graveyard.how === 'cast' ? v * 0.3 + 1 : 2;
   if (card.persist) v += 2;
+  // Cascade: a free spell of lesser mana value for each instance.
+  if (card.cascade) v += Math.min(card.cmc, 5) * 0.8 * card.cascade;
   for (const level of card.levels ?? []) for (const e of level.effects) v += e.kind === 'draw' ? 1.5 * e.n : 1;
   // Station: what the thresholds give, discounted for the creatures it takes to get there; a Spacecraft's body too.
   if (card.station) {

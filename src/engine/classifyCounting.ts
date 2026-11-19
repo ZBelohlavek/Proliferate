@@ -102,6 +102,12 @@ export function countingKeywords(text: string, card: SimCard, raw: { power?: str
       card.notes.push(`Affinity: costs {1} less for each ${m[1] === 'tokens' ? 'token' : subtypeName(m[1])} you control`);
     }
   }
+  // "Costs {X} less, where X is ...": Cavern-Hoard Dragon, Excalibur, Sword of Eden.
+  if (!card.discount && (m = text.match(/^~ costs \{x\} less to cast, where x is the (greatest number of artifacts an opponent controls|total mana value of historic permanents you control)/m))) {
+    const opp = m[1].startsWith('greatest');
+    card.discount = { per: opp ? 'opponentArtifacts' : 'historicValue', amount: 1 };
+    card.notes.push(`Costs {1} less for each ${opp ? 'artifact the opponent with the most controls' : 'mana value among your artifacts, legends and Sagas'}`);
+  }
   // Strive: the engine casts it with one target, so the extra cost never comes up.
   if (/^strive — /m.test(text)) card.notes.push('Strive: cast with one target, so no extra cost');
 
@@ -119,7 +125,7 @@ export function countingKeywords(text: string, card: SimCard, raw: { power?: str
 
 /** Lines countingKeywords reads from the whole text. */
 export function countingLineHandled(line: string): boolean {
-  return /^(~|this spacecraft|this vehicle) gets \+1\/\+(0|1) for each |^~'s power is equal to (1 plus )?the number of (cards you've drawn this turn|creatures in your party|card types among cards in your opponents' graveyards)|^(?:[a-z]+ — )?~ costs \{\d\} less to cast (for each|if) |^affinity for |^strive — |^sacrifice an artifact: add (\{c\})+|^at the beginning of your upkeep, you may pay \{4\}\. if you do, untap ~|^at the beginning of your upkeep, you may add \{c\}\{c\}\. this mana can't be spent/.test(line);
+  return /^(~|this spacecraft|this vehicle) gets \+1\/\+(0|1) for each |^~'s power is equal to (1 plus )?the number of (cards you've drawn this turn|creatures in your party|card types among cards in your opponents' graveyards)|^(?:[a-z]+ — )?~ costs \{\d\} less to cast (for each|if) |^~ costs \{x\} less to cast, where x is the (greatest number of artifacts an opponent controls|total mana value of historic permanents you control)|^affinity for |^strive — |^sacrifice an artifact: add (\{c\})+|^at the beginning of your upkeep, you may pay \{4\}\. if you do, untap ~|^at the beginning of your upkeep, you may add \{c\}\{c\}\. this mana can't be spent/.test(line);
 }
 
 /** Lines the main trigger reader would drop: kept whole as static text (or rewritten) for recogniseCounting. */

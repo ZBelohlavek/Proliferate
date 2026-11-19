@@ -11,6 +11,7 @@
 // Most of these are approximations, and each note says so with "≈". Kept in
 // its own file so the rest of the reader stays easy to follow.
 
+import { boardTrigger, recogniseBoard } from './classifyBoard';
 import type { CastFilter, EffectBody, Trigger, TriggerScope } from './types';
 
 type Found = { body: EffectBody; note: string; chance?: number };
@@ -43,11 +44,15 @@ export function rewriteRare(l: string): string {
 /** Trigger wordings classify.ts doesn't know. Returns null to let classify.ts carry on. */
 export function rareTrigger(l: string): RareContext | null {
   let m: RegExpMatchArray | null;
+  const board = boardTrigger(l);
+  if (board) return board;
   // Lotus Petal, Lion's Eye Diamond: mana once, by sacrificing it: kept as Treasures.
   if ((m = l.match(/^(?:discard your hand, )?\{t\}, sacrifice ~: add (one|two|three) mana of any (?:one )?color|^(?:discard your hand, )?sacrifice ~: add (one|two|three) mana of any (?:one )?color/))) {
     const n = count(m[1] ?? m[2]);
     return { when: 'resolve', body: `create ${['', 'a', 'two', 'three'][n]} treasure token${n > 1 ? 's' : ''}` };
   }
+  // Scheming Aspirant, Thrummingbird payoffs: "whenever you proliferate" (each time, Tekuthal's second time too).
+  if ((m = l.match(/^whenever you proliferate,\s*(.*)$/))) return { when: 'proliferate', body: m[1] };
   // Exquisite Blood.
   if ((m = l.match(/^whenever an opponent loses life, (?!that player mills)(.*)$/))) return { when: 'opponentLoseLife', body: m[1] };
   // Geth's Grimoire, Liliana's Caress, Megrim, Waste Not, Entropic Battlecruiser.
@@ -56,6 +61,18 @@ export function rareTrigger(l: string): RareContext | null {
     const body = m[2].replace(/^(that player|they) loses?/, 'target opponent loses').replace(/damage to that player/, 'damage to target opponent');
     return { when: 'opponentDiscard', body, chance };
   }
+  // Fabricate N (rule 702.123): N +1/+1 counters or N 1/1 Servos; bots take the Servos.
+  if ((m = l.match(/^fabricate (\d+)$/))) {
+    const n = parseInt(m[1], 10);
+    return { when: 'resolve', body: `create ${n === 1 ? 'a' : n} 1/1 colorless servo artifact creature token${n > 1 ? 's' : ''}` };
+  }
+  // Mentor (rule 702.134): a +1/+1 counter on an attacking creature with lesser power.
+  if (/^mentor$/.test(l)) return { when: 'attack', scope: 'self', body: 'put a +1/+1 counter on target creature' };
+  // Living weapon (rule 702.92) and job select: a token, then this Equipment is attached to it.
+  if (/^living weapon$/.test(l)) return { when: 'resolve', body: 'living weapon germ' };
+  if (/^job select$/.test(l)) return { when: 'resolve', body: 'job select hero' };
+  // "Whenever you discard a card" (Inti, Monument to Endurance): once for each card discarded.
+  if ((m = l.match(/^whenever you discard (?:a card|one or more cards)[^,]*,\s*(.*)$/))) return { when: 'discard', body: m[1] };
   // Extort: pay {W/B} as you cast a spell to drain each opponent for 1. Paid about half the time.
   if (/^extort$/.test(l)) return { when: 'cast', castFilter: 'any', body: 'each opponent loses 1 life and you gain 1 life', chance: 0.5 };
   // Howling Mine, Dictate of Kruphix, Font of Mythos: everyone draws more; you get yours each turn.
@@ -115,6 +132,14 @@ export function rareTrigger(l: string): RareContext | null {
 export function recogniseRare(line: string, out: Found[], card: { isPermanent: boolean; isCreature: boolean }, fullLine: string) {
   let m: RegExpMatchArray | null;
   const push = (body: EffectBody, note: string, chance?: number) => out.push({ body, note, ...(chance !== undefined ? { chance } : {}) });
+  if (recogniseBoard(line, out)) return;
+
+  if (/^living weapon germ$/.test(line)) return push({ kind: 'tokens', n: 1, power: 0, toughness: 0, keywords: [], subtypes: ['phyrexian', 'germ'], attachSource: true }, 'Living weapon: a 0/0 Germ token wearing it');
+  if (/^job select hero$/.test(line)) return push({ kind: 'tokens', n: 1, power: 1, toughness: 1, keywords: [], subtypes: ['hero'], attachSource: true }, 'Job select: a 1/1 Hero token wearing it');
+  if (/^sacrifice (?:it|~) unless it escaped\.?$/.test(line)) return push({ kind: 'sacrificeSelf', unlessEscaped: true }, 'Sacrificed unless it escaped');
+  if ((m = line.match(/^attach (?:it|~) to target (legendary )?creature you control\.?$/))) return push({ kind: 'attachSelf', ...(m[1] ? { legendary: true } : {}) }, `Attaches itself to ${m[1] ? 'a legendary' : 'a'} creature of yours as it enters`);
+  if ((m = line.match(/^each opponent's maximum hand size is reduced by (\w+)\.?$/))) return push({ kind: 'handSize', n: -count(m[1]), who: 'opponents' }, `Opponents' maximum hand size is ${count(m[1])} smaller`);
+  if ((m = line.match(/^creature tokens you control have ([a-z]+(?:(?:, | and )[a-z]+)*)\.?$/))) return push({ kind: 'anthem', p: 0, t: 0, keywords: m[1].split(/, | and /), only: 'token' }, `Your creature tokens have ${m[1]}`);
 
   // --- Free spells and card advantage ------------------------------------------
   if (/^you may cast (?:the copy|the copies|the exiled card|target instant or sorcery card from an opponent's graveyard) without paying/.test(line) || /you may cast (?:the copy|the copies) without paying/.test(line)) {

@@ -41,7 +41,7 @@ describe('playing cards from exile', () => {
     const g = t.game;
     const p = g.players[0];
     const impulse = spell('Reckless Impulse', '{1}{G}', 2, 'Sorcery', 'Exile the top two cards of your library. Until the end of your next turn, you may play those cards.');
-    const thisTurn = spell('Light Up the Stage', '{G}', 1, 'Sorcery', 'Exile the top two cards of your library. Until end of turn, you may play those cards.');
+    const thisTurn = spell('Exile This Turn', '{G}', 1, 'Sorcery', 'Exile the top two cards of your library. Until end of turn, you may play those cards.');
     expect(thisTurn.effects[0]).toMatchObject({ kind: 'exilePlay', n: 2, from: 'you', until: 'turn' });
     expect(impulse.effects[0]).toMatchObject({ kind: 'exilePlay', until: 'nextTurn' });
     t.lands(0, 3);
@@ -50,7 +50,7 @@ describe('playing cards from exile', () => {
     p.library.unshift(b, land);
     p.hand = [thisTurn];
     let offered: Action[] = [];
-    t.handlers[0] = all(castOnce('Light Up the Stage'), playOnce((a) => a.type === 'cast' && a.from === 'exile' && a.card === b), (g2, d) => {
+    t.handlers[0] = all(castOnce('Exile This Turn'), playOnce((a) => a.type === 'cast' && a.from === 'exile' && a.card === b), (g2, d) => {
       if (d.kind === 'priority' && g2.stack.length === 0 && p.exile.includes(land)) offered = actionsOf(g2, d);
       return undefined;
     });
