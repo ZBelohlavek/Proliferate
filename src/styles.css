@@ -459,3 +459,90 @@ button.link.danger { color: var(--bad); }
 .zone-badge { bottom: -2px; background: rgba(0, 0, 0, 0.82); color: #fff; border-radius: 0 0 5px 5px; }
 .nofx-badge { top: 38%; background: var(--warn); color: #fff; pointer-events: auto; }
 .nofx-inline { background: var(--warn); color: #fff; font-size: 10.5px; font-weight: 800; border-radius: 4px; padding: 1px 5px; }
+
+/* ---------- Play table: motion and effects (see src/ui/tableFx.ts) ---------- */
+.play-bar-turn { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; }
+.phase-track { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700; }
+.phase-track .phase {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border); transition: background 0.25s, color 0.25s, box-shadow 0.25s, transform 0.25s;
+}
+.phase-track .phase.on { color: #fff; background: #3b5bdb; border-color: transparent; box-shadow: 0 0 10px 1px rgba(59, 91, 219, 0.55); transform: scale(1.06); }
+.phase-track.mine .phase.on { background: var(--accent); box-shadow: 0 0 10px 1px color-mix(in srgb, var(--accent) 60%, transparent); }
+.phase-dots { display: inline-flex; gap: 2px; }
+.phase-dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.3; transition: opacity 0.2s, transform 0.2s; }
+.phase-dots i.past { opacity: 0.6; }
+.phase-dots i.on { opacity: 1; transform: scale(1.4); }
+.phase-step { margin-left: 6px; color: var(--muted); font-weight: 600; }
+
+/* Cards you can play shimmer; targets pulse; attackers and blockers glow. */
+@keyframes fx-can { 0%, 100% { box-shadow: 0 0 0 2px var(--accent), 0 0 6px 1px color-mix(in srgb, var(--accent) 50%, transparent); }
+  50% { box-shadow: 0 0 0 2px var(--accent), 0 0 16px 4px color-mix(in srgb, var(--accent) 75%, transparent); } }
+@keyframes fx-target { 0%, 100% { box-shadow: 0 0 0 3px var(--warn), 0 0 10px 2px color-mix(in srgb, var(--warn) 60%, transparent); }
+  50% { box-shadow: 0 0 0 3px var(--warn), 0 0 22px 6px color-mix(in srgb, var(--warn) 85%, transparent); } }
+.play:not(.fx-off) .board-card.can .card-face { animation: fx-can 1.6s ease-in-out infinite; }
+.play:not(.fx-off) .board-card.target .card-face { animation: fx-target 1s ease-in-out infinite; }
+.board-card.attacking .card-face { box-shadow: 0 0 0 2px #e03131, 0 0 14px 3px rgba(224, 49, 49, 0.65); }
+.board-card.blocking .card-face { box-shadow: 0 0 0 2px #1c7ed6, 0 0 14px 3px rgba(28, 126, 214, 0.65); }
+.board-card.attacking { transform: translateY(-6px); }
+.mat.you .board-card.attacking { transform: translateY(-10px); }
+
+/* The hand: cards lift when you point at them. (".hand" is also the Playstyle quiz box; undo its frame here.) */
+.board-card.hand { border: 0; padding: 0; border-radius: 5px; }
+.play .hand-mat .card-row { padding-top: 6px; }
+.play .hand-mat .board-card { transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.play .hand-mat .board-card:hover { transform: translateY(-12px) scale(1.07); z-index: 2; }
+.play .hand-mat .board-card.can:hover { transform: translateY(-14px) scale(1.1); }
+
+/* The turn's owner and the stack. */
+.play:not(.fx-off) .mat.active { animation: fx-active 2.4s ease-in-out infinite; }
+@keyframes fx-active { 0%, 100% { box-shadow: 0 0 0 2px var(--good); } 50% { box-shadow: 0 0 0 2px var(--good), 0 0 18px 2px color-mix(in srgb, var(--good) 45%, transparent); } }
+.mat-life { transition: color 0.3s, border-color 0.3s; }
+.stack-panel { background: radial-gradient(ellipse at 20% 0%, color-mix(in srgb, #4dabf7 14%, var(--panel)), var(--panel) 70%); }
+.stack-list { list-style: none; padding-left: 0; display: grid; gap: 4px; }
+.stack-list li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border: 1px solid var(--border); background: var(--panel); }
+.stack-list li:first-child { border-color: #4dabf7; box-shadow: 0 0 10px 1px rgba(77, 171, 247, 0.35); }
+.stack-list li.ability:first-child { border-color: #fab005; box-shadow: 0 0 10px 1px rgba(250, 176, 5, 0.35); }
+.stack-thumb { flex: none; width: 34px; height: 47px; overflow: hidden; border-radius: 3px; }
+.stack-thumb .card-face { width: 84px; height: 117px; transform: scale(0.405); transform-origin: top left; }
+.stack-thumb .card-frame { font-size: 15px; }
+
+/* Effects drawn above the page. */
+.fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 40; overflow: hidden; }
+.fx-ghost { position: fixed; pointer-events: none; will-change: transform, opacity; }
+.fx-card { border-radius: 5px; overflow: hidden; background: var(--panel); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4); }
+.fx-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fx-card span { display: grid; place-items: center; height: 100%; padding: 4px; font-size: 11px; font-weight: 700; text-align: center; border: 2px solid var(--border); border-radius: 5px; color: var(--text); }
+.fx-card.resolve { border-radius: 6px; box-shadow: 0 0 18px 4px rgba(120, 190, 255, 0.8); }
+.fx-float { white-space: nowrap; font-weight: 900; font-size: 18px; color: #fff; -webkit-text-stroke: 1px rgba(0, 0, 0, 0.55); text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6); }
+.fx-float.big { font-size: 30px; }
+.fx-float.damage, .fx-float.hurt { color: #ff6b6b; }
+.fx-float.heal, .fx-float.counter { color: #8ce99a; }
+.fx-float.pump { color: #ffd43b; }
+.fx-float.poison { color: #a9e34b; }
+.fx-orb { border-radius: 50%; }
+.fx-orb.damage { background: radial-gradient(circle, #fff 0 20%, #ffa94d 35%, #f03e3e 60%, transparent 72%); box-shadow: 0 0 16px 6px rgba(240, 62, 62, 0.7); }
+.fx-orb.trigger { background: radial-gradient(circle, #fff 0 20%, #ffe066 40%, #f59f00 62%, transparent 72%); box-shadow: 0 0 14px 5px rgba(250, 176, 5, 0.7); }
+.fx-ring { border-radius: 50%; border: 3px solid rgba(255, 230, 150, 0.9); box-shadow: 0 0 18px 4px rgba(255, 230, 150, 0.6), inset 0 0 18px 4px rgba(255, 230, 150, 0.5); }
+.fx-ring.token { border-color: rgba(150, 255, 220, 0.9); box-shadow: 0 0 18px 4px rgba(150, 255, 220, 0.6); }
+.fx-spark { border-radius: 50%; background: #ffe8a3; box-shadow: 0 0 8px 3px rgba(255, 210, 120, 0.9); }
+.fx-spark.damage { background: #ffc078; box-shadow: 0 0 8px 3px rgba(240, 62, 62, 0.9); }
+.fx-spark.exile { background: #fff; box-shadow: 0 0 10px 4px rgba(220, 235, 255, 0.95); }
+.fx-spark.token, .fx-spark.heal, .fx-spark.counter { background: #d3f9d8; box-shadow: 0 0 8px 3px rgba(105, 219, 124, 0.9); }
+.fx-spark.cast { background: #e7f5ff; box-shadow: 0 0 8px 3px rgba(77, 171, 247, 0.9); }
+.fx-back { border-radius: 3px; background: linear-gradient(135deg, #5f3dc4, #364fc7 55%, #1864ab); border: 2px solid #e9ecef; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4); }
+.fx-stamp { white-space: nowrap; font-size: 34px; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; color: #e03131; border: 4px solid #e03131; border-radius: 8px; padding: 2px 14px; background: rgba(255, 255, 255, 0.85); }
+.fx-vignette { box-shadow: inset 0 0 120px 30px rgba(224, 49, 49, 0.55); }
+.fx-banner { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: #fff; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+  background: linear-gradient(90deg, transparent, rgba(30, 20, 60, 0.82) 20%, rgba(30, 20, 60, 0.82) 80%, transparent); border-top: 2px solid; border-bottom: 2px solid; border-image: linear-gradient(90deg, transparent, var(--banner, #9775fa), transparent) 1; }
+.fx-banner strong { font-size: 34px; font-weight: 900; letter-spacing: 0.04em; text-transform: uppercase; }
+.fx-banner span { font-size: 13px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; opacity: 0.85; }
+.fx-banner.mine { --banner: #b197fc; }
+.fx-banner.theirs { --banner: #74c0fc; background: linear-gradient(90deg, transparent, rgba(16, 32, 54, 0.82) 20%, rgba(16, 32, 54, 0.82) 80%, transparent); }
+.fx-banner.win { --banner: #ffd43b; background: linear-gradient(90deg, transparent, rgba(80, 56, 0, 0.85) 20%, rgba(80, 56, 0, 0.85) 80%, transparent); }
+.fx-banner.win strong { color: #ffe066; font-size: 46px; }
+.fx-banner.lose { --banner: #ff8787; background: linear-gradient(90deg, transparent, rgba(60, 10, 10, 0.85) 20%, rgba(60, 10, 10, 0.85) 80%, transparent); }
+.fx-banner.lose strong { font-size: 46px; }
+@media (prefers-reduced-motion: reduce) {
+  .play .board-card.can .card-face, .play .board-card.target .card-face, .play .mat.active { animation: none !important; }
+}
