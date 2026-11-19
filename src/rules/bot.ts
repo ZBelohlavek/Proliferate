@@ -1176,7 +1176,11 @@ export class Bot implements Agent {
       case 'becomeCopy': {
         // The best body to copy, but not a legend we control (the copy would die to the legend rule).
         const legal = (q: Perm) => !(q.card.isLegendary && q.seat === p.seat && !(e.kind === 'tokenCopy' && e.nonlegendary));
-        return asTarget(bestOf(perms, (q) => threat(g, q) + etbWorth(q) - (legal(q) ? 0 : 100))) ?? d.candidates[0];
+        const best = bestOf(perms, (q) => threat(g, q) + etbWorth(q) - (legal(q) ? 0 : 100));
+        // Gogo, Protean Thaumaturge: "you may" become a copy, so not of something worse than what it is now.
+        const self = e.kind === 'becomeCopy' ? p.battlefield.find((q) => q.card === d.card) : undefined;
+        if (d.cancellable && self && (!best || threat(g, best) <= threat(g, self))) return null;
+        return asTarget(best) ?? d.candidates[0];
       }
       case 'steal': {
         // Threaten: the biggest attacker it can send in now.
