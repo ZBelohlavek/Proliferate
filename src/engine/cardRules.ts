@@ -26,6 +26,8 @@ import { CARD_RULES_A_TO_F } from './cardRulesAtoF';
 import { RULES_P_TO_Z } from './cardRulesPZ';
 import type { Effect, SimCard } from './types';
 import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
+import { LAND_RULES } from './cardRulesLands';
+import { LATE_RULES } from './cardRulesLate';
 
 export interface CardRule {
   text?: string;
@@ -187,6 +189,10 @@ export const CARD_RULES: Record<string, CardRule> = {
 
   // --- One-off cards named P to Z (cardRulesPZ.ts) --------------------------------------
   ...RULES_P_TO_Z,
+
+  // --- Lands, and the leftovers of the mechanic groups (cardRulesLands.ts, cardRulesLate.ts) ---
+  ...LAND_RULES,
+  ...LATE_RULES,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */

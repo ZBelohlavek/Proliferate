@@ -921,6 +921,22 @@ export class Bot implements Agent {
   }
 
   /** How much the bot wants to cast this now. null = don't. */
+  /**
+   * Windfall and friends: cards we gain over the opponent who gains the most. The spell leaves our hand as it is cast,
+   * and a wheel that draws as many as the most anyone discarded is worth most with an empty hand against full ones.
+   */
+  private wheelGain(g: Game, p: PlayerState, card: SimCard | null): number {
+    const e = (card ?? null)?.effects.find((f) => f.kind === 'wheelAll') as Extract<Effect, { kind: 'wheelAll' }> | undefined;
+    const mine = p.hand.length - (card && p.hand.includes(card) ? 1 : 0);
+    const theirs = g.opponents(p).map((o) => o.hand.length);
+    if (!theirs.length) return 0;
+    const n = e && e.n !== 'max' ? e.n : Math.max(mine, ...theirs);
+    if (n >= p.library.length && !winsOnEmptyDraw(p)) return 0;
+    const avgGain = theirs.reduce((a, h) => a + (n - h), 0) / theirs.length;
+    // Graveyard decks like the discard itself.
+    return n - mine - Math.max(0, avgGain) + (this.leansOnGraveyard(p) ? 2 : 0);
+  }
+
   private castScore(g: Game, p: PlayerState, card: SimCard, fromCommand: boolean, x: number, instantWindow: boolean): number | null {
     // A Room's door is unlocked as it enters, so "when you unlock this door" happens now (rule 709.5h).
     const kinds = new Set(card.effects.filter((e) => e.when === 'resolve' || e.when === 'static' || (e.when === 'unlock' && !!card.room)).map((e) => e.kind));
@@ -935,7 +951,13 @@ export class Bot implements Agent {
     // Don't draw ourselves out of the game.
     const drawsN = card.effects.reduce((n, e) => n + (e.kind === 'draw' && e.when === 'resolve' ? (e.n === -1 ? x : e.n) : 0), 0);
     if (drawsN && drawsN >= p.library.length && !winsOnEmptyDraw(p)) return null;
+    // Rishkar's Expertise, Last March of the Ents: only once the count is worth the card.
+    const counted = card.effects.find((e): e is Extract<Effect, { kind: 'draw' }> => e.kind === 'draw' && !!e.count && e.when === 'resolve');
+    if (counted && !card.isCreature && g.drawCount(p, counted.count!) - (counted.count === 'handPlusOne' ? 1 : 0) < 3) return null;
     if (card.effects.some((e) => e.kind === 'mill' && (e.who === 'you' || e.who === 'all') && e.when === 'resolve') && p.library.length < 20 && !winsOnEmptyDraw(p)) return null;
+
+    // Windfall, Wheel of Fortune: when it refills our hand by more than it refills the table's.
+    if (kinds.has('wheelAll')) return this.wheelGain(g, p, card) >= 2 ? 40 + this.wheelGain(g, p, card) * 3 : null;
 
     // Purely reactive spells wait for something to react to.
     if (!card.isCreature && card.effects.length > 0 && card.effects.every((e) => REACTIVE_KINDS.has(e.kind))) return null;
@@ -1213,6 +1235,8 @@ export class Bot implements Agent {
         case 'transform': return isIncubator(perm.card) ? perm.counters >= 1 : !!perm.card.back && perm.card.back.value >= perm.card.value * 0.8;
         case 'hatch': return p.battlefield.some((q) => isIncubator(q.card) && q.counters >= 1);
         case 'artifactToken': return true;
+        // Jace's Archivist: a fresh hand when ours is the smallest.
+        case 'wheelAll': return this.wheelGain(g, p, null) >= 2;
         // Hideaway lands: play the hidden card once the condition holds.
         case 'playHidden': return !!perm.hidden && g.hiddenPlayable(p, e);
         // Teferi's +1 (flash for sorceries until our next turn); a land sacrificed for flash isn't worth it.

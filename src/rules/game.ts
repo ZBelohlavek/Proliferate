@@ -863,12 +863,14 @@ export class Game {
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
     const mutateHosts = this.mutateTargets(p).length > 0;
-    const castLocks = this.silenced.size > 0 || this.kindsInGame.has('castLock');
+    // Looked up once per call: scanning every battlefield for each card is what slowed games after the lockouts landed.
+    const castLockers = this.staticsOf('castLock');
+    const castLocks = this.silenced.size > 0 || castLockers.length > 0;
     const consider = (card: SimCard, from: CastFrom, mutate = false, kick = 0, modes = 0, door = false): boolean => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return false;
       if (!this.castTimingOk(p, card, from, sorcery)) return false;
       // Silence, Teferi, Void Winnower, Grand Abolisher (rule 101.2).
-      if (castLocks && this.castLocked(p, card, from)) return false;
+      if (castLocks && this.castLocked(p, card, from, castLockers)) return false;
       if (mutate && !mutateHosts) return false;
       // Spree and tiered spells are cast with their modes chosen (rule 702.172).
       if (card.casting?.spree && !modes) return false;
@@ -904,7 +906,7 @@ export class Game {
       if (card.room) consider(card, 'hand', false, 0, 0, true);
       if (card.casting?.spree) for (const modes of spreeChoices(card)) consider(card, 'hand', false, 0, modes);
       // Morph and disguise: cast face down as a 2/2 for {3} (rule 702.37c).
-      if (card.morph && sorcery && mayCast && !(castLocks && this.castLocked(p, card, 'hand')) && this.canAfford(p, this.castCard(card, 'faceDown'), false, 0)) actions.push({ type: 'cast', card, from: 'hand', maxX: 0, faceDown: true });
+      if (card.morph && sorcery && mayCast && !(castLocks && this.castLocked(p, card, 'hand', castLockers)) && this.canAfford(p, this.castCard(card, 'faceDown'), false, 0)) actions.push({ type: 'cast', card, from: 'hand', maxX: 0, faceDown: true });
     }
     // Foretold, plotted and warped cards: from exile, on a later turn (rules 702.143, 702.170, 702.185).
     const fromExile = new Set<string>();
@@ -945,19 +947,20 @@ export class Game {
       }
     }
 
+    const abilityLockers = this.staticsOf('abilityLock');
     for (const perm of p.battlefield) {
       // Cursed Totem, Karn, Grand Abolisher: none of this permanent's abilities can be activated (crew, station and levels are abilities too).
-      if (this.kindsInGame.has('abilityLock') && this.abilitiesLocked(p, perm.card)) {
+      if (abilityLockers.length && this.abilitiesLocked(p, perm.card, abilityLockers)) {
         const up = this.faceUpCost(perm);
         if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
         continue;
       }
       for (const effect of perm.card.effects) {
-        if (this.canActivate(p, perm, effect, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect });
+        if (this.canActivate(p, perm, effect, sorcery, false)) actions.push({ type: 'activate', permId: perm.id, effect });
       }
-      if (perm.card.isPlaneswalker) for (const effect of this.grantedLoyalty(p)) if (this.canActivate(p, perm, effect, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect });
+      if (perm.card.isPlaneswalker) for (const effect of this.grantedLoyalty(p)) if (this.canActivate(p, perm, effect, sorcery, false)) actions.push({ type: 'activate', permId: perm.id, effect });
       // Ygra: every other creature is a Food with "{2}, {T}, Sacrifice this permanent: You gain 3 life."
-      if (this.foodAbility(perm) && this.canActivate(p, perm, FOOD, sorcery)) actions.push({ type: 'activate', permId: perm.id, effect: FOOD });
+      if (this.foodAbility(perm) && this.canActivate(p, perm, FOOD, sorcery, false)) actions.push({ type: 'activate', permId: perm.id, effect: FOOD });
       // Turning a face-down permanent face up is a special action, any time you have priority (rule 116.2b).
       const up = this.faceUpCost(perm);
       if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
@@ -1006,9 +1009,10 @@ export class Game {
     return p.battlefield.filter((q) => q.landInfo && /\bIsland\b/.test(q.card.typeLine));
   }
 
-  private canActivate(p: PlayerState, perm: Perm, e: Effect, sorcery: boolean): boolean {
+  /** `checkLock` is false when the caller already skipped permanents whose abilities are locked. */
+  private canActivate(p: PlayerState, perm: Perm, e: Effect, sorcery: boolean, checkLock = true): boolean {
     if (perm.activations >= 20) return false;
-    if (this.kindsInGame.has('abilityLock') && this.abilitiesLocked(p, perm.card)) return false;
+    if (checkLock && this.kindsInGame.has('abilityLock') && this.abilitiesLocked(p, perm.card)) return false;
     if (e.kind === 'equip') {
       // Equip: sorcery speed, target creature you control (rule 702.6).
       if (e.aura || !sorcery) return false;
@@ -2253,13 +2257,15 @@ export class Game {
     // Ultima: lands that tap for {C} add an additional {C}.
     const boost = this.kindsInGame.has('colorlessBoost') && this.statics(p, 'colorlessBoost') > 0;
     // Cursed Totem, Karn: mana abilities are activated abilities too (rule 605.1a).
-    const locks = this.kindsInGame.has('abilityLock');
+    const lockers = this.staticsOf('abilityLock');
+    const locks = lockers.length > 0;
     // Crypt Ghast, Mirari's Wake, Caged Sun, Forsaken Monument: lands (and {C} rocks) make more.
     const boosts = this.kindsInGame.has('manaBoost') ? this.manaBoosts(p) : null;
     const corrupted = this.opponents(p).some((o) => o.poison >= 3);
+    const tokenManaOn = this.kindsInGame.has('tokenMana') && this.statics(p, 'tokenMana') > 0;
     for (const perm of p.battlefield) {
       if (perm === exclude) continue;
-      if (locks && this.abilitiesLocked(p, perm.card)) continue;
+      if (locks && this.abilitiesLocked(p, perm.card, lockers)) continue;
       if (perm.landInfo) {
         if (perm.tapped) continue;
         const perArtifact = perm.card.effects.some((e) => e.kind === 'mana' && e.perArtifact);
@@ -2267,10 +2273,22 @@ export class Game {
           out.push({ perm, colors: this.landProduces(perm), amount: Math.max(1, p.battlefield.filter((q) => q.card.isArtifact).length - 1) });
           continue;
         }
+        // Three Tree City, Nykthos: "{2}, {T}: Add X mana of one color", kept as the net gain when that beats the plain {C}.
+        const big = perm.card.effects.find((e): e is Extract<Effect, { kind: 'mana' }> => e.kind === 'mana' && e.net !== undefined);
+        if (big) {
+          const net = this.manaCount(p, perm, big) - big.net!;
+          if (net > 1) {
+            out.push({ perm, colors: 'any', amount: net });
+            continue;
+          }
+        }
         const colors = this.landProduces(perm);
         out.push({ perm, colors, amount: (boost && this.colorlessLand(perm) ? 2 : 1) + (boosts ? this.landBoost(perm, colors, boosts) : 0) });
         continue;
       }
+      // Most permanents make no mana: skip them before the costlier checks (token-heavy boards made this the hot spot).
+      const tokenMana = tokenManaOn && perm.token && perm.card.isCreature;
+      if (!tokenMana && !perm.card.effects.some((e) => e.kind === 'mana')) continue;
       // Summoning sickness only stops {T} abilities (rule 302.6).
       const tapBlocked = perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste'));
       // One tap gives one ability's mana: the biggest one this permanent can pay for.
@@ -2307,7 +2325,7 @@ export class Game {
         if (!best || src.amount > best.amount || (src.amount === best.amount && e.colors === 'any' && best.colors !== 'any')) best = src;
       }
       // Insidious Roots: creature tokens tap for any color.
-      if (!best && !tapBlocked && perm.token && perm.card.isCreature && this.kindsInGame.has('tokenMana') && this.statics(p, 'tokenMana') > 0) best = { perm, colors: 'any', amount: 1 };
+      if (!best && !tapBlocked && tokenMana) best = { perm, colors: 'any', amount: 1 };
       if (best) {
         if (best.energy) energy -= best.energy;
         out.push(best);
@@ -2316,8 +2334,19 @@ export class Game {
     if (this.kindsInGame.has('mana:sacArtifact')) out.push(...this.sacrificeForMana(p, exclude));
     // Goldspan Dragon: "Treasures you control have '{T}, Sacrifice this artifact: Add two mana of any one color.'"
     const treasure = this.kindsInGame.has('treasureBoost') && this.statics(p, 'treasureBoost') > 0 ? 2 : 1;
-    if (!(locks && this.abilitiesLocked(p, TREASURE_TYPES))) for (let i = 0; i < p.treasures; i++) out.push({ perm: null, colors: 'any', amount: treasure });
+    if (!(locks && this.abilitiesLocked(p, TREASURE_TYPES, lockers))) for (let i = 0; i < p.treasures; i++) out.push({ perm: null, colors: 'any', amount: treasure });
     return out;
+  }
+
+  /** "Draw cards equal to ...": counted as the effect resolves. */
+  drawCount(p: PlayerState, count: 'greatestPower' | 'greatestToughness' | 'handPlusOne' | 'redDevotion'): number {
+    const creatures = p.battlefield.filter((q) => q.card.isCreature);
+    switch (count) {
+      case 'greatestPower': return Math.max(0, ...creatures.map((q) => this.power(q)));
+      case 'greatestToughness': return Math.max(0, ...creatures.map((q) => this.toughness(q)));
+      case 'handPlusOne': return p.hand.length + 1;
+      case 'redDevotion': return this.devotionTo(p, ['R']);
+    }
   }
 
   /** How much a mana ability that counts something makes: the source's power (Vivi) or your enchantments (Sanctum Weaver). */
@@ -2325,6 +2354,8 @@ export class Game {
     if (e.count === 'power') return this.power(perm);
     if (e.count === 'enchantments') return p.battlefield.filter((q) => q.card.isEnchantment).length;
     if (e.count === 'colors') return colorsAmong(p.battlefield.map((q) => q.card));
+    if (e.count === 'chosenType') return p.battlefield.filter((q) => q.card.isCreature && this.isType(q, 'chosen', perm)).length;
+    if (e.count === 'devotion') return Math.max(...(['W', 'U', 'B', 'R', 'G'] as Color[]).map((c) => this.devotionTo(p, [c])));
     return e.amount;
   }
 
@@ -4624,7 +4655,7 @@ export class Game {
       }
       case 'treasure': {
         // Treasures are tokens, so Doubling Season and Parallel Lives double them (rule 111.1, 614.1a). Ritual mana is not.
-        const count = e.byCharge ? src?.charge ?? 0 : e.shareType ? x : e.ritual ? e.n : Math.min(e.n * 2 ** this.doublers(p, 'tokens'), 40);
+        const count = e.byCharge ? src?.charge ?? 0 : e.shareType ? x : e.islands ? this.islands(p).filter((q) => !q.tapped).length : e.ritual ? e.n : Math.min(e.n * 2 ** this.doublers(p, 'tokens'), 40);
         if (count <= 0) break;
         p.treasures += count;
         this.say(`${p.name} ${e.ritual ? 'gets' : 'makes'} ${count} ${e.ritual ? 'mana' : `Treasure${count > 1 ? 's' : ''}`}.`);
@@ -4643,9 +4674,15 @@ export class Game {
         break;
       }
       case 'draw': {
+        if (e.discardHand && p.hand.length) {
+          // Clive: discard your hand first.
+          const gone = p.hand.splice(0);
+          for (const card of gone) this.discarded(p, card, true);
+          this.say(`${p.name} discards their hand (${gone.length}).`);
+        }
         // "Draw half X cards, rounded down" (Wan Shi Tong): a fractional xTimes on a spell or enters ability.
         const half = e.xTimes !== undefined && e.xTimes < 1;
-        const count = e.n === -1 ? (half ? Math.floor(x * e.xTimes!) : Math.max(x, 1)) : e.n;
+        const count = e.count ? this.drawCount(p, e.count) : e.n === -1 ? (half ? Math.floor(x * e.xTimes!) : Math.max(x, 1)) : e.n;
         if (count <= 0) break;
         // "That player draws seven cards" (Forced Fruition), "the attacking player draws a card" (Breena).
         if (e.thatPlayer && target?.kind === 'player') {
@@ -4911,6 +4948,20 @@ export class Game {
         if (e.ifTapped) this.say(`${src?.card.name ?? 'It'} deals ${e.n} damage to ${p.name} (life ${p.life}).`);
         break;
       case 'digPermanent': {
+        if (e.permanents) {
+          // Genesis Ultimatum (top five, the rest to hand), Genesis Wave (top X, mana value X or less, the rest to the graveyard).
+          const top = p.library.splice(0, e.among === -1 ? x : e.among ?? 5);
+          const found = top.filter((c) => !c.isInstant && !c.isSorcery && !isAura(c) && (!e.permanents!.xLimit || c.cmc <= x));
+          const rest = top.filter((c) => !found.includes(c));
+          if (e.permanents.rest === 'hand') p.hand.push(...rest);
+          else for (const c of rest) this.toGraveyard(p, c, false);
+          this.say(`${p.name} reveals the top ${top.length} cards and puts ${found.length ? found.map((c) => c.name).join(', ') : 'nothing'} onto the battlefield${rest.length ? ` (${rest.length} to ${e.permanents.rest === 'hand' ? 'hand' : 'the graveyard'})` : ''}.`);
+          for (const c of found) {
+            if (c.isLand && c.land) this.putLand(p, c, c.land);
+            else yield* this.enter(p, c, false, 0, null);
+          }
+          break;
+        }
         if (e.artifacts) {
           // Tezzeret, Master of the Bridge: every artifact card among the top ten onto the battlefield; the rest are exiled.
           const top = p.library.splice(0, e.among ?? 10);
@@ -5768,7 +5819,7 @@ export class Game {
         break;
       }
       case 'landSac':
-        for (const q of e.who === 'each' ? this.alivePlayers() : this.opponents(p)) {
+        for (const q of e.who === 'each' ? this.alivePlayers() : e.who === 'you' ? [p] : this.opponents(p)) {
           const lands = q.battlefield.filter((l) => l.landInfo);
           const n = e.keep !== undefined ? Math.max(0, lands.length - e.keep) : Math.min(e.n, lands.length);
           if (n <= 0) continue;
@@ -6007,6 +6058,21 @@ export class Game {
       }
       case 'hours': {
         if (src && this.players[src.seat].battlefield.includes(src)) this.addHours(src, e.n);
+        break;
+      }
+      case 'wheelAll': {
+        // Windfall, Wheel of Fortune: everyone discards their hand, then draws (rule 701.9).
+        const players = this.alivePlayers();
+        let most = 0;
+        for (const q of players) {
+          const gone = q.hand.splice(0);
+          most = Math.max(most, gone.length);
+          for (const card of gone) this.discarded(q, card, true);
+          if (gone.length && q !== p && this.kindsInGame.has('when:opponentDiscard')) for (let i = 0; i < gone.length; i++) this.fireOpponents(q, 'opponentDiscard', 1);
+        }
+        const n = e.n === 'max' ? most : e.n;
+        this.say(`Each player discards their hand and draws ${n}.`);
+        for (const q of players) if (q.alive) this.draw(q, n);
         break;
       }
       case 'wheel': {
@@ -6960,8 +7026,8 @@ export class Game {
   }
 
   /** Cursed Totem, Karn, Linvala, Grand Abolisher: can `p` activate abilities of a permanent like `card` (rule 602.5)? */
-  abilitiesLocked(p: PlayerState, card: Pick<SimCard, 'isCreature' | 'isArtifact' | 'isEnchantment'>): boolean {
-    for (const { e, perm } of this.staticsOf('abilityLock')) {
+  abilitiesLocked(p: PlayerState, card: Pick<SimCard, 'isCreature' | 'isArtifact' | 'isEnchantment'>, lockers = this.staticsOf('abilityLock')): boolean {
+    for (const { e, perm } of lockers) {
       if (e.who === 'opponents' && perm.seat === p.seat) continue;
       if (e.yourTurn && this.activeSeat !== perm.seat) continue;
       if (e.perms === 'creatures' ? card.isCreature : e.perms === 'artifacts' ? card.isArtifact : card.isArtifact || card.isCreature || card.isEnchantment) return true;
@@ -6970,9 +7036,9 @@ export class Game {
   }
 
   /** Silence, Teferi, Void Winnower, Lavinia, Soulless Jailer, Phyrexian Censor: `p` can't cast `card` from there now (rule 101.2). */
-  castLocked(p: PlayerState, card: SimCard, from: CastFrom): boolean {
+  castLocked(p: PlayerState, card: SimCard, from: CastFrom, lockers = this.staticsOf('castLock')): boolean {
     if (this.silenced.has(p.seat)) return true;
-    for (const { e, perm } of this.staticsOf('castLock')) {
+    for (const { e, perm } of lockers) {
       if (e.who === 'opponents' && perm.seat === p.seat) continue;
       switch (e.rule) {
         case 'all': return true;
@@ -8430,6 +8496,9 @@ export class Game {
   /** A token's card: the copied card with the copy effect's exceptions (rule 707.9). */
   private copyCard(card: SimCard, e: { nonlegendary?: boolean; legendary?: boolean; haste?: boolean; flying?: boolean; pt?: { p: number; t: number }; enchantment?: boolean }): SimCard {
     let c = e.nonlegendary && card.isLegendary ? this.nonlegendary(card) : card;
+    // A copy of an instant or sorcery card on the battlefield (Myrkul copying a face-down Second Harvest): its spell
+    // abilities do nothing there (rule 113.6), or they would run again as the token enters, without end.
+    if (c.isInstant || c.isSorcery) c = { ...c, effects: c.effects.filter((f) => f.when !== 'resolve') };
     const kws = [...(e.haste && !c.keywords.includes('haste') ? ['haste'] : []), ...(e.flying && !c.keywords.includes('flying') ? ['flying'] : [])];
     if (e.legendary || kws.length || e.pt || e.enchantment) {
       c = {

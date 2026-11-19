@@ -242,10 +242,17 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   }
 
   // --- Card draw -----------------------------------------------------------
-  m = line.match(new RegExp(`(?:you |target player |each player )?draws? ${NUM} (additional )?cards?`));
-  if (m && !/opponent draws|that player draws|each opponent draws/.test(line) && !/exchange life totals/.test(fullLine)) {
+  if (/each player discards their hand, then draws (?:cards equal to the greatest number of cards a player discarded this way|seven cards)/.test(line)) {
+    // Windfall, Jace's Archivist, Wheel of Fortune (rule 701.9).
+    const seven = /draws seven cards/.test(line);
+    out.push({ body: { kind: 'wheelAll', n: seven ? 7 : 'max' }, note: `Each player discards their hand and draws ${seven ? 'seven' : 'as many as the most anyone discarded'}` });
+  } else if ((m = line.match(new RegExp(`(?:you |target player |each player )?draws? ${NUM} (additional )?cards?`))) && !/opponent draws|that player draws|each opponent draws/.test(line) && !/exchange life totals/.test(fullLine)) {
     const n = num(m[1], 1);
     out.push({ body: { kind: 'draw', n }, note: `Draw ${n === -1 ? 'X' : n}` });
+  } else if ((m = line.match(/draw cards equal to (the greatest power|the greatest toughness) among creatures you control|draw cards equal to the number of cards in your hand plus one|discard your hand, then draw cards equal to your devotion to red/))) {
+    const count = /greatest power/.test(line) ? 'greatestPower' : /greatest toughness/.test(line) ? 'greatestToughness' : /devotion to red/.test(line) ? 'redDevotion' : 'handPlusOne';
+    const label = { greatestPower: 'the greatest power among your creatures', greatestToughness: 'the greatest toughness among your creatures', handPlusOne: 'your hand size plus one', redDevotion: 'your devotion to red, after discarding your hand' }[count];
+    out.push({ body: { kind: 'draw', n: 3, count, ...(count === 'redDevotion' ? { discardHand: true } : {}) }, note: `Draw cards equal to ${label}` });
   } else if (/draw cards equal to|draws cards equal to/.test(line)) {
     out.push({ body: { kind: 'draw', n: 3 }, note: 'Draw (≈3)' });
   } else if ((m = line.match(/put (one|two|three|four|\d) of (them|those cards) into your hand/))) {
@@ -614,7 +621,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   // Mana Crypt: lose the flip half the time.
   if ((m = line.match(/^if you lose the flip, ~ deals (\d+) damage to you/))) out.push({ body: { kind: 'loseLife', n: parseInt(m[1], 10) }, note: `Coin flip: ${m[1]} damage to you half the time`, chance: 0.5 });
   // High Tide: about three Islands' worth of extra mana for the caster this turn.
-  if (/^until end of turn, whenever a player taps an island for mana, that player adds an additional \{u\}/.test(line)) out.push({ body: { kind: 'treasure', n: 3, ritual: true }, note: 'Ritual: ≈3 extra blue mana from Islands this turn' });
+  if (/^until end of turn, whenever a player taps an island for mana, that player adds an additional \{u\}/.test(line)) out.push({ body: { kind: 'treasure', n: 0, ritual: true, islands: true }, note: 'Ritual: one extra {U} for each untapped Island you control' });
   // Eerie Interlude: the creatures come back at end of turn, so it dodges a wipe and replays enters abilities.
   if (/^exile any number of target creatures you control\.?$/.test(line) && /return those cards to the battlefield/.test(fullLine)) out.push({ body: { kind: 'blink', n: 5, what: 'creature' }, note: 'Blink any number of creatures you control (back at end of turn)' });
   // Dispatch: only with three artifacts out.
@@ -1920,6 +1927,7 @@ export function cardValue(card: SimCard): number {
       case 'oppAnthem': v -= 4 * (e.p + e.t); break;
       case 'oppEnterTapped': v += 2; break;
       case 'draw': v += 1.5 * Math.max(e.n, 2) * mult; break;
+      case 'wheelAll': v += 4 * mult; break;
       case 'removal': v += 3 * mult; break;
       case 'wipe': v += 4; break;
       case 'counter': v += 2.5; break;
