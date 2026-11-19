@@ -59,6 +59,7 @@ export type Trigger =
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
   | 'opponentSearch' // an opponent searches their library (Wan Shi Tong)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
+  | 'opponentSacrifice' // an opponent sacrifices a nontoken permanent, the trigger is about that card (scope 'all': or discards a permanent card, Tergrid)
   | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
   | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
   | 'static'; // always on while the permanent is on the battlefield
@@ -67,7 +68,7 @@ export type Trigger =
 /** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
 export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery';
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
@@ -200,7 +201,7 @@ export type EffectBody =
    * Create token copies of the source permanent (Skyclave Relic, Jace, Mirror Mage; offspring makes a 1/1 one).
    * size: the copy's power and toughness. loyalty: its starting loyalty.
    */
-  | { kind: 'copySelf'; n: number; tapped?: boolean; nonlegendary?: boolean; loyalty?: number; size?: number }
+  | { kind: 'copySelf'; n: number; tapped?: boolean; nonlegendary?: boolean; loyalty?: number; size?: number; /** Opponents get the copy: one target opponent, or each opponent (Wedding Ring, Life of the Party). goaded: goaded for the rest of the game. */ give?: 'target' | 'each'; goaded?: boolean }
   /** Shuffle the source into its owner's library (Fblthp, the Lost). */
   | { kind: 'shuffleSelf' }
   /** Sacrifice the source (Phantasmal Image's "when this becomes the target ..."). */
@@ -282,12 +283,67 @@ export type EffectBody =
   /** Exile graveyards: every opponent's, or everyone's. `cards`: only that many cards, the best ones in opponents' graveyards. */
   | { kind: 'exileGraveyards'; all: boolean; cards?: number }
   /** Enters as a copy of a creature on the battlefield: any, only yours (Spark Double) or only an opponent's (Imposter Mech). */
-  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean; /** Phantasmal Image: "when this becomes the target of a spell or ability, sacrifice it". */ fragile?: boolean }
+  | { kind: 'clone'; from?: 'yours' | 'opponents'; /** Copy Enchantment, Copy Artifact: copies an enchantment or an artifact instead of a creature. */ what?: 'enchantment' | 'artifact'; /** Enters tapped (Callidus Assassin). */ tapped?: boolean; /** "It isn't legendary." */ nonlegendary?: boolean; /** "Enters with an additional +1/+1 counter." */ extraCounter?: boolean; /** Phantasmal Image: "when this becomes the target of a spell or ability, sacrifice it". */ fragile?: boolean }
   /** Take a creature: one on the battlefield, or the best in an opponent's library. */
   /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
   /** what: an artifact instead of a creature (Thieving Skydiver; an Equipment is then attached to the source). maxCmc: only mana value up to this; -1 = X. */
   /** payEnergy: Confiscation Coup gives this much energy, then the steal costs energy equal to the target's mana value. */
-  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number; what?: 'artifact'; maxCmc?: number }
+  /**
+   * until: control ends at the end of this turn ('eot', Act of Treason) or of the taker's next turn ('nextTurn', Treasure Nabber).
+   * untap / haste: "untap that creature, it gains haste" (threaten). all: every artifact the player the ability is about controls
+   * (Hellkite Tyrant). from 'hand': put a creature card from target opponent's hand onto the battlefield (Treacherous Urge).
+   * what 'permanent' / 'noncreatureArtifact': what can be taken besides a creature. minPower: only if its power is at most this,
+   * unless you control another creature of `orSubtype` (Reptilian Recruiter). base: it has this base power and toughness and these
+   * keywords until end of turn (Flayer of Loyalties).
+   */
+  | { kind: 'steal'; from: 'battlefield' | 'library' | 'hand'; whileSource?: boolean; payEnergy?: number; what?: 'artifact' | 'noncreatureArtifact' | 'permanent'; maxCmc?: number; until?: 'eot' | 'nextTurn'; untap?: boolean; haste?: boolean; all?: 'artifacts'; maxPower?: number; orSubtype?: string; base?: { p: number; t: number; keywords: string[] }; /** "Sacrifice it at the beginning of the next end step." */ sacAtEnd?: boolean }
+  /**
+   * Real token copies (rules 111.10, 707.2): tokens with the copiable values of a permanent, with the card's "except" changes.
+   * of: 'target' (a target permanent that matches `filter`), 'attached' (the equipped or enchanted permanent), 'subject' (the
+   * permanent or card the trigger is about: the creature that entered, attacked or died), 'aimed' (what the previous part of the
+   * spell took or returned: Blue Sun's Twilight, Coiling Rebirth), 'tokens' (each token you control: Second Harvest).
+   * end: sacrificed or exiled at the beginning of the next end step. minX: only if X is at least this.
+   */
+  | { kind: 'tokenCopy'; n: number; of: 'target' | 'attached' | 'subject' | 'aimed' | 'tokens'; filter?: CopyFilter; nonlegendary?: boolean; legendary?: boolean; haste?: boolean; flying?: boolean; /** "Except it's 1/1": its base power and toughness. */ pt?: { p: number; t: number }; end?: 'sacrifice' | 'exile'; tapped?: boolean; attacking?: boolean; minX?: number; /** The copy is an enchantment and no other card type (Myrkul). */ enchantment?: boolean }
+  /**
+   * The source becomes a copy of another permanent (rule 707.2): a target matching `filter`, or a creature card in a graveyard
+   * ('graveyard': yours with mana value X, Lazav the Multifarious; 'subject': the card the trigger is about, Lazav Dimir Mastermind).
+   * untilEot: only until end of turn. keep: "except it has this ability" (it keeps the source's abilities). name: it keeps its name.
+   * pump: both it and the copied creature get +p/+0 and haste until end of turn (Gogo).
+   */
+  | { kind: 'becomeCopy'; of: 'target' | 'graveyard' | 'subject'; filter?: CopyFilter; untilEot?: boolean; keep?: boolean; pump?: number; hexproof?: boolean; /** "Except its name is ~" (and it's legendary, for Lazav). */ name?: boolean }
+  /**
+   * "Return that card to the battlefield under your control": the card the trigger is about (a creature that died, a permanent an
+   * opponent sacrificed or discarded), from its owner's graveyard, or from exile (Kaya's Ghostform: "dies or is put into exile").
+   * samurai: only Samurai cards (Oathkeeper). shrunk: only a creature that had a -1/-1 counter on it (Necroskitter).
+   */
+  | { kind: 'takeCard'; samurai?: boolean; shrunk?: boolean }
+  /** Static: whenever an opponent taps an artifact for mana, you gain control of it until the end of your next turn (Treasure Nabber). */
+  | { kind: 'nabArtifacts' }
+  /** Static: whenever a nonland permanent an opponent owns enters under your control, they lose life equal to its mana value (Brainstealer Dragon). */
+  | { kind: 'stolenDrain' }
+  /**
+   * Static token replacement (rule 614.1a). 'oneOfEach': a Clue, Food or Treasure becomes one of each (Academy Manufactor).
+   * 'treasure': one more Treasure (Xorn). 'squirrels': that many 1/1 Squirrels too (Chatterfang). 'food': one more Food (Peregrin Took).
+   * 'copies': the first tokens each turn are copies of the enchanted permanent instead (Moonlit Meditation).
+   */
+  | { kind: 'tokenReplace'; add: 'oneOfEach' | 'treasure' | 'squirrels' | 'food' | 'copies' }
+  /**
+   * Change the target of a spell or ability with a single target (rule 115.7). to 'choose': any new legal target (Deflecting Swat,
+   * Misdirection); 'self': the source itself (Spellskite, Hydroelectric Specimen). spells: only instants and sorceries ('instantSorcery'),
+   * or any spell; abilities: abilities too. copy: then copy it, and the copy may have new targets too (Wyll's Reversal on 15+).
+   * damage: you take damage equal to the spell's mana value (Imp's Mischief).
+   */
+  | { kind: 'redirect'; to: 'choose' | 'self'; spells: 'any' | 'instantSorcery'; abilities?: boolean; copy?: boolean; damage?: boolean }
+  /**
+   * Delayed copies (rule 707.10): the next instant or sorcery spell you cast this turn is copied ('next', Teach by Example),
+   * or every spell you cast this turn ('turn', Jace Reawakened).
+   */
+  | { kind: 'copyNext'; until: 'next' | 'turn' }
+  /** Static: whenever you would copy a spell, copy it once more (Twinning Staff). */
+  | { kind: 'copyDoubler' }
+  /** Static: the source enters under the control of an opponent and attacks each combat, but never its owner (Xantcha). */
+  | { kind: 'givenAway' }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
   | { kind: 'extraTurn' }
@@ -488,7 +544,22 @@ export type EffectBody =
    * Copy a spell or ability on the stack. 'spell': target instant or sorcery spell; 'trigger': the spell
    * that set off this ability ("whenever you cast ..., copy that spell"); 'ability': target ability you control.
    */
-  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability'; /** Only spells you control. */ yours?: boolean };
+  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability' | 'permanentSpell' | 'creatureSpell'; /** Only spells you control. */ yours?: boolean; /** The copy isn't legendary (Double Major). */ nonlegendary?: boolean; /** "The copy targets ~" (Ivy): the copy's target is the source, and only spells that help it are copied. */ toSource?: boolean; /** "They may pay {2}. If they don't, ..." (Wandering Archaic): the caster pays when they can spare it. */ unlessPay?: number };
+
+/** What a token copy or "becomes a copy" effect may copy. */
+export interface CopyFilter {
+  /** Card types that qualify (any of them). */
+  types: ('creature' | 'artifact' | 'enchantment')[];
+  /** Only permanents you control. */
+  yours?: boolean;
+  nonlegendary?: boolean;
+  /** "Another" / "other": not the source. */
+  other?: boolean;
+  /** Both types at once ("artifact creature"). */
+  both?: boolean;
+  attacking?: boolean;
+  nontoken?: boolean;
+}
 
 export type EffectKind = EffectBody['kind'];
 
