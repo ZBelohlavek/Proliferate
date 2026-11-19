@@ -19,7 +19,7 @@ describe('rarer wordings', () => {
     ['Duneblast', '{4}{W}{B}{G}', 'Sorcery', 'Choose up to one creature. Destroy the rest.', ['resolve:wipe']],
     ["Council's Judgment", '{1}{W}{W}', 'Sorcery', "Will of the council — Starting with you, each player votes for a nonland permanent you don't control. Exile each permanent with the most votes or tied for most votes.", ['resolve:removal']],
     ['Howling Mine', '{2}', 'Artifact', "At the beginning of each player's draw step, if Howling Mine is untapped, that player draws an additional card.", ['upkeep:draw']],
-    ['Villainous Wealth', '{X}{B}{G}{U}', 'Sorcery', 'Target opponent exiles the top X cards of their library. You may cast any number of spells with mana value X or less from among them without paying their mana costs.', ['resolve:draw']],
+    ['Villainous Wealth', '{X}{B}{G}{U}', 'Sorcery', 'Target opponent exiles the top X cards of their library. You may cast any number of spells with mana value X or less from among them without paying their mana costs.', ['resolve:freeCast']],
     ['Whispersilk Cloak', '{3}', 'Artifact', "Equipped creature can't be blocked and has shroud.\nEquip {2}", ['static:equip']],
     ['Blind Obedience', '{1}{W}', 'Enchantment', 'Extort\nArtifacts and creatures your opponents control enter tapped.', ['cast:drain']],
     ['Invasion of Eldraine', '{3}{B}', 'Battle', 'When this Siege enters, target opponent discards two cards.', ['resolve:discard']],
