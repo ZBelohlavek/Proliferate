@@ -287,10 +287,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     notes: ['Sacrifice it: your permanents gain hexproof and indestructible this turn'],
     why: 'Only creature tokens gain hexproof and indestructible; played on all your permanents.',
   },
-  'Knowledge Pool': {
-    text: '',
-    why: 'Swapping each spell cast from hand for a card in the pool is left out: bots never cast it.',
-  },
   'Kotori, Pilot Prodigy': {
     text: 'At the beginning of combat on your turn, target creature you control gains lifelink and vigilance until end of turn.',
     why: 'Giving Vehicles crew 2 is left out; the target should be an artifact creature.',
@@ -468,10 +464,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     text: 'As an additional cost to cast ~, discard a card.\n{T}: Add one mana of any color.',
     why: 'The discarded card must be a land.',
   },
-  'Moxite Refinery': {
-    text: '',
-    why: 'Moving counters between permanents is left out.',
-  },
   'Myr Matrix': {
     text: 'Indestructible\nMyr creatures you control get +1/+1.\n{5}: Create a 1/1 colorless Myr artifact creature token.',
     why: 'All Myr get +1/+1, opponents\' too; played for yours.',
@@ -497,10 +489,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     add: [{ kind: 'draw', n: 1, when: 'playerAttacks', scope: 'opponents' }],
     notes: ['When an opponent attacks another opponent: draw a card'],
     why: 'You draw when their creatures deal combat damage to your other opponents: played on such attacks. Their draw is left out.',
-  },
-  'Nest of Scarabs': {
-    text: '',
-    why: '1/1 Insects for -1/-1 counters you put: its deck rarely puts them; left out.',
   },
   'Night of the Sweets\' Revenge': {
     text: 'When ~ enters, create a Food token.\n{5}{G}{G}, Sacrifice ~: Creatures you control get +X/+X until end of turn, where X is the number of Foods you control. Activate only as a sorcery.',

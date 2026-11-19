@@ -5,7 +5,6 @@
 // test table needs them.
 
 import { describe, expect, it } from 'vitest';
-import { cardValue } from '../src/engine/classify';
 import { CARD_RULES } from '../src/engine/cardRules';
 import { card, creature, spell } from './helpers';
 import { castOnce, Table } from './table';
@@ -31,10 +30,10 @@ describe('one-off cards A to F: reading', () => {
     // The card data's keyword list names every die result; the rule clears it.
     expect(celebr.keywords).toEqual([]);
     expect(celebr.unread).toBeUndefined();
+    // Claws of Gix is no longer a blank entry: it is a sacrifice outlet for any permanent (cardRulesFinal.ts).
     const claws = artifact('Claws of Gix', '{0}', 0, '{1}, Sacrifice a permanent: You gain 1 life.');
-    expect(claws.effects).toEqual([]);
+    expect(claws.effects).toEqual([expect.objectContaining({ kind: 'gainLife', activation: expect.objectContaining({ sacOther: { what: 'permanent', n: 1 } }) })]);
     expect(claws.ruled).toBeDefined();
-    expect(cardValue(claws)).toBe(0);
   });
 
   it('reads the general wordings added with these cards', () => {

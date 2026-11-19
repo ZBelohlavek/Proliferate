@@ -40,10 +40,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: '{T}: Add one mana of any color.',
     why: 'Devotion +1 and the 1 life with a God or legendary enchantment are left out.',
   },
-  'Alter Reality': {
-    text: '',
-    why: 'Changing a color word in a card\'s text does nothing in this engine, which reads text once when the deck is built. Bots never cast it.',
-  },
   "Angel's Grace": {
     text: "You can't lose the game this turn and your opponents can't win the game this turn. Until end of turn, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
     why: 'Split second (rule 702.61) is left out: bots rarely respond to it anyway.',
@@ -131,10 +127,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Bear Umbra': {
     text: 'Enchant creature\nEnchanted creature gets +2/+2.\nWhenever enchanted creature attacks, untap all lands you control.',
     why: 'Umbra armor (rule 702.89) is left out: the Aura does not save the creature.',
-  },
-  "Berserker's Frenzy": {
-    text: '',
-    why: 'Forcing or choosing blocks is not modelled. Bots never cast it.',
   },
   Biotransference: {
     text: 'Whenever you cast an artifact or creature spell, you lose 1 life and create a 2/2 black Necron Warrior artifact creature token.',
@@ -277,10 +269,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: '{T}: Add one mana of any color.',
     why: 'Imprinting (exiling a card from hand) is left out, so it is a free mana rock.',
   },
-  'Claws of Gix': {
-    text: '',
-    why: '1 life for a permanent: bots never sacrifice for it.',
-  },
   'Coldsteel Heart': {
     text: '~ enters tapped.\n{T}: Add one mana of any color.',
     why: 'The color chosen as it enters is whichever you need.',
@@ -356,14 +344,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Depthshaker Titan': {
     text: 'When ~ enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nArtifact creatures you control get +1/+0 and have trample and haste.',
     why: 'Melee is +1/+1 for each opponent attacked, usually one: played as +1/+0 on artifact creatures.',
-  },
-  'Desecrated Tomb': {
-    text: '',
-    why: 'A Bat when creature cards leave your graveyard: the engine has no trigger for that. Bots never cast it.',
-  },
-  'Despotic Scepter': {
-    text: '',
-    why: 'Destroying your own permanent is never worth it to bots.',
   },
   'Devourer of Memory': {
     text: '{1}{U}{B}: Mill a card.',
@@ -443,14 +423,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: 'Spells you cast from your graveyard cost {2} less to cast.\nAt the beginning of your end step, return target instant or sorcery card from your graveyard to your hand.',
     why: 'Casting an instant or sorcery from the graveyard once each turn when an opponent loses life; played as returning one to hand each turn.',
   },
-  'Enchanted Evening': {
-    text: '',
-    why: 'All permanents being enchantments does nothing here: other cards don\'t see the added type. Bots never cast it.',
-  },
-  'Encroaching Mycosynth': {
-    text: '',
-    why: 'Your nonland permanents being artifacts does nothing here: other cards don\'t see the added type. Bots never cast it.',
-  },
   'Endless Evil': {
     text: "Enchant creature you control\nAt the beginning of your upkeep, create a token that's a copy of enchanted creature, except the token is 1/1.",
     why: 'Returning to hand when a Horror it enchants dies is left out.',
@@ -462,10 +434,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Enduring Innocence': {
     text: "Lifelink\nWhenever one or more other creatures you control enter, draw a card. This ability triggers only once each turn.\nWhen ~ dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)",
     why: 'Only creatures with power 2 or less count; in its deck nearly all do.',
-  },
-  'Enhanced Surveillance': {
-    text: '',
-    why: 'Two more cards when surveilling and shuffling the graveyard back are left out. Bots never cast it.',
   },
   'Epitaph Golem': {
     text: '',

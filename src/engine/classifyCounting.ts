@@ -119,8 +119,16 @@ export function countingKeywords(text: string, card: SimCard, raw: { power?: str
   }
   // Mana Vault: never worth paying {4} to untap it in the upkeep.
   if (/^at the beginning of your upkeep, you may pay \{4\}\. if you do, untap ~/m.test(text)) card.notes.push('Upkeep untap for {4}: never paid (≈ it nets less mana than the {4} it costs)');
-  // Thran Turbine: mana that can't pay for spells, in the upkeep, when bots activate nothing.
-  if (/^at the beginning of your upkeep, you may add \{c\}\{c\}\. this mana can't be spent to cast spells/m.test(text)) card.notes.push('Upkeep {C}{C} only for abilities (≈ unused: bots activate nothing in the upkeep)');
+  // Horizon Stone, Kruphix: mana that would empty from the pool stays, as {C} (rule 106.4).
+  if (/^if you would lose unspent mana, that mana becomes colorless instead/m.test(text)) {
+    card.effects.push({ kind: 'keepMana', when: 'static' } as Effect);
+    card.notes.push('Unspent mana stays in your pool as {C}');
+  }
+  // Thran Turbine: {C}{C} in the mana pool during the upkeep, for activated abilities only (it empties as the step ends, rule 106.4).
+  if (/^at the beginning of your upkeep, you may add \{c\}\{c\}\. this mana can't be spent to cast spells/m.test(text)) {
+    card.effects.push({ kind: 'treasure', n: 2, ritual: true, abilityOnly: true, colorless: true, when: 'upkeep' } as Effect);
+    card.notes.push('Upkeep: {C}{C} that only pays for activated abilities');
+  }
 }
 
 /** Lines countingKeywords reads from the whole text. */

@@ -114,6 +114,8 @@ export interface Perm {
   lockedBy?: number;
   /** Charge counters. */
   charge?: number;
+  /** Kill Switch: the artifacts it tapped, which don't untap during their controllers' untap steps while it stays tapped. */
+  holdsTapped?: number[];
   /** Combat damage to and from it is prevented this turn (Maze of Ith). */
   fogged?: boolean;
   /** The turn number on which it last attacked (boast, rule 702.142). */
@@ -192,6 +194,8 @@ export interface PlayerState {
   /** Combat damage taken from each commander, keyed by "seat:name" (rule 903.10a). */
   commanderDamage: Map<string, number>;
   treasures: number;
+  /** Mana in the mana pool (rule 106.4): ritual mana, firebending, Mana Drain, Thran Turbine. It empties as steps end (see Game.poolLive). */
+  pool?: PoolMana[];
   /** Turn number on which this player last lost life (Gev). */
   lostLifeTurn: number;
   /** Experience counters (Meren, Kratos). */
@@ -256,6 +260,18 @@ export interface PlayerState {
   earlyNames: Set<string>;
   drawnNames: Set<string>;
   castNames: Set<string>;
+}
+
+/** Mana in a player's pool. `until`: when it empties: as the step it was made in ends, at end of combat (firebending) or after the owner's next precombat main phase (Mana Drain). */
+export interface PoolMana {
+  n: number;
+  colors: 'any' | ['C'];
+  turn: number;
+  step: Step;
+  combat: number;
+  until: 'step' | 'combat' | 'nextMain' | 'kept';
+  /** Thran Turbine: only for activated abilities. */
+  abilityOnly?: boolean;
 }
 
 /** A card in exile that its owner may cast later (see PlayerState.held). */
