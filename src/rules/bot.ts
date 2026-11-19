@@ -235,7 +235,7 @@ export class Bot implements Agent {
     switch (d.kind) {
       case 'priority': return this.priority(g, p, d.actions);
       case 'target': return this.target(g, p, d);
-      case 'attackers': return this.attack(g, p, d.candidates, d.defenders, d.goaded ?? []);
+      case 'attackers': return this.attack(g, p, d.candidates, d.defenders, d.goaded ?? [], d.planeswalkers ?? []);
       case 'blockers': return this.block(g, p, d.attackers, d.candidates);
       case 'choose': return this.choose(g, p, d);
       case 'confirm':
@@ -1517,7 +1517,7 @@ export class Bot implements Agent {
         } else if (!mine.blocked) {
           // Unblocked: pump for lethal.
           const d = g.players[mine.attacking];
-          const incoming = g.attackers().filter((a) => a.attacking === d.seat && !a.blocked).reduce((s, a) => s + hitDamage(g, a), 0);
+          const incoming = g.attackers().filter((a) => a.attacking === d.seat && a.attackingPw === undefined && !a.blocked).reduce((s, a) => s + hitDamage(g, a), 0);
           if (d.alive && incoming < d.life && incoming + bonus * (g.hasKw(mine, 'double strike') ? 2 : 1) >= d.life) return mine;
         }
       } else if (mine.blocking !== null) {
@@ -1820,7 +1820,7 @@ export class Bot implements Agent {
    * Inkshield, or Maze of Ith on the biggest attacker.
    */
   private chooseFog(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
-    const coming = g.attackers().filter((a) => a.attacking === p.seat && (!a.blocked || g.hasKw(a, 'trample')) && !a.fogged);
+    const coming = g.attackers().filter((a) => a.attacking === p.seat && a.attackingPw === undefined && (!a.blocked || g.hasKw(a, 'trample')) && !a.fogged);
     if (!coming.length) return undefined;
     const total = coming.reduce((n, a) => n + hitDamage(g, a), 0);
     const biggest = Math.max(...coming.map((a) => hitDamage(g, a)));
@@ -2063,7 +2063,7 @@ export class Bot implements Agent {
     return score;
   }
 
-  private attack(g: Game, p: PlayerState, candidateIds: number[], defenderSeats: number[], goaded: { attacker: number; defenders: number[] }[] = []): AttackDeclaration[] {
+  private attack(g: Game, p: PlayerState, candidateIds: number[], defenderSeats: number[], goaded: { attacker: number; defenders: number[] }[] = [], planeswalkers: number[] = []): AttackDeclaration[] {
     // Goaded creatures must attack; they go where they do the most good among the players they may attack.
     const forced: AttackDeclaration[] = [];
     for (const gd of goaded) {
@@ -2075,7 +2075,7 @@ export class Bot implements Agent {
       forced.push({ attacker: perm.id, defender: allowed.reduce((a, b) => (score(b) > score(a) ? b : a)).seat });
     }
     candidateIds = candidateIds.filter((id) => !forced.some((f) => f.attacker === id));
-    if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats)];
+    if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats, [], planeswalkers)];
     let candidates = candidateIds.map((id) => g.findPerm(id)).filter((q): q is Perm => q !== null && g.power(q) > 0);
     // Absolute Virtue: nothing gets through to a player with protection from us, so they aren't worth attacking.
     const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive && !g.playerProtectedFrom(o, p.seat));
@@ -2147,6 +2147,43 @@ export class Bot implements Agent {
         }
       }
     }
+    return this.atPlaneswalkers(g, out, planeswalkers);
+  }
+
+  /**
+   * Send attackers at opponents' planeswalkers (rule 508.1b) when that is worth more than the damage to the player:
+   * creatures nothing can block, enough of them to finish the planeswalker, unless the attack on its controller is lethal.
+   */
+  private atPlaneswalkers(g: Game, out: AttackDeclaration[], planeswalkers: number[]): AttackDeclaration[] {
+    const pws = planeswalkers.map((id) => g.findPerm(id)).filter((q): q is Perm => !!q && (q.loyalty ?? 0) > 0)
+      .sort((a, b) => b.card.value - a.card.value || b.loyalty! - a.loyalty!);
+    for (const pw of pws) {
+      const o = g.players[pw.seat];
+      const toPlayer = out.filter((d) => d.defender === o.seat && d.planeswalker === undefined);
+      const damage = toPlayer.reduce((n, d) => n + hitDamage(g, g.findPerm(d.attacker)!), 0);
+      if (damage >= o.life) continue;
+      const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped);
+      const free = toPlayer.map((d) => g.findPerm(d.attacker)!).filter((a) => !blockers.some((b) => g.canBlock(b, a))).sort((a, b) => g.power(a) - g.power(b));
+      let need = pw.loyalty!;
+      const picked: Perm[] = [];
+      // The smallest creatures that together finish it.
+      const one = free.find((a) => g.power(a) >= pw.loyalty!);
+      if (one) {
+        picked.push(one);
+        need = 0;
+      } else {
+        for (const a of free) {
+          if (need <= 0) break;
+          picked.push(a);
+          need -= g.power(a);
+        }
+      }
+      if (need > 0) continue;
+      for (const a of picked) {
+        const d = out.find((x) => x.attacker === a.id)!;
+        d.planeswalker = pw.id;
+      }
+    }
     return out;
   }
 
@@ -2196,6 +2233,8 @@ export class Bot implements Agent {
       let total = 0;
       let commanderLethal = false;
       for (const a of attackers) {
+        // Creatures attacking a planeswalker don't hurt the player.
+        if (a.attackingPw !== undefined) continue;
         const bs = blocks.get(a);
         if (bs) {
           if (g.hasKw(a, 'trample')) total += Math.max(0, hitDamage(g, a) - bs.reduce((s, b) => s + g.toughness(b), 0));

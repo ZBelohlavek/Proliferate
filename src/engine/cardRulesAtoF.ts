@@ -303,8 +303,8 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   },
   'Darksteel Monolith': {
     text: 'Indestructible',
-    add: [{ kind: 'costReduction', amount: 6, filter: 'colorless', first: true, when: 'static' }],
-    notes: ['The first colorless spell each turn costs {6} less (≈ free)'],
+    add: [{ kind: 'costReduction', amount: 6, filter: 'colorless', first: true, from: 'hand', when: 'static' }],
+    notes: ['The first colorless spell cast from hand each turn costs {6} less (≈ free)'],
     why: 'Casting a colorless spell from hand without paying its mana cost once each turn: played as {6} off the first colorless spell each turn.',
   },
   'Chatterfang, Squirrel General': {

@@ -1141,7 +1141,40 @@ function readEmblem(text: string): { body: EffectBody; note: string } | null {
   return { body: { kind: 'emblem', card }, note: `Emblem: ${what}` };
 }
 
+/**
+ * What a card says about deck building: "A deck can have any number of cards named ~" (rule 903.5b), "~ can be your
+ * commander" (903.3), and the ways two commanders may share a deck: partner, partner with, friends forever, Choose a
+ * Background, Doctor's companion (702.124).
+ */
+export function commanderRules(raw: Pick<RawCard, 'name' | 'text' | 'types' | 'superTypes' | 'subTypes' | 'power'>): { copyLimit?: number; canCommand?: boolean; pairing?: SimCard['pairing'] } {
+  const text = raw.text ?? '';
+  const out: { copyLimit?: number; canCommand?: boolean; pairing?: SimCard['pairing'] } = {};
+  const limit = text.match(/A deck can have (any number of|up to (\w+)) cards named/i);
+  if (limit) out.copyLimit = limit[2] ? NUMBER_WORDS[limit[2].toLowerCase()] ?? (Number(limit[2]) || 1) : 999;
+  const legendary = raw.superTypes.some((t) => t.toLowerCase() === 'legendary');
+  const creature = raw.types.some((t) => t.toLowerCase() === 'creature');
+  // 903.3: a legendary creature, Vehicle, or Spacecraft with a power/toughness box.
+  const vehicle = raw.subTypes.includes('Vehicle');
+  const spacecraft = raw.subTypes.includes('Spacecraft') && raw.power !== undefined && raw.power !== null && raw.power !== '';
+  if ((legendary && (creature || vehicle || spacecraft)) || /can be your commander/i.test(text)) out.canCommand = true;
+  const background = raw.subTypes.some((t) => t.toLowerCase() === 'background');
+  if (legendary && background) {
+    out.canCommand = true;
+    out.pairing = 'background';
+  }
+  const partnerWith = text.match(/^Partner with ([^\n(]+)/m);
+  if (partnerWith) out.pairing = { with: partnerWith[1].trim() };
+  else if (/^Partner\b(?! with)( \(|$)/m.test(text)) out.pairing = 'partner';
+  else if (/^Partner—([^\n(]+)/m.test(text)) out.pairing = { group: text.match(/^Partner—([^\n(]+)/m)![1].trim() };
+  else if (/^Friends forever/m.test(text)) out.pairing = 'friendsForever';
+  else if (/^Choose a Background/m.test(text)) out.pairing = 'chooseBackground';
+  else if (/^Doctor's companion/m.test(text)) out.pairing = 'doctorsCompanion';
+  else if (legendary && creature && raw.subTypes.some((t) => t === 'Time Lord') && raw.subTypes.some((t) => t === 'Doctor')) out.pairing = 'doctor';
+  return out;
+}
+
 export function classifyCard(raw: RawCard): SimCard {
+  const printed = raw;
   // Cards with their own rule may be read from rewritten text (see cardRules.ts).
   const rule = CARD_RULES[raw.name.split(' // ')[0]];
   if (rule?.text !== undefined) raw = { ...raw, text: rule.text };
@@ -1184,6 +1217,11 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   if (named.name) card.counterName = named.name;
+  // Deck-building rules the card itself changes (rules 903.3, 903.5b, 702.124).
+  const deckRules = commanderRules(printed);
+  if (deckRules.copyLimit !== undefined) card.copyLimit = deckRules.copyLimit;
+  if (deckRules.canCommand) card.canCommand = true;
+  if (deckRules.pairing) card.pairing = deckRules.pairing;
   if (/as ~ enters, choose a creature type/.test(text)) card.choosesType = true;
   if (isLand) {
     card.land = landInfo(raw, raw.producedMana, raw.colorIdentity);
