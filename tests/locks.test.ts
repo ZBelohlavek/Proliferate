@@ -245,11 +245,11 @@ describe("'isn't a creature' and animation", () => {
   it('Depthshaker Titan: the animated artifacts are sacrificed at the end step', () => {
     const t = new Table();
     t.lands(0, 2);
-    t.game.put(0, solRing());
+    t.game.put(0, artifact('Ornithopter Nest', '{2}', 2, 'Whenever you cast a spell, you gain 1 life.'));
     t.game.players[0].hand.push(creature('Depthshaker Titan', '{1}{G}', 2, 5, 5, { text: 'When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.' }));
     t.handlers[0] = castOnce('Depthshaker Titan');
     t.finishTurn();
-    expect(t.game.players[0].battlefield.some((q) => q.card.name === 'Sol Ring')).toBe(false);
+    expect(t.game.players[0].battlefield.some((q) => q.card.name === 'Ornithopter Nest')).toBe(false);
   });
 
   it('Destiny Spinner makes a land an X/X with trample and haste', () => {

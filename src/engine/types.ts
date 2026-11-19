@@ -5,6 +5,8 @@
 // oracle text. Anything we couldn't recognise is simply ignored by the game
 // engine, and `modeled` records whether we understood the card at all.
 
+import type { ExileEffect } from './typesExile';
+
 export type Color = 'W' | 'U' | 'B' | 'R' | 'G';
 export const COLORS: Color[] = ['W', 'U', 'B', 'R', 'G'];
 /** A single unit of mana: a color, or 'C' for colorless. */
@@ -55,6 +57,7 @@ export type Trigger =
   | 'targeted' // a permanent becomes the target of a spell or ability (see scope, targetedBy, spellOnly)
   | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
+  | 'opponentSearch' // an opponent searches their library (Wan Shi Tong)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
   | 'crewed' // this Vehicle becomes crewed (Mobilizer Mech)
   | 'static'; // always on while the permanent is on the battlefield
@@ -63,7 +66,7 @@ export type Trigger =
 /** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
 export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'flash';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | 'flash';
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
@@ -128,16 +131,53 @@ export type Effect = EffectBody & {
 };
 
 export type EffectBody =
+  | ExileEffect
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
   /**
    * energy: each use also costs this many energy counters (Solar Transformer).
    * charge: the amount is the source's charge counters ('tap': Astral Cornucopia; 'grow': a counter is added first,
    * Empowered Autogenerator) or each counter can be removed for one mana without tapping ('spend': Pentad Prism).
    */
-  | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend'; /** A land that taps for one mana for each artifact you control, less one it costs (Uthros, Titanic Godcore). */ perArtifact?: boolean }
-  | { kind: 'costReduction'; amount: number; filter: CastFilter }
+  | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend'; /** A land that taps for one mana for each artifact you control, less one it costs (Uthros, Titanic Godcore). */ perArtifact?: boolean
+      /** The amount is a count instead (see classifyCounting.ts): enchantments you control (Sanctum Weaver) or the source's power (Vivi Ornitier). */
+      count?: 'enchantments' | 'power' | 'colors';
+      /** Corrupted: this ability works only while an opponent has three or more poison counters (Glistening Sphere). */
+      corrupted?: boolean;
+      /** "{0}: Add ...", usable once each turn during your own turn, without tapping (Vivi Ornitier). */
+      oncePerTurn?: boolean;
+      /** "Remove a +1/+1 counter from ~: Add one mana": each +1/+1 counter is a mana, without tapping (Crystalline Crawler). */
+      fromCounters?: boolean;
+      /** "Sacrifice an artifact: Add {C}{C}": each spare artifact token you control is this much mana, sacrificed when spent (Krark-Clan Ironworks). */
+      sacArtifact?: boolean }
+  /**
+   * Spells cost less. from: only spells cast from a graveyard ('graveyard'), a graveyard or exile ('graveyardOrExile') or
+   * anywhere but your hand ('notHand', which includes the command zone). first: only the first such spell you cast each turn.
+   * minCmc: only spells with at least this mana value. affinity: {1} less for each artifact you control instead (Tezzeret).
+   */
+  | { kind: 'costReduction'; amount: number; filter: CastFilter; from?: 'graveyard' | 'graveyardOrExile' | 'notHand'; first?: boolean; minCmc?: number; affinity?: boolean }
+  /**
+   * Static: activated abilities cost {amount} less, but not below one mana (rule 601.2f): only abilities of creatures
+   * you control ('yours', Training Grounds), of any creatures ('creatures', Heartstone) or every non-mana ability you activate ('all', Zirda).
+   */
+  | { kind: 'abilityDiscount'; amount: number; of: 'yours' | 'creatures' | 'all' }
+  /**
+   * Static: your lands make one more mana when tapped for mana: Swamps ('swamps', Crypt Ghast), every land ('lands',
+   * Mirari's Wake), lands that make the chosen color ('chosenColor', Caged Sun: the color your deck uses most), or every
+   * land and artifact that taps for {C} ('colorless', Forsaken Monument).
+   */
+  | { kind: 'manaBoost'; what: 'swamps' | 'lands' | 'chosenColor' | 'colorless' }
+  /** Static: your creature tokens have "{T}: Add one mana of any color" (Insidious Roots). */
+  | { kind: 'tokenMana' }
+  /** Tap target permanent an opponent controls: a creature ('creature'), a nonland permanent ('nonland'), or an artifact, creature or land ('any'). noFlying: only a creature without flying. */
+  | { kind: 'tap'; target: 'creature' | 'nonland' | 'any'; noFlying?: boolean }
+  /** Static: untap steps change: nobody untaps ('none', Stasis) or creatures with power 3 or more don't untap ('bigCreatures', Meekstone). */
+  | { kind: 'untapRule'; rule: 'none' | 'bigCreatures' }
+  /** Static: "at the beginning of your upkeep, sacrifice ~ unless you pay {cost}" (Stasis). */
+  | { kind: 'upkeepCost'; cost: ManaCost }
+  /** Myr Battlesphere: tap X untapped creatures of this type you control; the source gets +X/+0 and deals X damage to the player it attacks. */
+  | { kind: 'tapAllies'; subtype: string }
   /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
-  | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean }
+  | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean; /** One mana for each creature you control that shares a creature type with the one that entered (Mana Echoes). */ shareType?: boolean }
   | { kind: 'extraLand' }
   | { kind: 'draw'; n: number }
   /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
@@ -185,7 +225,7 @@ export type EffectBody =
   | { kind: 'damagePlayer'; n: number }
   | { kind: 'gainLife'; n: number }
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
-  | { kind: 'loseLife'; n: number }
+  | { kind: 'loseLife'; n: number; /** Only while the source is tapped (Mana Vault). */ ifTapped?: boolean }
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
   | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
   /**
@@ -323,7 +363,7 @@ export type EffectBody =
    * Prevent combat damage this turn (rule 615): all of it ('all', Fog), the damage dealt to you ('you', Inkshield,
    * which makes a 2/1 flyer for each 1 prevented: `tokens`), or the damage dealt to and by one target attacking creature ('creature', Maze of Ith).
    */
-  | { kind: 'fog'; who: 'all' | 'you' | 'creature'; tokens?: boolean; untap?: boolean; /** Return the creatures attacking you to their owners' hands instead (Aetherize). */ bounce?: boolean }
+  | { kind: 'fog'; who: 'all' | 'you' | 'creature'; tokens?: boolean; untap?: boolean; /** Return the creatures attacking you to their owners' hands instead (Aetherize). */ bounce?: boolean; /** With bounce: into their owners' libraries instead of hands (Aetherspouts). */ tuck?: boolean }
   /**
    * Manifest (rule 701.40): put the top card of a library onto the battlefield face down as a 2/2.
    * who: 'you'; 'targetController', the controller of what the previous part of the ability hit
@@ -574,7 +614,16 @@ export interface SimCard {
   /** Storm: copied for each spell cast before it this turn. */
   storm?: boolean;
   /** Power (and toughness, if `toughness`) equal to a count, e.g. cards in your hand. */
-  scales?: { by: 'hand' | 'graveyard' | 'oppGraveyards' | 'oneGraveyard' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'; toughness: boolean };
+  scales?: {
+    by: 'hand' | 'graveyard' | 'oppGraveyards' | 'oneGraveyard' | 'allGraveyardCreatures' | 'spellsInGraveyard' | 'artifacts' | 'creatures' | 'lands'
+      // See classifyCounting.ts: "gets +1/+1 for each ..." and other counts.
+      | 'enchantments' | 'drawnThisTurn' | 'oppExile' | 'colors' | 'experience' | 'graveyardCreatures' | 'party' | 'oppGraveyardTypes' | 'subtype';
+    toughness: boolean;
+    /** by 'subtype': the creature type counted ("for each other Rat you control"). */
+    subtype?: string;
+    /** Not counting itself ("each other Rat"). */
+    other?: boolean;
+  };
   /** Vehicle: tap creatures with this much total power to make it a creature until end of turn. */
   crew?: number;
   /** Enters tapped with this many stun counters (each one stops an untap). */
@@ -630,7 +679,18 @@ export interface SimCard {
   /** X is paid in life instead of mana (Toxic Deluge). */
   xFromLife?: boolean;
   /** Costs {amount} less for each of something (affinity, improvise, convoke, "for each creature on the battlefield"). */
-  discount?: { per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'; amount: number };
+  discount?: {
+    per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'
+      // See classifyCounting.ts.
+      | 'tokens' | 'subtype' | 'party' | 'graveyardTypes' | 'spellsInGraveyard' | 'diedThisTurn' | 'energyPaid' | 'bigCreature' | 'poisoned' | 'legendaryTarget' | 'attackingTarget';
+    amount: number;
+    /** per 'subtype': the creature type ("affinity for Humans", "if you control a Wizard"). */
+    subtype?: string;
+    /** "Costs {2} less if ...": the discount once, when the count is at least one. */
+    once?: boolean;
+  };
+  /** Cast from somewhere other than a hand or the command zone (set on the priced copy, for "spells you cast from your graveyard cost less"). */
+  castZone?: 'graveyard' | 'exile';
   /**
    * Kicker, multikicker or offspring (rules 702.33, 702.175): an optional additional cost. `effects` is what the card
    * does when it was paid (its `effects` are the unkicked version). Multikicker may be paid any number of times.
