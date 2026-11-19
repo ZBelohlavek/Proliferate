@@ -1569,7 +1569,8 @@ export class Game {
     }
     const again = card.casting?.suspend?.again;
     if (again) {
-      (p.held ??= []).push({ card, way: 'suspend', turn: this.turnNumber, time: again });
+      // It is exiled under its owner, who casts it when the last time counter goes (rule 702.62a).
+      (this.players[item.owner ?? p.seat].held ??= []).push({ card, way: 'suspend', turn: this.turnNumber, time: again });
       this.say(`${card.name} is exiled with ${again} time counters.`);
       return true;
     }
@@ -3920,7 +3921,7 @@ export class Game {
     if (item.kind === 'spell' && item.mutateOnto !== undefined) {
       const host = this.findPerm(item.mutateOnto);
       if (host && this.canMutateOnto(p, host)) {
-        yield* this.merge(p, host, item.card, item.isCommander);
+        yield* this.merge(p, host, item.card, item.isCommander, !!item.copy);
         return;
       }
       // With its target gone, a mutating creature spell just enters as a creature (rule 702.140b).
@@ -4056,8 +4057,8 @@ export class Game {
    * the top card's characteristics plus the abilities of every card in it. It doesn't enter the
    * battlefield, so only "whenever this creature mutates" abilities trigger.
    */
-  private *merge(p: PlayerState, host: Perm, card: SimCard, isCommander: boolean): Flow<void> {
-    const parts = host.parts ?? [{ real: host.token ? null : host.faceDown ?? host.front ?? host.printed ?? host.card, face: host.card, commander: host.isCommander }];
+  private *merge(p: PlayerState, host: Perm, card: SimCard, isCommander: boolean, copy = false): Flow<void> {
+    const parts = host.parts ?? [{ real: host.token ? null : realCard(host), face: host.card, commander: host.isCommander }];
     host.faceDown = undefined;
     host.front = undefined;
     const current = parts[0].face;
@@ -4065,7 +4066,8 @@ export class Game {
       { label: `On top: ${card.name} ${card.power}/${card.toughness}`, card },
       { label: `Underneath: stay ${current.name} ${current.power}/${current.toughness}`, card: current },
     ], 1, 1);
-    const part = { real: card, face: card, commander: isCommander };
+    // A copy of a mutating spell merges as a token part: no card of its own goes anywhere later (rule 707.10f).
+    const part = { real: copy ? null : card, face: card, commander: isCommander && !copy };
     const onTop = (pick[0] ?? 0) === 0;
     host.parts = onTop ? [part, ...parts] : [...parts, part];
     host.printed = undefined;
@@ -4414,7 +4416,8 @@ export class Game {
       const seat = attachTo?.kind === 'player' ? attachTo.seat : null;
       // A Curse with no player to enchant goes to the graveyard instead (rule 608.3b).
       if (seat === null || !this.players[seat].alive) {
-        this.toGraveyard(p, card, isCommander);
+        // A token one simply ceases to exist (rule 111.7).
+        if (how !== 'token') this.toGraveyard(owner ?? p, card, isCommander);
         return null;
       }
       perm.cursing = seat;
@@ -4424,7 +4427,8 @@ export class Game {
       const host = attachTo && attachTo.kind === 'perm' ? this.findPerm(attachTo.id) : null;
       // An Aura with nothing legal to enchant goes to the graveyard instead (rule 608.3b).
       if (!host || !this.canTarget(p, host)) {
-        this.toGraveyard(p, card, isCommander);
+        // A token one simply ceases to exist (rule 111.7).
+        if (how !== 'token') this.toGraveyard(owner ?? p, card, isCommander);
         return null;
       }
       perm.attachedTo = host.id;
