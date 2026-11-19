@@ -163,6 +163,15 @@ export class Game {
   private readonly finality = new Set<number>();
   /** Effect kinds of every permanent made so far, so static effects no deck plays cost nothing to check. */
   private readonly kindsInGame = new Set<string>();
+  /** The spell or ability choosing or checking its targets right now, for protection and "hexproof from" (rules 702.16b, 702.11d). */
+  private aim: { card: SimCard; seat: number; ability: boolean } | null = null;
+  /**
+   * "Creatures your opponents control attack this turn if able" (Bident of Thassa, The Akroan War: 'force') and
+   * "creatures can't attack you unless their controller pays" for a while (Summon: Yojimbo: 'tax'), set by `seat`.
+   */
+  private attackOrders: { seat: number; kind: 'force' | 'tax'; amount: number; until: 'turn' | 'nextTurn'; turn: number }[] = [];
+  /** The turn being played is an extra turn (Medomai the Ageless). */
+  private extraTurnNow = false;
   /** Leonin Arbiter: the turn on which each seat last paid {2} to search. */
   private readonly arbiterPaid = new Map<number, number>();
   /** Isochron Scepter: the card exiled with each one (keyed by permanent id). */
@@ -241,7 +250,9 @@ export class Game {
           if (!extra.alive) continue;
           this.extraTurnsTaken++;
           this.say(`${extra.name} takes an extra turn.`);
+          this.extraTurnNow = true;
           yield* this.turn(extra);
+          this.extraTurnNow = false;
         }
         this.extraTurns = [];
         if (this.over) break;
@@ -399,6 +410,7 @@ export class Game {
         }
       }
     }
+    if (this.attackOrders.length) this.attackOrders = this.attackOrders.filter((o) => !(o.until === 'nextTurn' && o.seat === p.seat) && !(o.until === 'turn' && o.turn !== this.turnNumber));
     p.landsPlayed = 0;
     p.graveyardTypes = undefined;
     p.shielded = false;
@@ -836,7 +848,7 @@ export class Game {
       // One loyalty ability per planeswalker per turn, at sorcery speed (rule 606.3).
       if (!sorcery || perm.loyaltyUsed || perm.loyalty === undefined) return false;
       if ((e.loyalty ?? 0) < 0 && perm.loyalty < -(e.loyalty ?? 0)) return false;
-      const targets = this.targetCandidates(p, e, perm);
+      const targets = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
       return targets === null || targets.length > 0;
     }
     if (e.when !== 'activated' || !e.activation) return false;
@@ -856,7 +868,7 @@ export class Game {
     if (act.sacCreature && !p.battlefield.some((q) => q.card.isCreature)) return false;
     if (act.tapCreatures && p.battlefield.filter((q) => q.card.isCreature && !q.tapped && !(act.tap && q === perm)).length < act.tapCreatures) return false;
     if (this.planPayment(p, act.cost, 0, this.abilityDiscount(p, perm, e), act.tap ? perm : undefined) === null) return false;
-    const candidates = this.targetCandidates(p, e, perm);
+    const candidates = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
     return candidates === null || candidates.length > 0;
   }
 
@@ -865,12 +877,12 @@ export class Game {
     if (card.isInstant || card.isSorcery) {
       for (const e of card.effects) {
         if (e.when !== 'resolve') continue;
-        const candidates = this.targetCandidates(p, e, null);
+        const candidates = this.aimAs(card, p.seat, false, () => this.targetCandidates(p, e, null));
         if (candidates !== null && candidates.length === 0) return false;
       }
       return true;
     }
-    if (isAura(card)) return this.auraCandidates(p).length > 0;
+    if (isAura(card)) return this.aimAs(card, p.seat, false, () => this.auraCandidates(p)).length > 0;
     return true;
   }
 
@@ -2155,7 +2167,93 @@ export class Game {
   /** Hexproof stops opponents; shroud stops everyone (rules 702.11, 702.18). */
   canTarget(by: PlayerState, perm: Perm): boolean {
     if (this.hasKw(perm, 'shroud')) return false;
-    return !(perm.seat !== by.seat && this.hasKw(perm, 'hexproof'));
+    if (perm.seat !== by.seat && this.hasKw(perm, 'hexproof')) return false;
+    // Protection and "hexproof from": checked against the spell or ability doing the targeting, when it is known.
+    if (this.aim && this.kindsInGame.has('protection')) {
+      const kws = this.protections(perm);
+      if (kws.length) {
+        const { card, seat, ability } = this.aim;
+        if (kws.some((k) => k.startsWith('pro:') && this.quality(k.slice(4), card, seat, ability))) return false;
+        if (seat !== perm.seat && kws.some((k) => k.startsWith('hexfrom:') && this.quality(k.slice(8), card, seat, ability))) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Protection and "hexproof from" keywords `perm` has now: printed, gained this turn, from Equipment and anthems, and Vexilus Praetor's for commanders. */
+  protections(perm: Perm): string[] {
+    if (!this.kindsInGame.has('protection') && !this.kindsInGame.has('commanderKeywords')) return [];
+    const out = [...perm.card.keywords, ...perm.tempKw].filter(isProtection);
+    for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') out.push(...e.keywords.filter(isProtection));
+    if (perm.isCommander && this.kindsInGame.has('commanderKeywords')) {
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'commanderKeywords') out.push(...e.keywords);
+    }
+    return out;
+  }
+
+  /** Does a source (a card controlled by `seat`; `ability`: an activated or triggered ability) have this quality? (rule 702.16a) */
+  private quality(q: string, card: SimCard, seat: number, ability: boolean): boolean {
+    if (q === 'all') return true;
+    if (q === 'ability') return ability;
+    if (/^[WUBRG]$/.test(q)) return cardColors(card).includes(q as Color);
+    if (q === 'multi') return cardColors(card).length > 1;
+    if (q === 'mono') return cardColors(card).length === 1;
+    if (q.startsWith('mv<=')) return card.cmc <= parseInt(q.slice(4), 10) && !card.isLand;
+    if (q.startsWith('mv>=')) return card.cmc >= parseInt(q.slice(4), 10);
+    if (q.startsWith('sub:')) return card.isCreature && hasSubtype(card, q.slice(4));
+    switch (q) {
+      case 'instant': return card.isInstant;
+      case 'sorcery': return card.isSorcery;
+      case 'creature': return card.isCreature;
+      case 'artifact': return card.isArtifact;
+      case 'enchantment': return card.isEnchantment;
+      case 'planeswalker': return card.isPlaneswalker;
+      case 'land': return card.isLand;
+    }
+    void seat;
+    return false;
+  }
+
+  /** Has `perm` protection from this source? (rule 702.16) */
+  protectedFromCard(perm: Perm, card: SimCard, seat: number): boolean {
+    if (!this.kindsInGame.has('protection') && !this.kindsInGame.has('commanderKeywords')) return false;
+    return this.protections(perm).some((k) => k.startsWith('pro:') && this.quality(k.slice(4), card, seat, false));
+  }
+
+  /** Absolute Virtue: `p` has protection from each of their opponents, so damage their sources deal to `p` is prevented (rule 702.16j). */
+  playerProtectedFrom(p: PlayerState, seat: number): boolean {
+    return seat !== p.seat && this.kindsInGame.has('playerProtection') && p.battlefield.some((q) => q.card.effects.some((e) => e.kind === 'playerProtection'));
+  }
+
+  /**
+   * The color to give `perm` protection from (Mother of Runes): the color of a spell or ability aimed at it, else of
+   * the creatures it is fighting, else the color most common among its opponents' permanents.
+   */
+  threatColor(perm: Perm): Color {
+    const count = new Map<Color, number>();
+    const add = (card: SimCard, w: number) => { for (const c of cardColors(card)) count.set(c, (count.get(c) ?? 0) + w); };
+    for (const item of this.stack) if (item.controller !== perm.seat && item.targets.some((t) => t?.kind === 'perm' && t.id === perm.id)) add(item.card, 100);
+    for (const q of this.allPerms()) {
+      if (q.seat === perm.seat) continue;
+      if (q.blocking === perm.id || perm.blocking === q.id) add(q.card, 20);
+      else if (q.card.isCreature) add(q.card, 2);
+      else add(q.card, 1);
+    }
+    let best: Color = 'B';
+    let most = 0;
+    for (const [c, k] of count) if (k > most) [best, most] = [c, k];
+    return best;
+  }
+
+  /** Choose or check targets as `card` (a spell, or an ability when `ability`) controlled by `seat`. */
+  private aimAs<T>(card: SimCard, seat: number, ability: boolean, f: () => T): T {
+    const before = this.aim;
+    this.aim = { card, seat, ability };
+    try {
+      return f();
+    } finally {
+      this.aim = before;
+    }
   }
 
   private wardCost(by: PlayerState, t: Target | null): number {
@@ -2213,6 +2311,14 @@ export class Game {
       case 'goad':
         if (e.all) return null;
         return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'suspect':
+        // The bot suspects an opponent's creature: it can't block and gets goaded along with the rest.
+        return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && !q.suspected && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'pacify':
+        // Any creature: an opponent's attacker on their turn, or a blocker on ours.
+        return this.allPerms().filter((q) => q.seat !== p.seat && q.card.isCreature && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
+      case 'protectColor':
+        return p.battlefield.filter((q) => q.card.isCreature && q !== (e.toxic ? src : null) && this.canTarget(p, q)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'blink':
         return p.battlefield.filter((q) => q !== src && this.blinkable(p, q, e)).map((q) => ({ kind: 'perm', id: q.id }));
       case 'copySpell':
@@ -2433,7 +2539,7 @@ export class Game {
       if (!attachTo || !candidates.some((c) => sameTarget(c, attachTo!))) return false;
     }
     if (permanent && isAura(card)) {
-      const candidates = this.auraCandidates(p).filter(affordable);
+      const candidates = this.aimAs(card, p.seat, false, () => this.auraCandidates(p)).filter(affordable);
       if (!candidates.length) return false;
       attachTo = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: `Enchant which creature with ${card.name}?`, card, effect: null, candidates, cancellable: true });
       if (!attachTo || !candidates.some((c) => sameTarget(c, attachTo!))) return false;
@@ -2450,7 +2556,7 @@ export class Game {
     }
     const targets: (Target | null)[] = [];
     for (const e of effects) {
-      const all = this.targetCandidates(p, e, null);
+      const all = this.aimAs(card, p.seat, false, () => this.targetCandidates(p, e, null));
       if (all === null) {
         targets.push(null);
         continue;
@@ -2629,7 +2735,7 @@ export class Game {
 
     if (e.when === 'loyalty') {
       let aim: Target | null = null;
-      const options = this.targetCandidates(p, e, perm);
+      const options = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
       if (options !== null) {
         aim = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(perm.card, e), card: perm.card, effect: e, candidates: options, cancellable: true });
         if (!aim || !options.some((c) => sameTarget(c, aim!))) return false;
@@ -2644,7 +2750,7 @@ export class Game {
     const act = e.activation!;
     const discount = this.abilityDiscount(p, perm, e);
     let target: Target | null = null;
-    const all = this.targetCandidates(p, e, perm);
+    const all = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
     if (all !== null) {
       const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), discount, act.tap ? perm : undefined) !== null);
       if (!candidates.length) return false;
@@ -2815,7 +2921,7 @@ export class Game {
     const times = this.triggerTimes(p, 'permanentEnters', entering.card);
     for (const perm of p.battlefield) {
       if (perm === entering) continue;
-      const hits = perm.card.effects.filter((e) => e.when === 'creatureEnters' && !(e.nontoken && entering.token));
+      const hits = perm.card.effects.filter((e) => e.when === 'creatureEnters' && !(e.nontoken && entering.token) && (!e.ofType || this.isType(entering, e.ofType, perm)));
       if (!hits.length) continue;
       // Mana Echoes: "that share a creature type with it" is counted as the creature enters.
       const shared = hits.some((e) => e.kind === 'treasure' && e.shareType) ? this.sharingType(p, entering) : 0;
@@ -2837,7 +2943,7 @@ export class Game {
       const effects: Effect[] = [];
       const targets: (Target | null)[] = [];
       for (const e of t.effects) {
-        const all = this.targetCandidates(p, e, src);
+        const all = this.aimAs(t.card, p.seat, true, () => this.targetCandidates(p, e, src));
         if (all === null) {
           effects.push(e);
           targets.push(null);
@@ -2883,8 +2989,8 @@ export class Game {
     if (!p.alive) return;
 
     // A spell or ability whose targets are all illegal doesn't resolve (rule 608.2b).
-    const legal = item.targets.map((t, i) => (t ? this.targetStillLegal(p, item.effects[i], t) : true));
-    const attachLegal = item.attachTo ? this.targetStillLegal(p, null, item.attachTo) : true;
+    const legal = this.aimAs(item.card, p.seat, item.kind === 'ability', () => item.targets.map((t, i) => (t ? this.targetStillLegal(p, item.effects[i], t) : true)));
+    const attachLegal = item.attachTo ? this.aimAs(item.card, p.seat, item.kind === 'ability', () => this.targetStillLegal(p, null, item.attachTo!)) : true;
     const targeted = item.targets.some((t) => t !== null) || item.attachTo !== null;
     const anyLegal = item.targets.some((t, i) => t !== null && legal[i]) || (item.attachTo !== null && attachLegal);
     if (targeted && !anyLegal) {
@@ -3198,15 +3304,46 @@ export class Game {
     for (const e of [...card.effects, ...(card.levels ?? []).flatMap((l) => l.effects)]) {
       this.kindsInGame.add(e.kind);
       this.kindsInGame.add(`when:${e.when}`);
+      if (e.kind === 'pump' && e.grant?.some(isProtection)) this.kindsInGame.add('protection');
       if (e.kind === 'mana' && e.sacArtifact) this.kindsInGame.add('mana:sacArtifact');
     }
+    if (card.keywords.some(isProtection)) this.kindsInGame.add('protection');
     return {
       id: this.nextId++, card, seat: p.seat, tapped: false, sick: true, token, isCommander: false,
       counters: 0, damage: 0, deathtouched: false, tempP: 0, tempT: 0, tempKw: [],
       attachedTo: null, activations: 0, usedThisTurn: [], attacking: null, blocked: false, blocking: null,
       ...(card.loyalty !== undefined ? { loyalty: card.loyalty } : {}),
       ...(card.stun ? { stun: card.stun } : {}),
+      // "As ~ enters, choose a creature type": the type most of its controller's creatures share.
+      ...(card.choosesType ? { chosenType: this.favoriteType(p) } : {}),
     };
+  }
+
+  /** The creature type most common among `p`'s creature cards, for "choose a creature type". */
+  favoriteType(p: PlayerState): string {
+    const count = new Map<string, number>();
+    const seen = [...p.battlefield.map((q) => q.card), ...p.hand, ...p.library, ...p.graveyard, ...p.deck.commanders];
+    for (const c of seen) {
+      if (!c.isCreature) continue;
+      for (const t of subtypesOf(c)) count.set(t, (count.get(t) ?? 0) + 1);
+    }
+    let best = 'human';
+    let most = 0;
+    for (const [t, k] of count) if (k > most) [best, most] = [t, k];
+    return best;
+  }
+
+  /** Is `perm` a creature of this type? 'chosen' means `src`'s chosen type. Changeling, Maskwood Nexus and Leyline of Transformation count (rule 205.3). */
+  isType(perm: Perm, type: string, src?: Perm | null): boolean {
+    const want = type === 'chosen' ? src?.chosenType : type;
+    if (!want) return false;
+    // Outlaws are a group of types (rule 700.15).
+    if (want === 'outlaw') return ['assassin', 'mercenary', 'pirate', 'rogue', 'warlock'].some((t) => this.isType(perm, t));
+    if (hasSubtype(perm.card, want)) return true;
+    if (perm.card.isCreature && this.kindsInGame.has('creatureTypes')) {
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'creatureTypes' && (e.every || q.chosenType === want)) return true;
+    }
+    return false;
   }
 
   /** Put a permanent card onto the battlefield and note its enters triggers. */
@@ -3278,7 +3415,12 @@ export class Game {
     if (perm.printed && clone?.kind === 'clone' && clone.extraCounter && card.isCreature) perm.counters += doubled;
     if (card.isCreature && this.kindsInGame.has('enterCounters')) {
       const hurt = this.opponents(p).filter((o) => o.lostLifeTurn === this.turnNumber).length;
-      for (const q of p.battlefield) for (const e of q.card.effects) if (e.kind === 'enterCounters') perm.counters += e.n * hurt;
+      for (const q of p.battlefield) for (const e of q.card.effects) {
+        if (e.kind !== 'enterCounters') continue;
+        // Metallic Mimic: one extra counter on each other creature of the chosen type.
+        if (e.chosen) perm.counters += this.isType(perm, 'chosen', q) ? e.n : 0;
+        else perm.counters += e.n * hurt;
+      }
     }
     if (card.entersTapped || (clone?.kind === 'clone' && clone.tapped)) perm.tapped = true;
     p.battlefield.push(perm);
@@ -3428,7 +3570,7 @@ export class Game {
     for (let i = 0; i < orig.effects.length; i++) {
       const e = orig.effects[i];
       const old = orig.targets[i];
-      const all = old ? this.targetCandidates(p, e, src) : null;
+      const all = old ? this.aimAs(orig.card, p.seat, orig.kind === 'ability', () => this.targetCandidates(p, e, src)) : null;
       if (!old || !all || !all.length) {
         targets.push(old);
         continue;
@@ -3579,7 +3721,8 @@ export class Game {
             if (e.target === 'artifacts' && !perm.card.isArtifact) continue;
             if (perm.card.cmc > cap || (e.byEnergy && perm.card.isPlaneswalker && !perm.card.isCreature)) continue;
             if (e.mode === 'damage') {
-              if (perm.card.isCreature) this.hurt(perm, amount, e.shrink);
+              // Protection from the sweeper's color (or from everything) prevents its damage (rule 702.16e).
+              if (perm.card.isCreature && !(card && !e.shrink && this.protectedFromCard(perm, card, p.seat))) this.hurt(perm, amount, e.shrink);
             } else if (e.mode === 'exile' || e.mode === 'bounce' || !this.hasKw(perm, 'indestructible')) hit.push(perm);
           }
         }
@@ -3641,7 +3784,7 @@ export class Game {
           break;
         }
         for (let i = 0; i < count; i++) {
-          const token = this.makePerm(p, tokenCard(e.power, e.toughness, e.keywords), true);
+          const token = this.makePerm(p, tokenCard(e.power, e.toughness, e.keywords, e.subtypes), true);
           if (e.fragile) token.fragile = e.fragile;
           p.battlefield.push(token);
           this.creatureEntered(p, token);
@@ -4095,7 +4238,74 @@ export class Game {
         const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
         if (!perm) break;
         this.goad(perm, p);
-        this.say(`${perm.card.name} (${this.players[perm.seat].name}) is goaded.`);
+        if (e.tap) perm.tapped = true;
+        this.say(`${perm.card.name} (${this.players[perm.seat].name}) is ${e.tap ? 'tapped and ' : ''}goaded.`);
+        break;
+      }
+      case 'forceAttack':
+        this.attackOrders.push({ seat: p.seat, kind: 'force', amount: 0, until: e.until === 'turn' ? 'turn' : 'nextTurn', turn: this.turnNumber });
+        this.say(`Creatures ${p.name}'s opponents control must attack ${e.until === 'turn' ? 'this turn' : `until ${p.name}'s next turn`}.`);
+        break;
+      case 'tempAttackTax':
+        this.attackOrders.push({ seat: p.seat, kind: 'tax', amount: e.amount, until: 'nextTurn', turn: this.turnNumber });
+        this.say(`Until ${p.name}'s next turn, creatures pay ${e.amount} each to attack them.`);
+        break;
+      case 'pacify': {
+        const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (!perm) break;
+        if (e.attack) perm.tempKw.push("can't attack");
+        if (e.block) perm.tempKw.push("can't block");
+        this.say(`${perm.card.name} (${this.players[perm.seat].name}) can't ${e.attack && e.block ? 'attack or block' : e.attack ? 'attack' : 'block'} this turn.`);
+        break;
+      }
+      case 'suspect': {
+        const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (perm) {
+          perm.suspected = true;
+          this.say(`${perm.card.name} (${this.players[perm.seat].name}) is suspected.`);
+        }
+        if (e.thenGoad) for (const q of this.allPerms()) if (q.suspected && q.card.isCreature) this.goad(q, p);
+        break;
+      }
+      case 'returnBlocked': {
+        // Grazilaxx: the blocked creature goes back to hand, out of the fight (rule 506.4).
+        const perm = this.findPerm(this.resolving?.subject ?? null);
+        if (!perm || perm.seat !== p.seat || perm.attacking === null) break;
+        // "You may": only a nontoken creature the block would kill (a token returned to hand is gone).
+        const foes = this.blockersOf(perm);
+        const dies = foes.reduce((n, b) => n + this.power(b), 0) >= this.toughness(perm) - perm.damage || foes.some((b) => this.hasKw(b, 'deathtouch'));
+        if (perm.token || !dies || this.hasKw(perm, 'indestructible')) break;
+        this.say(`${perm.card.name} is blocked and returns to ${this.players[perm.owner ?? perm.seat].name}'s hand.`);
+        for (const b of this.blockersOf(perm)) b.blocking = null;
+        this.removePerm(perm, 'hand');
+        break;
+      }
+      case 'punishDefender': {
+        const attacker = this.findPerm(this.resolving?.subject ?? null) ?? src;
+        const seat = attacker?.attacking;
+        if (!attacker || seat === null || seat === undefined) break;
+        const defender = this.players[seat];
+        if (!defender.alive) break;
+        if (e.what === 'graveyard') {
+          const lost = this.loseLife(defender, e.n * defender.graveyard.length, p, 'noncombat');
+          this.say(`${defender.name} loses ${lost} life (${defender.graveyard.length} cards in their graveyard).`);
+        } else {
+          // Dauthi Mindripper: sacrifice it, and they discard.
+          if (!p.battlefield.includes(attacker)) break;
+          this.removePerm(attacker, 'graveyard');
+          this.sacrificed(p);
+          this.say(`${p.name} sacrifices ${attacker.card.name}.`);
+          yield* this.resolveEffect(p, { kind: 'discard', n: e.n, who: 'target', when: 'resolve' } as Effect, src, x, { kind: 'player', seat }, card);
+        }
+        break;
+      }
+      case 'protectColor': {
+        const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
+        if (!perm) break;
+        const color = this.threatColor(perm);
+        perm.tempKw.push(`pro:${color}`);
+        this.kindsInGame.add('protection');
+        this.say(`${perm.card.name} gains protection from ${({ W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' } as Record<string, string>)[color]} until end of turn.`);
         break;
       }
       case 'blink': {
@@ -4892,7 +5102,7 @@ export class Game {
     let t = 0;
     for (const perm of this.players[target.seat].battlefield) {
       for (const e of perm.card.effects) {
-        if (e.kind === 'anthem' && this.anthemApplies(e, target) && !(e.other && perm === target) && this.chargeOn(perm, e)) {
+        if (e.kind === 'anthem' && this.anthemApplies(e, target, perm) && !(e.other && perm === target) && this.chargeOn(perm, e)) {
           const times = e.perCharge ? perm.charge ?? 0 : 1;
           p += e.p * times;
           t += e.t * times;
@@ -4913,7 +5123,9 @@ export class Game {
   }
 
   /** Anthems limited to some creatures: enchantment or artifact creatures, or ones you control but don't own. */
-  private anthemApplies(e: Extract<Effect, { kind: 'anthem' }>, perm: Perm): boolean {
+  private anthemApplies(e: Extract<Effect, { kind: 'anthem' }>, perm: Perm, src?: Perm): boolean {
+    // "Other Elves you control get +1/+1", "creatures you control of the chosen type".
+    if (e.subtype && !this.isType(perm, e.subtype, src)) return false;
     switch (e.only) {
       case 'enchantment': return perm.card.isEnchantment;
       case 'artifact': return perm.card.isArtifact;
@@ -5000,6 +5212,8 @@ export class Game {
 
   hasKw(perm: Perm, kw: string): boolean {
     if (perm.card.keywords.includes(kw) || perm.tempKw.includes(kw) || perm.kwCounters?.includes(kw)) return true;
+    // A suspected creature has menace and can't block (rule 701.60c).
+    if (perm.suspected && (kw === 'menace' || kw === "can't block")) return true;
     if (this.kindsInGame.has('selfKeyword')) {
       for (const e of perm.card.effects) {
         if (e.kind !== 'selfKeyword' || e.keyword !== kw) continue;
@@ -5009,7 +5223,7 @@ export class Game {
     }
     if (!perm.card.isCreature) return false;
     if (this.kindsInGame.has('anthem')) {
-      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && this.anthemApplies(e, perm) && !(e.other && q === perm) && this.chargeOn(q, e) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
+      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && this.anthemApplies(e, perm, q) && !(e.other && q === perm) && this.chargeOn(q, e) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
     }
     for (const eq of this.attachments(perm)) {
       for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
@@ -5112,7 +5326,7 @@ export class Game {
         // "Whenever a creature you control dies" watches your own; "whenever a creature dies" watches everyone's.
         // A creature sees its own death only for "this creature or another" and "a creature you control".
         const hits = w.card.effects.filter((e) => e.when === 'creatureDies' && e.scope !== 'self' && e.scope !== 'attached'
-          && (q === controller ? e.scope !== 'opponents' : e.scope === 'all' || e.scope === 'opponents') && (w !== perm || e.selfToo) && !(e.nontoken && perm.token));
+          && (q === controller ? e.scope !== 'opponents' : e.scope === 'all' || e.scope === 'opponents') && (w !== perm || e.selfToo) && !(e.nontoken && perm.token) && (!e.ofType || this.isType(perm, e.ofType, w)));
         if (hits.length) for (let i = this.triggerTimes(q, 'dies'); i > 0; i--) this.trigger(q, w.card, w.id, hits, 0, w, undefined, aboutDead(perm));
       }
       if (perm.bounty) this.bountyPaid(perm, controller);
@@ -5741,11 +5955,84 @@ export class Game {
   // Combat (rules 506–511)
   // -------------------------------------------------------------------------
 
-  /** Mana each creature's controller must pay to attack `defender` (Propaganda, Ghostly Prison). */
-  attackTax(defender: PlayerState): number {
+  /**
+   * Mana each creature's controller must pay to attack `defender` (Propaganda, Ghostly Prison, Summon: Yojimbo).
+   * With `attacker`: also what that creature pays for its counters (Nils, Discipline Enforcer).
+   */
+  attackTax(defender: PlayerState, attacker?: Perm): number {
     let tax = 0;
-    for (const perm of defender.battlefield) for (const e of perm.card.effects) if (e.kind === 'attackTax') tax += e.amount;
+    for (const perm of defender.battlefield) for (const e of perm.card.effects) {
+      if (e.kind !== 'attackTax') continue;
+      if (!e.perCounter) tax += e.amount;
+      else if (attacker) tax += e.amount * this.counterCount(attacker);
+    }
+    for (const o of this.attackOrders) if (o.kind === 'tax' && o.seat === defender.seat) tax += o.amount;
     return tax;
+  }
+
+  /** Every counter on a permanent, of any kind (Nils). */
+  private counterCount(perm: Perm): number {
+    return Math.abs(perm.counters) + (perm.charge ?? 0) + (perm.stun ?? 0) + (perm.kwCounters?.length ?? 0) + (perm.bounty ? 1 : 0) + (perm.loyalty ?? 0) + (perm.lore ?? 0) + (perm.age ?? 0) + (perm.hours ?? 0);
+  }
+
+  /** Static attack and block rules on the battlefield, with the permanent each comes from. */
+  private combatRules(): { e: Extract<Effect, { kind: 'combatRule' }>; src: Perm }[] {
+    if (!this.kindsInGame.has('combatRule')) return [];
+    const out: { e: Extract<Effect, { kind: 'combatRule' }>; src: Perm }[] = [];
+    for (const src of this.allPerms()) for (const e of src.card.effects) if (e.kind === 'combatRule') out.push({ e, src });
+    return out;
+  }
+
+  /** Does a combat rule from `src` cover creature `perm`? */
+  private ruleCovers(e: Extract<Effect, { kind: 'combatRule' }>, src: Perm, perm: Perm): boolean {
+    switch (e.who) {
+      case 'self': if (perm !== src) return false; break;
+      case 'attached': if (src.attachedTo !== perm.id) return false; break;
+      case 'opponents': if (perm.seat === src.seat) return false; break;
+      default: break;
+    }
+    const f = e.filter;
+    if (f) {
+      if (f.goaded && !this.goaders(perm).length) return false;
+      if (f.evenMv && perm.card.cmc % 2 !== 0) return false;
+      if (f.maxPower !== undefined && this.power(perm) > f.maxPower) return false;
+      if (f.subtype && !this.isType(perm, f.subtype)) return false;
+      if (f.name && perm.card.name.toLowerCase() !== f.name) return false;
+      if (f.minusCounters && perm.counters >= 0) return false;
+      if (f.weaker && !(this.power(perm) < this.power(src))) return false;
+    }
+    if (e.unlessCreatures !== undefined && this.players[src.seat].battlefield.filter((q) => q !== src && q.card.isCreature).length >= e.unlessCreatures) return false;
+    if (e.extraTurns && !this.extraTurnNow) return false;
+    return true;
+  }
+
+  /** Must `perm` attack this combat if able? Goad, "attacks each combat if able", Bident of Thassa (rule 508.1d). */
+  mustAttack(perm: Perm): boolean {
+    if (this.goaders(perm).length) return true;
+    // Xantcha, given away: attacks each combat if able.
+    if (perm.neverAttacks !== undefined) return true;
+    if (this.attackOrders.some((o) => o.kind === 'force' && o.seat !== perm.seat)) return true;
+    return this.combatRules().some(({ e, src }) => e.rule === 'mustAttack' && this.ruleCovers(e, src, perm));
+  }
+
+  /** May `perm` attack the player in `seat` at all? "Can't attack", "can't attack you", "can't attack its owner" (rule 508.1c). */
+  canAttack(perm: Perm, seat: number): boolean {
+    if (this.hasKw(perm, "can't attack")) return false;
+    if (perm.neverAttacks === seat) return false;
+    for (const { e, src } of this.combatRules()) {
+      if (e.rule === 'cantAttack' && this.ruleCovers(e, src, perm)) return false;
+      if (e.rule === 'cantAttackYou' && src.seat === seat && this.ruleCovers(e, src, perm)) return false;
+      if (e.rule === 'cantAttackOwner' && (perm.owner ?? perm.seat) === seat && this.ruleCovers(e, src, perm)) return false;
+    }
+    // Absolute Virtue's controller can be attacked, but nothing gets through, so a bot never needs to: left to the bot.
+    return true;
+  }
+
+  /** Crawlspace: how many creatures can attack the player in `seat` this combat (Infinity: no limit). */
+  attackLimit(seat: number): number {
+    let limit = Infinity;
+    for (const { e, src } of this.combatRules()) if (e.rule === 'maxAttackers' && src.seat === seat) limit = Math.min(limit, e.n ?? 2);
+    return limit;
   }
 
   /** Creatures `p` could declare as attackers (rule 508.1a). */
@@ -5759,18 +6046,22 @@ export class Game {
     if (this.hasKw(attacker, 'unblockable')) return false;
     if (this.hasKw(attacker, 'flying') && !this.hasKw(blocker, 'flying') && !this.hasKw(blocker, 'reach')) return false;
     if (this.hasKw(blocker, "can't block")) return false;
+    // "Goaded creatures your opponents control can't block", Void Winnower, Champion of Lambholt, Oketra (rule 509.1b).
+    for (const { e, src } of this.combatRules()) if (e.rule === 'cantBlock' && this.ruleCovers(e, src, blocker) && (!e.vsYours || attacker.seat === src.seat)) return false;
     // Shadow blocks and is blocked only by shadow (702.28b). Fear: only artifact or black creatures block it (702.36b).
     if (this.hasKw(attacker, 'shadow') !== this.hasKw(blocker, 'shadow')) return false;
     if (this.hasKw(attacker, 'fear') && !blocker.card.isArtifact && !blocker.card.cost.pips.some((pip) => pip.includes('B'))) return false;
     // The Ring, first ability: the ring-bearer can't be blocked by creatures with greater power.
     if (this.ringLevel(attacker) >= 1 && this.power(blocker) > this.power(attacker)) return false;
     // Lord of the Nazgûl: Wraiths have protection from ring-bearers, so a ring-bearer can't block them (rule 702.16e).
+    // Protection from a color, from creatures, from Humans ...: can't be blocked by creatures with that quality.
     if (this.protectedFrom(attacker, blocker)) return false;
     return true;
   }
 
-  /** Does `perm` have protection from `source`? Only Lord of the Nazgûl's "protection from ring-bearers" so far. */
+  /** Does `perm` have protection from the permanent `source`? (rule 702.16) */
   protectedFrom(perm: Perm, source: Perm): boolean {
+    if (this.protectedFromCard(perm, source.card, source.seat)) return true;
     if (!this.kindsInGame.has('ringProtection') || this.players[source.seat].ringBearer !== source.id) return false;
     return this.players[perm.seat].battlefield.some((q) => q.card.effects.some((e) => e.kind === 'ringProtection' && e.when === 'static' && hasSubtype(perm.card, e.subtype)));
   }
@@ -5798,61 +6089,80 @@ export class Game {
 
     // Declare attackers (508). Each creature may attack a different opponent (rule 802.2a).
     this.step = 'declareAttackers';
-    const candidates = this.attackCandidates(p);
     const defenders = this.opponents(p).map((o) => o.seat);
+    const candidates = this.attackCandidates(p).filter((c) => defenders.some((d) => this.canAttack(c, d)));
     if (!candidates.length || !defenders.length) return;
-    // Goaded creatures must attack, and must attack someone other than whoever goaded them if they can (rule 701.15b).
+    // Creatures that must attack (goad, "attacks each combat if able", Bident of Thassa), and the players each may attack.
+    // Goaded ones attack someone other than whoever goaded them if they can (rule 701.15b).
     // Paying a cost to attack is never required (rule 508.1d), so players with an attack tax don't count.
     const goaded: { attacker: number; defenders: number[] }[] = [];
     for (const c of candidates) {
-      // Xantcha: attacks each combat if able, but never its owner.
-      if (c.neverAttacks !== undefined) {
-        const allowed = defenders.filter((d) => d !== c.neverAttacks && this.attackTax(this.players[d]) === 0);
-        if (allowed.length) goaded.push({ attacker: c.id, defenders: allowed });
-        continue;
-      }
+      if (!this.mustAttack(c)) continue;
       const by = this.goaders(c);
-      if (!by.length) continue;
-      const free = defenders.filter((d) => this.attackTax(this.players[d]) === 0);
+      const free = defenders.filter((d) => this.canAttack(c, d) && this.attackTax(this.players[d], c) === 0);
       const others = free.filter((d) => !by.includes(d));
       const allowed = others.length ? others : free;
       if (allowed.length) goaded.push({ attacker: c.id, defenders: allowed });
     }
     const declared = yield* ask<AttackDeclaration[] | null>({ kind: 'attackers', seat: p.seat, candidates: candidates.map((c) => c.id), defenders, ...(goaded.length ? { goaded } : {}) });
     const attacking: Perm[] = [];
+    // Crawlspace: no more than so many creatures can attack a player each combat (rule 508.1c).
+    const room = (seat: number) => this.attackLimit(seat) - attacking.filter((a) => a.attacking === seat).length;
+    const declare = (perm: Perm, seat: number) => {
+      perm.attacking = seat;
+      perm.attackedTurn = this.turnNumber;
+      if (!this.hasKw(perm, 'vigilance')) perm.tapped = true;
+      attacking.push(perm);
+    };
     for (const d of Array.isArray(declared) ? declared : []) {
       const perm = candidates.find((c) => c.id === d?.attacker);
       if (!perm || perm.attacking !== null || !defenders.includes(d.defender)) continue;
+      const must = goaded.find((gd) => gd.attacker === perm.id);
+      const seat = must && !must.defenders.includes(d.defender) ? must.defenders[0] : d.defender;
+      if (!this.canAttack(perm, seat) || room(seat) <= 0) continue;
       // Propaganda: pay for each creature attacking that player, or it stays home (rule 508.1h).
-      const tax = this.attackTax(this.players[d.defender]);
+      const tax = this.attackTax(this.players[seat], perm);
       if (tax > 0) {
         const plan = this.planPayment(p, NO_COST, tax, 0, perm);
         if (!plan) continue;
         this.commitPayment(p, plan);
-        this.say(`${p.name} pays ${tax} for ${perm.card.name} to attack ${this.players[d.defender].name}.`);
+        this.say(`${p.name} pays ${tax} for ${perm.card.name} to attack ${this.players[seat].name}.`);
       }
-      const must = goaded.find((gd) => gd.attacker === perm.id);
-      if (perm.neverAttacks === d.defender && !must) continue;
-      perm.attacking = must && !must.defenders.includes(d.defender) ? must.defenders[0] : d.defender;
-      perm.attackedTurn = this.turnNumber;
-      if (!this.hasKw(perm, 'vigilance')) perm.tapped = true;
-      attacking.push(perm);
+      declare(perm, seat);
     }
     for (const must of goaded) {
       const perm = candidates.find((c) => c.id === must.attacker);
       if (!perm || perm.attacking !== null) continue;
       // Left out: it attacks the most vulnerable player it may attack.
-      perm.attacking = must.defenders.reduce((a, b) => (this.players[b].life < this.players[a].life ? b : a));
-      perm.attackedTurn = this.turnNumber;
-      if (!this.hasKw(perm, 'vigilance')) perm.tapped = true;
-      attacking.push(perm);
-      this.say(`${perm.card.name} is goaded and must attack.`);
+      const open = must.defenders.filter((d) => room(d) > 0);
+      if (!open.length) continue;
+      declare(perm, open.reduce((a, b) => (this.players[b].life < this.players[a].life ? b : a)));
+      this.say(`${perm.card.name} ${perm.goadedBy?.length ? 'is goaded and ' : ''}must attack.`);
+    }
+    // War's Toll: once one of this player's creatures attacks, all of them attack if able.
+    if (attacking.length && this.combatRules().some(({ e, src }) => e.rule === 'allAttack' && src.seat !== p.seat)) {
+      const rest = candidates.filter((c) => c.attacking === null);
+      for (const perm of rest) {
+        const open = defenders.filter((d) => this.canAttack(perm, d) && this.attackTax(this.players[d], perm) === 0 && room(d) > 0);
+        if (open.length) declare(perm, open.reduce((a, b) => (this.players[b].life < this.players[a].life ? b : a)));
+      }
+      if (rest.some((c) => c.attacking !== null)) this.say(`War's Toll: all of ${p.name}'s creatures that can attack do.`);
     }
     // No attackers: skip straight to the end of combat (rule 508.8).
     if (!attacking.length) return;
     for (const seat of defenders) {
       const group = attacking.filter((a) => a.attacking === seat);
       if (group.length) this.say(`${p.name} attacks ${this.players[seat].name} with ${group.map((a) => `${a.card.name} ${this.power(a)}/${this.toughness(a)}`).join(', ')}.`);
+    }
+    // Vengeful Ancestor: each goaded creature that attacks deals damage to its controller.
+    if (this.kindsInGame.has('goadPunish')) {
+      for (const src of this.allPerms()) for (const e of src.card.effects) {
+        if (e.kind !== 'goadPunish') continue;
+        const hit = attacking.filter((a) => this.goaders(a).length > 0);
+        if (!hit.length) continue;
+        this.loseLife(p, e.n * hit.length, this.players[src.seat], 'noncombat');
+        this.say(`${hit.map((a) => a.card.name).join(', ')} ${hit.length > 1 ? 'are' : 'is'} goaded and deal${hit.length > 1 ? '' : 's'} ${e.n * hit.length} damage to ${p.name} (${src.card.name}).`);
+      }
     }
     // Curses on the players being attacked (Curse of Opulence and friends).
     if (this.anyCurse) for (const seat of defenders) if (attacking.some((a) => a.attacking === seat)) this.curseEvent(this.players[seat], 'attacked', undefined, p);
@@ -5911,6 +6221,18 @@ export class Game {
         attacker.blocked = true;
       }
       if (byAttacker.size) this.say(`${d.name} blocks: ${[...byAttacker].map(([a, bs]) => `${bs.map((b) => b.card.name).join(' + ')} blocks ${a.card.name}`).join(', ')}.`);
+    }
+    // "Whenever ~ becomes blocked" and "whenever ~ attacks and isn't blocked" (rule 509.1h, 509.5).
+    if (this.kindsInGame.has('when:blocked') || this.kindsInGame.has('when:unblocked')) {
+      for (const a of this.attackers()) {
+        const own = a.card.effects.filter((e) => (a.blocked ? e.when === 'blocked' : e.when === 'unblocked') && e.scope === 'self');
+        if (own.length) this.trigger(p, a.card, a.id, own, 0, null, a.id);
+        if (!a.blocked) continue;
+        for (const perm of p.battlefield) {
+          const hits = perm.card.effects.filter((e) => e.when === 'blocked' && e.scope === 'any');
+          if (hits.length) this.trigger(p, perm.card, perm.id, hits, 0, null, a.id);
+        }
+      }
     }
     yield* this.priority();
     if (this.stopped(p)) return;
@@ -6021,13 +6343,19 @@ export class Game {
       }
     }
 
+    // Protection prevents damage from sources with its quality (rule 702.16e); Absolute Virtue's controller takes none from opponents.
+    for (let i = toPerm.length - 1; i >= 0; i--) if (this.protectedFrom(toPerm[i].to, toPerm[i].from)) toPerm.splice(i, 1);
+    for (let i = toPlayer.length - 1; i >= 0; i--) {
+      if (!this.playerProtectedFrom(toPlayer[i].to, toPlayer[i].from.seat)) continue;
+      this.say(`${toPlayer[i].to.name} has protection from ${this.players[toPlayer[i].from.seat].name}: ${toPlayer[i].from.card.name}'s damage is prevented.`);
+      toPlayer.splice(i, 1);
+    }
     const hitPlayer = new Set<Perm>();
     const before = new Map<PlayerState, number>();
     // Lifelink: all the damage one creature deals in a step is one life gain event; separate creatures are separate events (rule 702.15e).
     const linked = new Map<Perm, number>();
     for (const d of [...toPerm, ...toPlayer]) if (this.hasKw(d.from, 'lifelink')) linked.set(d.from, (linked.get(d.from) ?? 0) + d.amount);
     for (const d of toPerm) {
-      if (this.protectedFrom(d.to, d.from)) continue;
       // Wither and infect: damage to creatures as -1/-1 counters (rules 702.80, 702.90).
       if (this.hasKw(d.from, 'wither') || this.hasKw(d.from, 'infect')) d.to.counters -= d.amount;
       else d.to.damage += d.amount;
@@ -6487,8 +6815,28 @@ export function pitchable(card: SimCard, color: Color): boolean {
   return card.cost.pips.some((pip) => pip.includes(color));
 }
 
+const subtypeCache = new Map<string, boolean>();
 export function hasSubtype(card: SimCard, subtype: string): boolean {
-  return card.keywords.includes('changeling') || new RegExp(`—.*\\b${subtype}\\b`).test(card.typeLine);
+  if (card.keywords.includes('changeling')) return true;
+  const key = `${card.typeLine}|${subtype}`;
+  let hit = subtypeCache.get(key);
+  if (hit === undefined) {
+    hit = new RegExp(`—.*\\b${subtype}\\b`, 'i').test(card.typeLine);
+    if (subtypeCache.size > 20000) subtypeCache.clear();
+    subtypeCache.set(key, hit);
+  }
+  return hit;
+}
+
+/** The creature types on a card's type line, lowercased. */
+export function subtypesOf(card: SimCard): string[] {
+  const after = card.typeLine.split(' — ')[1];
+  return after ? after.toLowerCase().split(/\s+/).filter(Boolean) : [];
+}
+
+/** A protection or "hexproof from" keyword (see classifyCombat.ts). */
+export function isProtection(kw: string): boolean {
+  return kw.startsWith('pro:') || kw.startsWith('hexfrom:');
 }
 
 export function isAura(card: SimCard): boolean {
@@ -6602,15 +6950,16 @@ function armyCard(): SimCard {
   return (army ??= { ...tokenCard(0, 0, []), name: 'Army token', typeLine: 'Token Creature — Army' });
 }
 
-function tokenCard(power: number, toughness: number, keywords: string[]): SimCard {
-  const key = `${power}/${toughness}/${keywords.join(',')}`;
+function tokenCard(power: number, toughness: number, keywords: string[], subtypes: string[] = []): SimCard {
+  const key = `${power}/${toughness}/${keywords.join(',')}/${subtypes.join(' ')}`;
   let card = tokenCache.get(key);
   if (!card) {
+    const types = subtypes.map((t) => t[0].toUpperCase() + t.slice(1)).join(' ');
     card = {
-      name: `${power}/${toughness} token`,
+      name: `${power}/${toughness}${types ? ` ${types}` : ''} token`,
       cost: { generic: 0, pips: [], x: 0, life: 0 },
       cmc: 0,
-      typeLine: 'Token Creature',
+      typeLine: `Token Creature${types ? ` — ${types}` : ''}`,
       isLand: false, isCreature: true, isArtifact: false, isEnchantment: false, isPlaneswalker: false,
       isInstant: false, isSorcery: false, isLegendary: false, isBasic: false,
       power, toughness, keywords, effects: [],
