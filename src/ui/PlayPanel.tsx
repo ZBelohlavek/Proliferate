@@ -13,10 +13,13 @@ import { Session } from '../rules/session';
 import { STEP_NAMES, type Action, type Decision, type Perm, type PlayerState, type Target } from '../rules/types';
 import { CardFace, usePreview } from './BoardView';
 import { commanderNames } from './format';
+import { cardKey, loadFxLevel, saveFxLevel, useTableFx, type FxLevel } from './tableFx';
 
 type Bind = (url: string | null) => object;
 type Speed = 'instant' | 'fast' | 'slow';
 const DELAY: Record<Speed, number> = { instant: 0, fast: 300, slow: 900 };
+/** The longest the bots wait for an animation to finish before their next play. */
+const MAX_HOLD: Record<Speed, number> = { instant: 0, fast: 900, slow: 1600 };
 const ME = 0;
 
 interface Setup {
@@ -32,9 +35,14 @@ export function PlayPanel({ decks }: { decks: SimDeck[] }) {
   const [, redraw] = useReducer((x: number) => x + 1, 0);
   const [setup, setSetup] = useState<Setup>(() => current?.setup ?? { deckId: decks[0]?.id ?? '', opponents: ['', '', ''] });
   const [speed, setSpeed] = useState<Speed>('fast');
+  const [fx, setFx] = useState<FxLevel>(loadFxLevel);
   const session = current?.session ?? null;
+  /** When (performance.now) the animations on screen finish. */
+  const fxUntil = useRef(0);
+  const lastStep = useRef(0);
 
   // Let the bots play, one logged event at a time so the game can be followed.
+  // Each play waits for the animations of the last one, up to a limit.
   useEffect(() => {
     if (!session || !session.busy) return;
     if (speed === 'instant') {
@@ -42,10 +50,14 @@ export function PlayPanel({ decks }: { decks: SimDeck[] }) {
       redraw();
       return;
     }
+    const now = performance.now();
+    const hold = Math.min(MAX_HOLD[speed], Math.max(0, fxUntil.current - lastStep.current));
+    const wait = Math.max(0, lastStep.current + Math.max(DELAY[speed], hold) - now);
     const timer = setTimeout(() => {
+      lastStep.current = performance.now();
       session.step();
       redraw();
-    }, DELAY[speed]);
+    }, wait);
     return () => clearTimeout(timer);
   });
 
@@ -71,6 +83,12 @@ export function PlayPanel({ decks }: { decks: SimDeck[] }) {
       session={session}
       speed={speed}
       onSpeed={setSpeed}
+      fx={fx}
+      onFx={(level) => {
+        saveFxLevel(level);
+        setFx(level);
+      }}
+      fxUntil={fxUntil}
       redraw={redraw}
       onRestart={() => start(current!.setup)}
       onQuit={() => {
@@ -137,16 +155,24 @@ interface TableProps {
   session: Session;
   speed: Speed;
   onSpeed: (s: Speed) => void;
+  fx: FxLevel;
+  onFx: (level: FxLevel) => void;
+  fxUntil: React.RefObject<number>;
   redraw: () => void;
   onRestart: () => void;
   onQuit: () => void;
 }
 
-function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProps) {
+function Table({ session, speed, onSpeed, fx, onFx, fxUntil, redraw, onRestart, onQuit }: TableProps) {
   const g = session.game;
   const d = session.pending;
   const me = g.players[ME];
   const { bind, view } = usePreview();
+
+  // Animations: compare the table with the last render that changed the game.
+  const tableRef = useRef<HTMLDivElement>(null);
+  const signature = `${g.log!.length}|${g.stack.length}|${g.step}|${g.activeSeat}|${d ? 'd' : ''}|${session.result ? 'r' : ''}`;
+  useTableFx(tableRef, g, signature, { level: fx, me: ME, names: g.players.map((p) => (p.seat === ME ? 'You' : shortName(p))) }, fxUntil);
 
   // Selections in progress for the current decision.
   const [attacks, setAttacks] = useState<Map<number, number>>(new Map());
@@ -259,14 +285,23 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const active = g.players[g.activeSeat];
 
   return (
-    <div className="play">
+    <div className={`play fx-${fx}`} ref={tableRef}>
       {view}
       <section className="panel play-bar">
-        <div>
+        <div className="play-bar-turn">
           <strong>Round {Math.max(1, g.round)}</strong>
-          <span className="muted"> · {active.seat === ME ? 'Your turn' : `${shortName(active)}'s turn`} · {STEP_NAMES[g.step]}</span>
+          <span className="muted"> · {active.seat === ME ? 'Your turn' : `${shortName(active)}'s turn`}</span>
+          <PhaseTrack step={g.step} mine={active.seat === ME} />
         </div>
         <div className="play-bar-controls">
+          <label className="small muted" title="Card motion and effects. Quick keeps them short; Off shows each change at once.">
+            Animations{' '}
+            <select value={fx} onChange={(e) => onFx(e.target.value as FxLevel)}>
+              <option value="full">Full</option>
+              <option value="quick">Quick</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
           <label className="small muted" title="How quickly the bots' plays are shown.">
             Bot speed{' '}
             <select value={speed} onChange={(e) => onSpeed(e.target.value as Speed)}>
@@ -300,7 +335,9 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
                   const hit = d?.kind === 'target' && isTarget({ kind: 'stack', id: item.id });
                   const aimed = [item.attachTo, ...item.targets].filter((t): t is Target => !!t);
                   return (
-                    <li key={item.id} className={hit ? 'target' : ''} onClick={hit ? () => answer({ kind: 'stack', id: item.id }) : undefined} {...bind(item.card.imageUrl ?? null)}>
+                    <li key={item.id} className={`${hit ? 'target' : ''} ${item.kind}`} onClick={hit ? () => answer({ kind: 'stack', id: item.id }) : undefined} {...bind(item.card.imageUrl ?? null)}
+                      data-fx={`stack:${item.id}`} data-fx-card={cardKey(item.card)} data-fx-name={item.card.name} data-fx-img={item.card.imageUrl ?? ''}>
+                      <span className="stack-thumb"><CardFace name={item.card.name} imageUrl={item.card.imageUrl ?? null} pt={null} /></span>
                       <strong>{item.label}</strong>
                       <span className="muted"> — {shortName(g.players[item.controller])}{aimed.length ? ` → ${aimed.map((t) => g.describeTarget(t)).join(', ')}` : ''}</span>
                     </li>
@@ -334,9 +371,9 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
             </div>
             <div className="card-row">
               {me.hand.length === 0 && <span className="muted small">No cards in hand</span>}
-              {me.hand.map((card, i) => {
+              {handKeys(me.hand).map(({ card, key }) => {
                 const s = cardState(card, 'hand');
-                return <HandCard key={i} card={card} cls={s.cls} onClick={s.onClick} bind={bind} />;
+                return <HandCard key={key} fxKey={key} card={card} cls={s.cls} onClick={s.onClick} bind={bind} />;
               })}
             </div>
           </div>
@@ -351,6 +388,34 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
           </ol>
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** The turn's steps as a row of pips, the current one lit. */
+const PHASES: { label: string; steps: string[] }[] = [
+  { label: 'Beginning', steps: ['untap', 'upkeep', 'draw'] },
+  { label: 'Main', steps: ['main1'] },
+  { label: 'Combat', steps: ['beginCombat', 'declareAttackers', 'declareBlockers', 'combatDamage', 'endCombat'] },
+  { label: 'Main 2', steps: ['main2'] },
+  { label: 'End', steps: ['end', 'cleanup'] },
+];
+
+function PhaseTrack({ step, mine }: { step: string; mine: boolean }) {
+  return (
+    <div className={`phase-track ${mine ? 'mine' : ''}`} title={STEP_NAMES[step as keyof typeof STEP_NAMES]}>
+      {PHASES.map((ph) => {
+        const at = ph.steps.indexOf(step);
+        return (
+          <span key={ph.label} className={`phase ${at >= 0 ? 'on' : ''}`}>
+            {ph.label}
+            {ph.steps.length > 1 && (
+              <span className="phase-dots">{ph.steps.map((s, i) => <i key={s} className={i === at ? 'on' : i < at ? 'past' : ''} />)}</span>
+            )}
+          </span>
+        );
+      })}
+      <span className="phase-step">{STEP_NAMES[step as keyof typeof STEP_NAMES]}</span>
     </div>
   );
 }
@@ -675,7 +740,7 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
   const active = g.activeSeat === p.seat && !g.over;
 
   return (
-    <div className={`mat ${me ? 'you' : ''} ${active ? 'active' : ''} ${p.alive ? '' : 'out'} ${target ? 'focus' : ''}`}>
+    <div className={`mat ${me ? 'you' : ''} ${active ? 'active' : ''} ${p.alive ? '' : 'out'} ${target ? 'focus' : ''}`} data-fx={`mat:${p.seat}`}>
       <div className="mat-head">
         <div>
           <strong>{me ? 'You' : shortName(p)}</strong>{active && <span className="turn-chip">turn</span>}
@@ -683,18 +748,18 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
         </div>
         <div className="mat-head-right">
           {target && <button className="primary" onClick={target}>Target</button>}
-          <div className="mat-life" title="Life total">{p.alive ? p.life : '✕'}</div>
+          <div className="mat-life" title="Life total" data-fx={`life:${p.seat}`}>{p.alive ? p.life : '✕'}</div>
         </div>
       </div>
       {!p.alive ? <div className="muted small empty-board">Eliminated</div> : (
         <>
           <div className="mat-meta small muted">
-            <span title="Cards in hand">✋ {p.hand.length}</span>
-            <span title="Cards in library">📚 {p.library.length}</span>
-            <span title={`Graveyard: ${p.graveyard.map((c) => c.name).join(', ') || 'empty'}`}>🪦 {p.graveyard.length}</span>
-            {p.exile.length > 0 && <span title={`Exile: ${p.exile.map((c) => c.name).join(', ')}`}>⛔ {p.exile.length}</span>}
+            <span title="Cards in hand" data-fx={`handc:${p.seat}`}>✋ {p.hand.length}</span>
+            <span title="Cards in library" data-fx={`lib:${p.seat}`}>📚 {p.library.length}</span>
+            <span title={`Graveyard: ${p.graveyard.map((c) => c.name).join(', ') || 'empty'}`} data-fx={`gy:${p.seat}`}>🪦 {p.graveyard.length}</span>
+            {p.exile.length > 0 && <span title={`Exile: ${p.exile.map((c) => c.name).join(', ')}`} data-fx={`ex:${p.seat}`}>⛔ {p.exile.length}</span>}
             {p.treasures > 0 && <span title="Treasure tokens">💰 {p.treasures}</span>}
-            {p.poison > 0 && <span title="Poison counters: ten lose the game">☠ {p.poison}</span>}
+            {p.poison > 0 && <span title="Poison counters: ten lose the game" data-fx={`poison:${p.seat}`}>☠ {p.poison}</span>}
             {p.energy > 0 && <span title="Energy counters">⚡ {p.energy}</span>}
             {g.monarch === p.seat && <span title="The monarch draws a card at each of their end steps">👑</span>}
             {damage.length > 0 && <span>Commander damage: {damage.join(', ')}</span>}
@@ -702,7 +767,7 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
           <div className="land-row small">
             {lands.length === 0 && <span className="muted">No lands</span>}
             {[...landGroups.values()].map((l) => (
-              <span key={`${l.name}|${l.tapped}`} className={`land-chip ${l.tapped ? 'tapped' : ''}`}>{l.name}{l.n > 1 ? ` ×${l.n}` : ''}{l.tapped ? ' (tapped)' : ''}</span>
+              <span key={`${l.name}|${l.tapped}`} className={`land-chip ${l.tapped ? 'tapped' : ''}`} data-fx={`land:${p.seat}:${l.name}|${l.tapped}`} data-fx-card={l.n} data-fx-name={l.name}>{l.name}{l.n > 1 ? ` ×${l.n}` : ''}{l.tapped ? ' (tapped)' : ''}</span>
             ))}
           </div>
           <div className="card-row">
@@ -710,7 +775,8 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
               const s = me ? cardState(card, 'command') : { cls: '' };
               const tax = g.commanderTax(p, card, true);
               return (
-                <div key={`cz${i}`} className={`board-card command ${s.cls}`} onClick={s.onClick} title={`${card.name} — in the command zone${tax ? `, costs {${tax}} more` : ''}`}>
+                <div key={`cz${i}`} className={`board-card command ${s.cls}`} onClick={s.onClick} title={`${card.name} — in the command zone${tax ? `, costs {${tax}} more` : ''}`}
+                  data-fx={`cmd:${p.seat}:${cardKey(card)}`} data-fx-card={cardKey(card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
                   <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={null} {...bind(card.imageUrl ?? null)} />
                   <span className="cmdr-badge">CMDR</span>
                   <span className="zone-badge">command zone{tax ? ` +${tax}` : ''}</span>
@@ -757,7 +823,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     `Threat ${threat(g, perm).toFixed(0)}`,
   ].filter(Boolean).join('\n');
   return (
-    <div className={`board-card ${perm.tapped ? 'tapped' : ''} ${state.cls}`} onClick={state.onClick} title={title}>
+    <div className={`board-card ${perm.tapped ? 'tapped' : ''} ${perm.attacking !== null ? 'attacking' : ''} ${perm.blocking !== null ? 'blocking' : ''} ${state.cls}`} onClick={state.onClick} title={title}
+      data-fx={`perm:${perm.id}`} data-fx-card={cardKey(perm.card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
       <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={pt} token={perm.token} {...bind(card.imageUrl ?? null)} />
       {perm.isCommander && <span className="cmdr-badge">CMDR</span>}
       {perm.sick && card.isCreature && !g.hasKw(perm, 'haste') && <span className="sick-badge" title="Summoning sick">zZ</span>}
@@ -770,10 +837,21 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
   );
 }
 
-function HandCard({ card, cls, onClick, bind }: { card: SimCard; cls: string; onClick?: () => void; bind: Bind }) {
+/** A stable key per card in hand, so a card keeps its element (and its animation) as the hand changes. */
+function handKeys(hand: SimCard[]): { card: SimCard; key: string }[] {
+  const seen = new Map<number, number>();
+  return hand.map((card) => {
+    const id = cardKey(card);
+    const n = seen.get(id) ?? 0;
+    seen.set(id, n + 1);
+    return { card, key: `hand:${id}:${n}` };
+  });
+}
+
+function HandCard({ card, cls, onClick, bind, fxKey }: { card: SimCard; cls: string; onClick?: () => void; bind: Bind; fxKey: string }) {
   const title = `${card.name} ${card.isLand ? '' : costText(card)}\n${card.typeLine}\n${card.notes.length ? `Plays as: ${card.notes.join('; ')}` : ''}`;
   return (
-    <div className={`board-card hand ${cls}`} onClick={onClick} title={title}>
+    <div className={`board-card hand ${cls}`} onClick={onClick} title={title} data-fx={fxKey} data-fx-card={cardKey(card)} data-fx-name={card.name} data-fx-img={card.imageUrl ?? ''}>
       <CardFace name={card.name} imageUrl={card.imageUrl ?? null} pt={card.isCreature ? `${card.power}/${card.toughness}` : null} {...bind(card.imageUrl ?? null)} />
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
     </div>
