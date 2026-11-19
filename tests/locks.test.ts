@@ -135,11 +135,11 @@ describe('lockouts: casting spells', () => {
     expect(t.game.players[0].battlefield.some((q) => q.card.name === 'Ornithopter')).toBe(false);
   });
 
-  it('Jin-Gitaxias counters the first noncreature spell an opponent casts each turn', () => {
+  it('Jin-Gitaxias counters the first artifact, instant or sorcery spell an opponent casts each turn', () => {
     const t = new Table();
     t.lands(0, 2);
     const jin = creature('Jin-Gitaxias, Progress Tyrant', '{5}{U}{U}', 7, 5, 5, { text: 'Whenever an opponent casts an artifact, instant, or sorcery spell, counter that spell. This ability triggers only once each turn.' });
-    expect(jin.effects[0]).toMatchObject({ kind: 'counter', when: 'opponentCast', subject: true, oncePerTurn: true });
+    expect(jin.effects[0]).toMatchObject({ kind: 'counter', when: 'opponentCast', castFilter: 'artifactInstantSorcery', subject: true, oncePerTurn: true });
     t.game.put(1, jin);
     t.game.players[0].hand.push(spell('Divination', '{G}', 1, 'Sorcery', 'Draw two cards.'));
     t.handlers[0] = castOnce('Divination');

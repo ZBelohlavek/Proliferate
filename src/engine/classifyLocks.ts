@@ -131,8 +131,6 @@ function readLine(l: string): LockContext | null {
   }
   // Cacophony Unleashed: "whenever ~ or another enchantment you control enters" arrives split.
   if ((m = l.match(/^whenever another nontoken enchantment you control enters, (until end of turn, ~ becomes .*)$/))) return { when: 'permEnters', castFilter: 'enchantment', body: m[1] };
-  // Jin-Gitaxias: the commas in the spell types keep the main reader from seeing the trigger (≈ any noncreature spell).
-  if ((m = l.match(/^whenever an opponent casts an artifact, instant, or sorcery spell, (counter that spell\.)/))) return { when: 'opponentCast', castFilter: 'noncreature', body: m[1] };
   // Mobilizer Mech.
   if ((m = l.match(/^whenever ~ becomes crewed,\s*(.*)$/))) return { when: 'crewed', scope: 'self', body: m[1] };
 
@@ -200,11 +198,6 @@ export function recogniseLocks(line: string, out: Found[], fullLine = line) {
   let m: RegExpMatchArray | null;
   if ((m = line.match(/^lockfx#(\d+)$/))) {
     out.push(...REGISTRY[parseInt(m[1], 10)]);
-    return;
-  }
-  // Jin-Gitaxias: "whenever an opponent casts ..., counter that spell."
-  if (/^counter that spell\.?$/.test(line)) {
-    out.push({ body: { kind: 'counter', target: 'any', subject: true }, note: 'Counter that spell' });
     return;
   }
   // Sludge Monster.

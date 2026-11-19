@@ -1689,6 +1689,7 @@ function matchesFilter(card: SimCard, filter: CastFilter): boolean {
     case 'enchantment': return card.isEnchantment;
     case 'mutate': return !!card.mutate;
     case 'flash': return card.isInstant || card.keywords.includes('flash');
+    case 'artifactInstantSorcery': return card.isArtifact || card.isInstant || card.isSorcery;
     case 'creatureOrPlaneswalker': return card.isCreature || card.isPlaneswalker;
     // Colorless: no colored mana symbols in its cost.
     case 'colorless': return card.cost.pips.every((pip) => pip.every((m) => m === 'C'));
