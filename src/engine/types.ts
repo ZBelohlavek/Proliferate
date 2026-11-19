@@ -59,6 +59,11 @@ export type Trigger =
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
   | 'opponentSearch' // an opponent searches their library (Wan Shi Tong)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
+  | 'leaves' // this permanent ('self') or a token you control ('any', with nontoken false) leaves the battlefield (see Effect.zones); x = its power
+  | 'opponentActivate' // an opponent activates an ability of a permanent that isn't a mana ability
+  | 'playerAttacks' // a player attacks: 'all' any player, 'opponents' an opponent attacks one of your other opponents (see minAttackers)
+  | 'playerSacrifice' // a player ('all') or an opponent ('opponents') sacrifices a permanent (castFilter 'noncreature': only a Treasure or other noncreature token)
+  | 'opponentCrime' // an opponent commits a crime: targets a player other than themselves, or a permanent or spell another player controls (rule 700.13)
   | 'opponentSacrifice' // an opponent sacrifices a nontoken permanent, the trigger is about that card (scope 'all': or discards a permanent card, Tergrid)
   | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
   | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
@@ -114,6 +119,14 @@ export type Effect = EffectBody & {
   spellOnly?: boolean;
   /** "This ability triggers only twice each turn" (Nadu): counted for each permanent that is targeted. */
   perTurn?: number;
+  /** "That player", "they": the effect's target is the player the trigger is about (whoever drew, cast, attacked or was hit). */
+  thatPlayer?: boolean;
+  /** Dies triggers: "if it had no counters on it" (Unstoppable Slasher). */
+  noCounters?: boolean;
+  /** 'leaves' triggers: only when it goes to one of these zones ("dies or is put into exile"). */
+  zones?: ('graveyard' | 'exile' | 'hand' | 'library')[];
+  /** 'playerAttacks': only when the player attacks with at least this many creatures (Aurelia). */
+  minAttackers?: number;
   /** For activated abilities: the mana cost and whether it taps the source. */
   activation?: {
     cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number;
@@ -225,8 +238,9 @@ export type EffectBody =
   | { kind: 'protect'; all?: boolean; player?: boolean }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   /** devotion: n is your devotion to this color instead (Gray Merchant). */
-  | { kind: 'drain'; n: number; gain: number; devotion?: Color; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean }
-  | { kind: 'damagePlayer'; n: number }
+  | { kind: 'drain'; n: number; gain: number; devotion?: Color; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean; /** "Deals N damage to each opponent": damage, so Torbran and prevention apply. */ damage?: boolean }
+  /** lifeLoss: the player loses life rather than being dealt damage ("that player loses 2 life"), so damage rules don't touch it. */
+  | { kind: 'damagePlayer'; n: number; lifeLoss?: boolean }
   | { kind: 'gainLife'; n: number }
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
   | { kind: 'loseLife'; n: number; /** Only while the source is tapped (Mana Vault). */ ifTapped?: boolean }
@@ -528,6 +542,71 @@ export type EffectBody =
    * fire counters, `perCharge`), or doubled (`double`; only noncombat damage with `noncombat`, Solphim).
    */
   | { kind: 'damageBonus'; perCharge?: boolean; double?: boolean; noncombat?: boolean }
+  /**
+   * Static damage replacement and prevention (rules 614.1a, 615): damage from `from` to `to` gets `n` more ('plus'),
+   * is multiplied by `n` ('times'), is raised to the source's power ('toPower', Ojer Axonil), or is prevented
+   * ('prevent'; 'preventHalf' prevents half, rounded up). See Game.damageAfter.
+   * from: sources you control ('yours'), other sources you control ('otherYours'), any source ('any').
+   * to: an opponent or a permanent an opponent controls ('opponents'), an opponent only ('opponentPlayers'), anything ('any'),
+   * you or a permanent you control ('you'), this permanent ('self'), other creatures you control ('otherCreatures'),
+   * attacking creatures you control ('attackers'), the equipped or enchanted creature ('attached').
+   */
+  | {
+    kind: 'damageMod'; op: 'plus' | 'times' | 'toPower' | 'prevent' | 'preventHalf'; n: number;
+    from: 'yours' | 'otherYours' | 'any'; to: 'opponents' | 'opponentPlayers' | 'any' | 'you' | 'self' | 'otherCreatures' | 'attackers' | 'attached';
+    /** Only damage from a source of this color ("a red source you control"). */ color?: Color;
+    /** Only noncombat damage. */ noncombat?: boolean;
+    /** Only creatures of these types (Valley Flamecaller), or with a +1/+1 counter (Uncivil Unrest). */ subtypes?: string[]; withCounter?: boolean;
+    /** Revolt: only if a permanent left the battlefield under your control this turn (Aether Revolt). */ revolt?: boolean;
+    /** Phyrexian Vindicator: the prevented damage is dealt to another target instead. */ reflect?: boolean;
+  }
+  /** Static: damage can't be prevented (Sunspine Lynx, rule 615.12). */
+  | { kind: 'noPrevent' }
+  /**
+   * Static life-gain replacements (rule 614.1a): nobody gains life ('noGain'), life you gain is doubled ('double'),
+   * or a player who would gain life loses that much instead ('lossInstead'). who: every player, your opponents, or you.
+   */
+  | { kind: 'lifeRule'; rule: 'noGain' | 'double' | 'lossInstead'; who: 'all' | 'opponents' | 'you' }
+  /** The player the trigger is about loses half their life, rounded up (Quietus Spike). */
+  | { kind: 'loseHalf' }
+  /** "The next time a source of your choice would deal damage to you this turn, prevent that damage" (Deflecting Palm): `reflect` deals it to that source's controller. */
+  | { kind: 'preventNext'; reflect: boolean }
+  /**
+   * Static: a creature that would die is exiled instead (rule 614.1a): opponents' creatures (Gisa, Vren, The Darkness Crystal: `nontoken`, and you
+   * gain `gain` life). `keep`: the exiled cards are "exiled with" the source, for its other abilities (`reanimateExiled`).
+   */
+  | { kind: 'deathExile'; nontoken?: boolean; gain?: number; keep?: boolean }
+  /** Put creature cards exiled with the source onto the battlefield under your control: all of them (Gisa) or the best one (The Darkness Crystal). */
+  | { kind: 'reanimateExiled'; all: boolean; counters?: number; tapped?: boolean }
+  /** This turn, your permanents that would be put into a graveyard from the battlefield are exiled and return at the next end step (Cosmic Intervention). */
+  | { kind: 'deathShield' }
+  /**
+   * Return the card of the creature that just died to the battlefield under your control (Minion's Return, Luminous Broodmoth).
+   * kw: with a keyword counter. subtype: only a card of this creature type (Oathkeeper). filter: only a creature without flying,
+   * or one with a -1/-1 counter on it (Necroskitter).
+   */
+  | { kind: 'returnDied'; kw?: string; subtype?: string; filter?: 'noFlying' | 'minusCounter' }
+  /**
+   * Bring the source back from the graveyard (or exile) in another way: to the battlefield as a noncreature enchantment ('enchantment',
+   * the Enduring cycle), tapped with stun counters ('stunned', Unstoppable Slasher), to its owner's hand at the next end step ('handAtEnd',
+   * The Locust God), into its owner's library `n` cards from the top (0: the bottom; God-Eternals, Murderous Rider), or simply
+   * back to the battlefield ('battlefield', Wave of Rats).
+   */
+  | { kind: 'returnAs'; as: 'battlefield' | 'enchantment' | 'stunned' | 'handAtEnd' | 'library'; n?: number }
+  /** Static: if this card would be put into a graveyard from anywhere, it is shuffled into its owner's library instead (Nexus of Fate, Blightsteel Colossus). */
+  | { kind: 'shuffleInstead' }
+  /**
+   * Static: triggered abilities of your permanents that match trigger an additional time (rule 603.2d): creatures of a type
+   * (Harmonic Prodigy: shamans or other wizards), of the type chosen as it entered (Roaming Throne), legendary creatures
+   * (Annie Joins Up), colorless permanents (Echoes of Eternity), creatures with power 2 or less (Delney).
+   */
+  | {
+    kind: 'triggerDoubler'; subtypes?: string[]; chosenType?: boolean; legendary?: boolean; colorless?: boolean; maxPower?: number; other?: boolean;
+    /** Firebender Ascension: only abilities a creature attacking sets off; each one puts a charge counter on the source, and they trigger again once it has `charged` counters. */
+    attack?: boolean; charged?: number;
+  }
+  /** Static: whenever a creature enters under an opponent's control, its enters abilities happen for you too (Aboleth Spawn). */
+  | { kind: 'copyOpponentEtb' }
   /** Put loyalty counters on this planeswalker (Kaito, Ral). */
   | { kind: 'loyaltyUp'; n: number }
   /** Double the number of each kind of counter on your permanents ('yours', Deepglow Skate) or on your best one ('best', Aetheric Amplifier). */

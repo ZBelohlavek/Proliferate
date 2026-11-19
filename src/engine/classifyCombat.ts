@@ -177,7 +177,7 @@ export function recogniseCombat(line: string, out: Found[], fullLine: string) {
     const kws = protectionKeywords(m[1]);
     if (kws) push({ kind: 'commanderKeywords', keywords: kws }, `Your commanders have ${m[1]}`);
   }
-  if (/^you have protection from each of your opponents/.test(line)) push({ kind: 'playerProtection' }, 'You have protection from your opponents');
+  if (/^you have protection from each (?:of your opponents|opponent)\b/.test(line)) push({ kind: 'playerProtection' }, 'You have protection from your opponents');
   if ((m = line.match(/^target attacking ([a-z, ]+) gains (protection from [a-z]+) until end of turn/))) {
     const kws = protectionKeywords(m[2]);
     if (kws) push({ kind: 'pump', p: 0, t: 0, protect: false, grant: kws }, `An attacking creature gains ${m[2]}`);
