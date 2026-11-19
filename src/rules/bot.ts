@@ -8,7 +8,7 @@
 import { isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { cardColored, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
+import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -309,8 +309,22 @@ export class Bot implements Agent {
       const unlock = actions.find((a) => a.type === 'unlock' && this.unlockWorth(g, p, a.permId));
       if (unlock) return pick(unlock);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      // Before combat: haste and evasion abilities.
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate'))));
+      // Before combat: haste and evasion abilities, tapping a blocker, and keeping a blocker out of the way (Zirda).
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))) ?? this.chooseCombatShaping(g, p, actions));
+    }
+
+    // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
+    if (!myTurn && g.step === 'beginCombat') {
+      const shape = this.chooseCombatShaping(g, p, actions);
+      if (shape) return pick(shape);
+    }
+
+    // An opponent's beginning of combat: tap their biggest attacker (Mind Games, Thassa, Ring of the Lucii).
+    if (!myTurn && g.step === 'beginCombat' && this.tapWorthNow(g, p)) {
+      const spell = this.chooseSpell(g, p, casts.filter((a) => a.card.effects.some((e) => e.kind === 'tap' && e.when === 'resolve')), true);
+      if (spell) return pick(spell.action, spell.x);
+      const tap = this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'tap'));
+      if (tap) return pick(tap);
     }
 
     // Combat tricks once blockers are known, then abilities that save or pump a creature in the fight.
@@ -322,7 +336,7 @@ export class Bot implements Agent {
       const fog = this.chooseFog(g, p, actions);
       if (fog) return pick(fog);
     }
-    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
+    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)) ?? this.combatProtect(g, p, actions));
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
@@ -403,7 +417,7 @@ export class Bot implements Agent {
     const instantWindow = g.activeSeat !== p.seat;
     for (const a of actions) {
       if (a.type === 'cast') {
-        const card = g.castCard(a.card, a.from);
+        const card = a.free ? g.freeCard(a.card) : g.castCard(a.card, a.from, p.seat);
         if (instantWindow && !isInstantSpeed(card)) continue;
         if (card.xFromLife || (card.cost.x > 0 && a.maxX < 1)) continue;
         const effects = card.effects.filter((e) => e.when === 'resolve');
@@ -529,6 +543,13 @@ export class Bot implements Agent {
   /** Regenerate-style "~ gains indestructible" in answer to destroy or damage removal aimed at it. */
   private selfSave(p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
     if (top.controller === p.seat) return undefined;
+    // Mother of Runes: protection from the color of a spell or ability aimed at one of our creatures.
+    const aimed = top.targets.some((t) => t?.kind === 'perm' && p.battlefield.some((q) => q.id === t.id && q.card.isCreature)) && cardColors(top.card).length > 0
+      && top.effects.some((e) => e.kind === 'removal' || e.kind === 'steal' || e.kind === 'stun' || e.kind === 'equip');
+    if (aimed) {
+      const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+      if (shield) return shield;
+    }
     return actions.find((a) => {
       if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !a.effect.grant?.includes('indestructible')) return false;
       return top.effects.some((e, i) => e.kind === 'removal' && (e.mode === 'destroy' || e.mode === 'damage') && top.targets[i]?.kind === 'perm' && (top.targets[i] as { id: number }).id === a.permId);
@@ -581,6 +602,8 @@ export class Bot implements Agent {
       let score = 0;
       if (o.back) score -= g.landCount(p) >= 4 ? 8 : 3; // rather cast the spell side later
       if (o.fromGraveyard) score += 1.5; // a land from the graveyard keeps the one in hand for later
+      // A land from exile or off the top of the library is an extra card; one playable only this turn goes first.
+      if (o.from) score += this.playWindow(g, p, o) === 'turn' ? 6 : 2;
       if (!info.tapped) score += 2;
       // If the extra mana can't be used this turn anyway, get tapped lands out of the way.
       else if (maxCost <= available) score += 3;
@@ -593,6 +616,15 @@ export class Bot implements Agent {
     }
     if (best.back && g.landCount(p) >= 5) return undefined;
     return best;
+  }
+
+  /** How long a card offered from exile stays playable ('turn', 'nextTurn', 'exiled'), 'top' for the top of the library, or null. */
+  private playWindow(g: Game, p: PlayerState, a: Action): 'turn' | 'nextTurn' | 'exiled' | 'top' | null {
+    if ((a.type !== 'cast' && a.type !== 'land') || !('from' in a) || !a.from) return null;
+    if (a.from === 'library') return 'top';
+    if (a.from !== 'exile') return null;
+    const m = g.exilePlayable(p).find((e) => e.card === a.card);
+    return m ? m.until : null;
   }
 
   /** Equip loose Equipment before combat. */
@@ -619,7 +651,7 @@ export class Bot implements Agent {
         if (alt.pitch || alt.returnIslands || casts.some((b) => b.card === a.card && b.from === 'hand')) continue;
         if (alt.evoke && !a.card.effects.some((e) => e.when === 'resolve')) continue;
       }
-      const card = a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.door ? 'door' : a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
+      const card = a.free ? g.freeCard(a.card) : a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.door ? 'door' : a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from, p.seat);
       const fromCommand = a.from === 'command';
       const kick = a.kick ? this.kickWorth(g, p, a.card, a.kick, a.maxX) : 0;
       if (kick === null) continue;
@@ -647,8 +679,13 @@ export class Bot implements Agent {
       let score = this.castScore(g, p, card, fromCommand, x, instantWindow);
       if (score === null) continue;
       score += kick;
+      // Cards played from exile or off the top of the library are extra cards; one that is only playable this turn is now or never.
+      const window = this.playWindow(g, p, a);
+      if (window === 'turn') score += 25;
+      else if (window) score += 4;
+      if (a.free) score += 10 + card.cmc;
       // Keep mana up for counterspells and protection unless this play matters.
-      if (reserve > 0 && score < 90 && available - g.effectiveCost(p, card, fromCommand, x) < reserve) continue;
+      if (reserve > 0 && score < 90 && window !== 'turn' && available - g.effectiveCost(p, card, fromCommand, x) < reserve) continue;
       score += card.cmc * 0.1;
       // Mutating builds one bigger threat and sets off every "whenever this creature mutates" in it.
       if (a.mutate) score += 3 + card.effects.filter((e) => e.when === 'mutates').length * 6;
@@ -784,6 +821,8 @@ export class Bot implements Agent {
       const power = [...ready, ...back].reduce((n, q) => n + g.power(q), 0) * Math.max(1, extra.n);
       return power >= 4 ? 50 + power : null;
     }
+    // Mind Games: tap a blocker before our attack, or an attacker at an opponent's beginning of combat.
+    if (spell && kinds.has('tap') && !removal) return this.tapWorthNow(g, p) ? 25 + card.value : null;
     const untap = card.effects.find((e) => e.kind === 'untap' && e.when === 'resolve');
     if (untap && untap.kind === 'untap' && spell) {
       // Dramatic Reversal and friends: worth it when they give back more mana than they cost.
@@ -917,6 +956,11 @@ export class Bot implements Agent {
         // "Creatures you control gain haste": before combat, with fresh creatures worth sending in.
         case 'overrun': return !e.p && !!e.grant?.includes('haste') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && q.sick && !q.tapped && g.power(q) >= 2 && !g.hasKw(q, 'haste'));
         case 'tokens': case 'counters': case 'drain': case 'damagePlayer': case 'ramp': case 'tutor': case 'treasure': case 'discard': case 'scry': return true;
+        // Impulse draw that has to be played this turn: only in our own main phase with mana left to play it.
+        case 'exilePlay': return e.until !== 'turn' || (g.activeSeat === p.seat && g.step === 'main2' && g.availableMana(p) >= 3);
+        case 'freeCast': case 'search': return true;
+        // Sensei's Divining Top: with mana that would otherwise go unused, before our own turn.
+        case 'rearrange': return g.activeSeat !== p.seat;
         // Milling everyone (Syr Konrad) only while we have more cards left than the table, or win on an empty library.
         case 'mill': return e.who === 'all' ? winsOnEmptyDraw(p) || p.library.length > Math.min(...g.opponents(p).map((o) => o.library.length)) + 10 : e.who !== 'you' || winsOnEmptyDraw(p);
         // "Can't be blocked this turn": before combat, with something worth sending in.
@@ -931,6 +975,7 @@ export class Bot implements Agent {
         case 'exileGraveyards': return e.cards ? g.opponents(p).some((o) => o.graveyard.some((c) => c.value >= 5)) : g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'entomb': return true;
         case 'stun': case 'bounty': case 'poison': return true;
+        case 'tap': return this.tapWorthNow(g, p);
         case 'kwCounter': return e.on !== 'self' || !perm.kwCounters?.includes(e.kw);
         // Midnight Clock: wind it forward when a fresh hand of seven beats what we hold, and not if the graveyard is our engine.
         case 'hours': return p.hand.length <= 2 && !this.leansOnGraveyard(p) && (perm.hours ?? 0) >= 6;
@@ -945,6 +990,77 @@ export class Bot implements Agent {
         default: return false;
       }
     });
+  }
+
+  /**
+   * Abilities that shape a combat (rules 508.1c-d, 509.1b): on an opponent's turn, "creatures your opponents control attack
+   * this turn if able" when they'd mostly be sent into each other or into our blockers, or "target creature can't attack"
+   * on their biggest attacker; on our turn, "can't block" on the blocker in our way.
+   */
+  private chooseCombatShaping(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const myTurn = g.activeSeat === p.seat;
+    const active = g.players[g.activeSeat];
+    for (const a of actions) {
+      if (a.type !== 'activate') continue;
+      const e = a.effect;
+      if (e.kind === 'forceAttack' && !myTurn) {
+        const ready = g.attackCandidates(active).filter((q) => !g.mustAttack(q));
+        if (!ready.length) continue;
+        // More opponents than just us to hit, or nothing that threatens our life.
+        const power = ready.reduce((n, q) => n + hitDamage(g, q), 0);
+        if (g.opponents(active).length >= 2 || power * 2 < p.life) return a;
+      }
+      if (e.kind === 'pacify') {
+        if (!myTurn && e.attack) {
+          const big = active.battlefield.filter((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 4);
+          if (big.length) return a;
+        }
+        if (myTurn && e.block && g.step === 'main1') {
+          const mine = g.attackCandidates(p).filter((q) => g.power(q) >= 2);
+          const walls = g.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isCreature && !q.tapped && g.toughness(q) >= 3);
+          if (mine.length && walls.length) return a;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** Mother of Runes in a fight: protection from the color of what would kill one of our creatures (it then deals no damage to it). */
+  private combatProtect(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+    if (!shield) return undefined;
+    const doomed = p.battlefield.some((q) => {
+      const foes = q.attacking !== null ? g.blockersOf(q) : q.blocking !== null ? [g.findPerm(q.blocking)].filter((f): f is Perm => !!f) : [];
+      return foes.length > 0 && foes.some((f) => cardColors(f.card).length > 0) && foes.reduce((n, f) => n + g.power(f), 0) >= g.toughness(q) - q.damage && threat(g, q) >= 3;
+    });
+    return doomed ? shield : undefined;
+  }
+
+  /**
+   * Is tapping an opponent's creature useful right now? Before our attack (main phase or beginning of combat) when it
+   * would remove a blocker, or at an opponent's beginning of combat when they have a creature worth stopping.
+   */
+  private tapWorthNow(g: Game, p: PlayerState): boolean {
+    if (g.activeSeat === p.seat) {
+      if (g.step !== 'main1' && g.step !== 'beginCombat') return false;
+      if (!this.readyAttackers(g, p).length) return false;
+      return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && !q.tapped && g.canTarget(p, q)));
+    }
+    if (g.step !== 'beginCombat') return false;
+    const active = g.players[g.activeSeat];
+    return active.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3 && g.canTarget(p, q));
+  }
+
+  /** Which opponent's permanent to tap: their best blocker on our turn, the active player's biggest attacker on theirs. */
+  private tapTarget(g: Game, p: PlayerState, perms: Perm[]): Perm | null {
+    const theirs = perms.filter((q) => q.seat !== p.seat && !q.tapped);
+    const creatures = theirs.filter((q) => q.card.isCreature);
+    const pool = g.activeSeat === p.seat ? creatures : creatures.filter((q) => q.seat === g.activeSeat && !q.sick);
+    const list = pool.length ? pool : creatures.length ? creatures : theirs;
+    if (!list.length) return null;
+    // Our turn: the blocker that stops the most (toughness, then threat). Theirs: the attacker that hurts most.
+    const score = (q: Perm) => (g.activeSeat === p.seat ? g.toughness(q) + threat(g, q) * 0.3 : g.power(q) + threat(g, q) * 0.3) + (q.card.isCreature ? 5 : q.card.effects.some((e) => e.kind === 'mana') ? 1 : 0);
+    return list.reduce((a, b) => (score(b) > score(a) ? b : a));
   }
 
   /** "~ gains haste / indestructible until end of turn": when that changes something. */
@@ -1051,7 +1167,17 @@ export class Bot implements Agent {
       case 'pump':
         return asTarget(this.trickTarget(g, p, d.card)) ?? asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'protect':
-        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'protectColor':
+        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q) + (q.attacking !== null || q.blocking !== null ? 3 : 0))) ?? d.candidates[0];
+      case 'suspect':
+        // An opponent's best blocker: it can't block any more, and gets goaded with Nelly Borca.
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + g.toughness(q) + (q.tapped ? -3 : 0))) ?? d.candidates[0];
+      case 'pacify': {
+        // On our turn, the blocker that stands in our way; on theirs, the attacker that would hit us hardest.
+        const theirs = perms.filter((q) => q.seat !== p.seat);
+        if (g.activeSeat === p.seat) return asTarget(bestOf(theirs.filter((q) => !q.tapped), (q) => g.toughness(q) + g.power(q))) ?? d.candidates[0];
+        return asTarget(bestOf(theirs.filter((q) => q.seat === g.activeSeat), (q) => g.power(q) + (q.tapped ? -10 : 0))) ?? d.candidates[0];
+      }
       case 'goad': {
         // The opponent's biggest creature, best of all one whose controller has plenty of other opponents to hit.
         return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0))) ?? d.candidates[0];
@@ -1087,6 +1213,8 @@ export class Bot implements Agent {
         const score = (seat: number) => (e.kind === 'mill' ? -g.players[seat].library.length : g.players[seat].hand.length);
         return { kind: 'player', seat: seats.reduce((a, c) => (score(c) > score(a) ? c : a)) };
       }
+      case 'tap':
+        return asTarget(this.tapTarget(g, p, perms)) ?? d.candidates[0];
       case 'stun':
       case 'bounty':
         return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => threat(g, q) - (e.kind === 'stun' && q.tapped ? 0 : 1))) ?? d.candidates[0];
@@ -1416,7 +1544,7 @@ export class Bot implements Agent {
       if (perm.card.isLand || perm.emblem) return false;
       // Ugin, the Spirit Dragon: colored permanents with mana value X or less.
       if (e.maxCmc !== undefined && perm.card.cmc > (e.maxCmc === -1 ? x : e.maxCmc)) return false;
-      if (e.colored && !cardColored(perm.card)) return false;
+      if (e.colored && !cardColors(perm.card).length) return false;
       if (creaturesOnly && !perm.card.isCreature) return false;
       // Wrath of the Skies: up to the energy we will have.
       if (e.byEnergy && perm.card.cmc > Math.max(0, x) + p.energy) return false;
@@ -1481,13 +1609,14 @@ export class Bot implements Agent {
       if (!perm) continue;
       const allowed = gd.defenders.map((s) => g.players[s]).filter((o) => o.alive);
       if (!allowed.length) continue;
-      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, hitDamage(g, perm));
+      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, g.playerProtectedFrom(o, p.seat) ? 0 : hitDamage(g, perm));
       forced.push({ attacker: perm.id, defender: allowed.reduce((a, b) => (score(b) > score(a) ? b : a)).seat });
     }
     candidateIds = candidateIds.filter((id) => !forced.some((f) => f.attacker === id));
     if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats)];
     let candidates = candidateIds.map((id) => g.findPerm(id)).filter((q): q is Perm => q !== null && g.power(q) > 0);
-    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive);
+    // Absolute Virtue: nothing gets through to a player with protection from us, so they aren't worth attacking.
+    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive && !g.playerProtectedFrom(o, p.seat));
     if (!candidates.length || !opps.length) return [];
 
     // Main target: who is most worth hitting, and can be hit.
@@ -1498,6 +1627,7 @@ export class Bot implements Agent {
       let unblockable = 0;
       let total = 0;
       for (const a of candidates) {
+        if (!g.canAttack(a, o.seat)) continue;
         total += hitDamage(g, a);
         if (!blockers.some((b) => g.canBlock(b, a))) unblockable += hitDamage(g, a);
       }
@@ -1529,9 +1659,12 @@ export class Bot implements Agent {
     const out: AttackDeclaration[] = [];
     // Attack taxes (Propaganda, Ghostly Prison) are paid per creature; one we can't pay for stays home, so send it elsewhere.
     let budget = g.availableMana(p);
+    // Crawlspace: only so many creatures can attack each player.
+    const sent = new Map<number, number>();
     for (const a of candidates) {
       for (const o of order) {
-        const tax = g.attackTax(o);
+        if (!g.canAttack(a, o.seat) || (sent.get(o.seat) ?? 0) >= g.attackLimit(o.seat)) continue;
+        const tax = g.attackTax(o, a);
         if (tax > budget) continue;
         const isMain = o === main;
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
@@ -1545,6 +1678,7 @@ export class Bot implements Agent {
         if (!go && isMain && this.rng.chance(0.1 * this.aggression)) go = true;
         if (go) {
           out.push({ attacker: a.id, defender: o.seat });
+          sent.set(o.seat, (sent.get(o.seat) ?? 0) + 1);
           budget -= tax;
           break;
         }
@@ -1625,6 +1759,15 @@ export class Bot implements Agent {
   // -------------------------------------------------------------------------
   // Other choices
   // -------------------------------------------------------------------------
+
+  /** What casting this spell for free is worth now, or 0 when it would hurt us (a wipe of our board, milling ourselves). */
+  private freeWorth(g: Game, p: PlayerState, c: SimCard): number {
+    const wipe = c.effects.find((e): e is Wipe => e.kind === 'wipe' && e.when === 'resolve');
+    if (wipe && !this.wipeIsGood(g, p, wipe, 0)) return 0;
+    if (c.effects.some((e) => e.kind === 'mill' && e.who === 'you' && e.when === 'resolve') && p.library.length < 20) return 0;
+    if (c.effects.length && c.effects.every((e) => REACTIVE_KINDS.has(e.kind)) && !c.isCreature) return 0.5;
+    return c.value + c.cmc;
+  }
 
   private choose(g: Game, p: PlayerState, d: Extract<Decision, { kind: 'choose' }>): number[] {
     const indexes = d.options.map((_, i) => i);
@@ -1733,6 +1876,20 @@ export class Bot implements Agent {
       case 'manifest':
         // Manifest dread: a creature card can be turned face up later.
         return top((i) => (card(i).isCreature ? 10 : 0) + card(i).value, 1);
+      case 'impulse':
+        // Exile the cards we would most like to play: spells we can afford, a land if we need one.
+        return top((i) => this.cardScore(g, p, card(i), p.hand.filter((c) => c.isLand).length) + (card(i).isLand && g.landCount(p) < 5 ? 3 : 0), d.min);
+      case 'freeCast':
+        // Cast for free: the biggest useful spell, never one that would only hurt us.
+        return top((i) => (this.freeWorth(g, p, card(i)) > 0 ? 100 + this.freeWorth(g, p, card(i)) : -1), 1).filter((i) => this.freeWorth(g, p, card(i)) > 0);
+      case 'rearrange': {
+        // Best cards on top: what we can cast soon, a land when short. Ponder shuffles when nothing is worth keeping.
+        const lands = g.landCount(p) + p.hand.filter((c) => c.isLand).length;
+        const worth = (c: SimCard) => (c.isLand ? (lands < 5 ? 6 : lands >= 8 ? -2 : 1) : !c.modeled ? -1 : c.cmc > g.landCount(p) + 3 ? 0.5 : c.value);
+        const order = top((i) => worth(card(i)), d.options.length);
+        if (d.min === 0 && order.every((i) => worth(card(i)) <= 1)) return [];
+        return order;
+      }
       case 'mutate': {
         // On top when the new card brings the better body: power counts double, evasion helps.
         const body = (c: SimCard) => c.power * 2 + c.toughness + (c.keywords.includes('flying') || c.keywords.includes('unblockable') ? c.power : 0);

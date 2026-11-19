@@ -16,7 +16,7 @@ const WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, f
 const count = (w: string | undefined, fallback = 1) => (w === undefined ? fallback : /^\d+$/.test(w.trim()) ? parseInt(w, 10) : WORDS[w.trim()] ?? fallback);
 
 /** Static effect kinds this file adds (classify.ts keeps them on a permanent's static lines). */
-export const EMBLEM_STATIC_KINDS = ['noExtraTurnAttack', 'unlockDiscount', 'pwAbilities'];
+export const EMBLEM_STATIC_KINDS = ['unlockDiscount', 'pwAbilities'];
 
 /** Activation costs: "sacrifice a Food", "sacrifice two Foods", "sacrifice five artifacts". */
 export const EMBLEM_COST = 'sacrifice (?:a|an|one|two|three|four|five) foods?|sacrifice (?:two|three|four|five) artifacts';
@@ -58,8 +58,6 @@ export function emblemTrigger(l: string): EmblemContext | null {
   if (/^whenever an opponent casts their first spell each turn, counter that spell/.test(l)) return { when: 'opponentCast', castFilter: 'any', body: 'counter the spell that set this off.' };
   // Sphinx of the Second Sun.
   if ((m = l.match(/^at the beginning of (?:each of )?your postcombat main phases?,\s*(.*)$/))) return { when: 'postcombatMain', body: m[1] };
-  // Medomai the Ageless.
-  if (/^~ can't attack during extra turns/.test(l)) return { when: 'static', body: l };
   // Ichormoon Gauntlet: planeswalkers you control have "[0]: proliferate" and "[-12]: take an extra turn".
   if (/^planeswalkers you control have "\[0\]: proliferate"/.test(l)) return { when: 'static', body: l };
   // "-X:" loyalty abilities (rule 606.4): X is chosen as it is activated. "Three times X" multiplies it.
@@ -115,7 +113,6 @@ export function recogniseEmblems(line: string, out: Found[], fullLine: string, r
   // --- Extra turns and phases (rules 500.7, 500.8) ---------------------------
   if ((m = line.match(/^take (two|three) extra turns after this one/))) return push({ kind: 'extraTurn', n: count(m[1], 2) }, `${m[1][0].toUpperCase()}${m[1].slice(1)} extra turns`);
   if (/^there is an additional beginning phase after this phase/.test(line)) return push({ kind: 'extraPhase', phase: 'beginning' }, 'An additional beginning phase (untap, upkeep, draw)');
-  if (/^~ can't attack during extra turns/.test(line)) return push({ kind: 'noExtraTurnAttack' }, "Can't attack during extra turns");
   if (/^planeswalkers you control have "\[0\]: proliferate"/.test(fullLine) && !out.length) {
     return push({ kind: 'pwAbilities' }, 'Your planeswalkers have [0]: proliferate and [-12]: take an extra turn');
   }

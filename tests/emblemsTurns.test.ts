@@ -190,12 +190,14 @@ describe('extra turns and phases (rules 500.7, 500.8)', () => {
 
   it('Medomai takes an extra turn when it connects, and can\'t attack during it', () => {
     const medomai = creature('Medomai the Ageless', '{4}{G}{G}', 6, 4, 4, { superTypes: ['Legendary'], text: "Flying\nWhenever Medomai deals combat damage to a player, take an extra turn after this one.\nMedomai can't attack during extra turns." });
-    expect(kinds(medomai)).toEqual(['extraTurn', 'noExtraTurnAttack']);
+    expect(kinds(medomai)).toEqual(['extraTurn', 'combatRule']);
     const t = new Table(2, { maxRounds: 3 });
     const m = t.game.put(0, medomai);
     t.handlers[0] = attackAll(1);
-    t.until((g) => g.inExtraTurn && g.step === 'main1');
-    expect(t.game.attackCandidates(t.game.players[0])).not.toContain(m);
+    t.until((g) => g.activeSeat === 1);
+    // One hit, one extra turn, and no second attack during it.
+    expect(log(t, /takes an extra turn/)).toHaveLength(1);
+    expect(t.game.players[1].life).toBe(40 - t.game.power(m));
   });
 
   it('Time Sieve sacrifices five artifacts for an extra turn', () => {

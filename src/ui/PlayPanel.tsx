@@ -6,6 +6,7 @@
 
 import { useEffect, useReducer, useRef, useState } from 'react';
 import type { Effect, SimCard, SimDeck } from '../engine/types';
+import { describeProtection } from '../engine/classifyCombat';
 import { threat } from '../rules/bot';
 import type { Game } from '../rules/game';
 import { Session } from '../rules/session';
@@ -722,6 +723,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     perm.tapped && 'Tapped',
     perm.sick && card.isCreature && 'Summoning sick',
     keywords.length && keywords.join(', '),
+    g.protections(perm).length > 0 && g.protections(perm).map(describeProtection).join(', '),
+    perm.suspected && "Suspected: menace, can't block",
     perm.counters > 0 && `${perm.counters} +1/+1 counter${perm.counters > 1 ? 's' : ''}`,
     perm.charge && `${perm.charge} ${(perm.printed ?? card).counterName ?? 'charge'} counter${perm.charge > 1 ? 's' : ''}`,
     perm.fogged && 'Combat damage to and from it is prevented this turn',
