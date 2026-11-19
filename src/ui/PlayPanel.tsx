@@ -589,7 +589,7 @@ function actionLabel(g: Game, a: Action): string {
       if (a.modes) return `Cast ${a.card.name} (${spreeLabel(a.card, a.modes)}) ${costText(g.spreeCard(a.card, a.modes))}`;
       if (a.from === 'foretell') return `Cast foretold ${a.card.name} ${costText(g.castCard(a.card, 'foretell'))}`;
       if (a.from === 'plot') return `Cast plotted ${a.card.name} (free)`;
-      if (a.from === 'exile') return `Cast ${a.card.name} from exile ${costText(a.card)}`;
+      if (a.from === 'warp') return `Cast warped ${a.card.name} ${costText(a.card)}`;
       if (a.from === 'madness' || a.from === 'miracle') return `Cast ${a.card.name} for its ${a.from} cost ${costText(g.castCard(a.card, a.from))}`;
       if (a.kick) {
         const k = a.card.kicker!;
