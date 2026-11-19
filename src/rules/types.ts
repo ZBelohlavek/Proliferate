@@ -160,6 +160,9 @@ export interface PlayerState {
   energy: number;
   /** Energy paid this turn (Blaster Hulk). */
   energyPaid?: number;
+  /** Creature spells and instant or sorcery spells cast this turn ("the first creature spell you cast each turn"). */
+  creatureSpellsThisTurn?: number;
+  instantSorceryThisTurn?: number;
   /** Combat damage dealt to this player is prevented this turn; `tokens`: and makes that many 2/1 flyers (Inkshield). */
   fogged?: { tokens: boolean };
   alive: boolean;
