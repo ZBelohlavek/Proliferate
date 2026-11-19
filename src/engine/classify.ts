@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
+import { recogniseReplace, replaceTrigger, rewriteReplace } from './classifyReplace';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
@@ -161,7 +162,7 @@ function parseKeywords(raw: RawCard, text: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** chance: this part of the ability only happens some of the time (a condition in the same sentence). */
-type Found = { body: EffectBody; note: string; chance?: number; minRoll?: number; /** Paid in energy when it happens, or skipped ("you may pay {E}{E}. When you do"). */ energyCost?: number; chargeAtResolve?: { n: number; reset: boolean } };
+type Found = { body: EffectBody; note: string; chance?: number; minRoll?: number; /** "That player" (see Effect.thatPlayer). */ thatPlayer?: boolean; /** "If it had no counters on it". */ noCounters?: boolean; /** Paid in energy when it happens, or skipped ("you may pay {E}{E}. When you do"). */ energyCost?: number; chargeAtResolve?: { n: number; reset: boolean } };
 
 function removalTargetOf(phrase: string): RemovalTarget | null {
   if (/nonland permanent|target permanent|target ([\w-]+ )?permanent/.test(phrase)) return 'permanent';
@@ -423,7 +424,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   } else if (card.isPermanent && (m = line.match(/^~ gets \+(\d+)\/\+(\d+) until end of turn\.?$/))) {
     out.push({ body: { kind: 'pump', p: num(m[1], 1), t: num(m[2], 1), protect: false, grant: [], self: true }, note: `It gets +${m[1]}/+${m[2]} this turn` });
   } else if (/^regenerate ~\.?$/.test(line)) {
-    out.push({ body: { kind: 'pump', p: 0, t: 0, protect: false, grant: ['indestructible'], self: true }, note: 'Regenerate (≈ indestructible this turn)' });
+    out.push({ body: { kind: 'pump', p: 0, t: 0, protect: false, grant: ['regenerate'], self: true }, note: 'Regenerate (the next time it would be destroyed this turn, it is tapped and removed from combat instead)' });
   } else if (!card.isPermanent && /target (creature|permanent) can't be the target of spells or abilities your opponents control/.test(line)) {
     out.push({ body: { kind: 'protect' }, note: 'Protection spell' });
   } else if (/your life total can't change|you gain protection from everything/.test(line)) {
@@ -460,7 +461,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
       // Gray Merchant: "where X is your devotion to black".
       const devotion = n === -1 ? fullLine.match(/where x is your devotion to (white|blue|black|red|green)/) : null;
       const color = devotion ? ({ white: 'W', blue: 'U', black: 'B', red: 'R', green: 'G' } as const)[devotion[1] as 'white'] : undefined;
-      out.push({ body: { kind: 'drain', n, gain, ...(color ? { devotion: color } : {}) }, note: `Drain each opponent ${color ? `your devotion to ${devotion![1]}` : n === -1 ? 'X' : n}` });
+      const damage = /deals? (?:\w+ )?damage[^.]*to each opponent/.test(line);
+      out.push({ body: { kind: 'drain', n, gain, ...(color ? { devotion: color } : {}), ...(damage ? { damage } : {}) }, note: `Drain each opponent ${color ? `your devotion to ${devotion![1]}` : n === -1 ? 'X' : n}` });
     }
   } else if ((m = line.match(new RegExp(`(target (player|opponent) loses|deals? ${NUM} damage to (target (player|opponent)|any target))`)))) {
     const amt = line.match(new RegExp(`(loses|deals?) ${NUM}`));
@@ -714,6 +716,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     // The wheel is the whole sentence: not a separate "draw seven".
     out.splice(0, out.length, { body: { kind: 'wheel', n: 7, graveyard, ...(exileSelf ? { exileSelf } : {}) }, note: `Shuffle your hand${graveyard ? ' and graveyard' : ''} into your library and draw seven${exileSelf ? ', then exile it' : ''}` });
   }
+  // --- Replacement effects, prevention, trigger doublers, "that player" (classifyReplace.ts) ---
+  recogniseReplace(line, out, fullLine);
   // --- Rarer wordings nothing above read (classifyRare.ts) -----------------------
   if (!out.length) recogniseRare(line, out, card, fullLine);
 
@@ -782,6 +786,10 @@ interface LineContext {
   targetedBy?: 'you' | 'opponents';
   spellOnly?: boolean;
   perTurn?: number;
+  /** 'leaves' triggers: the zones it counts (see Effect.zones). */
+  zones?: ('graveyard' | 'exile' | 'hand' | 'library')[];
+  /** 'playerAttacks': "with three or more creatures". */
+  minAttackers?: number;
 }
 
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
@@ -797,8 +805,11 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   let m: RegExpMatchArray | null;
   // Rarer wordings (classifyRare.ts).
   l = rewriteRare(l);
+  l = rewriteReplace(l);
   const rare = rareTrigger(l);
   if (rare) return rare;
+  const replaced = replaceTrigger(l);
+  if (replaced) return replaced;
 
   const mech = mechanicTrigger(l);
   if (mech) return mech;
@@ -1198,7 +1209,7 @@ export function classifyCard(raw: RawCard): SimCard {
       ctx.chance = 0.5;
     }
     // "Whenever a player casts ..., they create": what the caster gets, not you. Kept only for your own spells.
-    if (ctx.when === 'opponentCast' && /^(they|that player) (create|draw|gain)/.test(ctx.body)) continue;
+    if (ctx.when === 'opponentCast' && /^(they|that player) (create|draw|gain)/.test(ctx.body) && /whenever a player casts/.test(line)) continue;
     // "With mana value equal to the chosen number" and the like: only some spells qualify.
     if ((ctx.when === 'opponentCast' || ctx.when === 'cast') && /^whenever [^.]*\b(chosen number|chosen name|same name as)\b/.test(line)) ctx.chance = 0.25;
     // Voting: only one outcome happens. With bots at the table, assume the last one listed (ties usually go there).
@@ -1626,6 +1637,10 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.targetedBy) effect.targetedBy = ctx.targetedBy;
   if (ctx.spellOnly) effect.spellOnly = true;
   if (ctx.perTurn) effect.perTurn = ctx.perTurn;
+  if (ctx.zones) effect.zones = ctx.zones;
+  if (ctx.minAttackers) effect.minAttackers = ctx.minAttackers;
+  if (f.thatPlayer) effect.thatPlayer = true;
+  if (f.noCounters) effect.noCounters = true;
   if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
   if (ctx.chapters) effect.chapters = ctx.chapters;
   // "You win the game" only with a counter condition the engine checks (Simic Ascendancy); the rest are in wincons.ts.
@@ -1652,7 +1667,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1684,6 +1699,11 @@ function describeTrigger(ctx: LineContext): string {
     case 'opponentDraw': return 'When an opponent draws: ';
     case 'opponentDiscard': return 'When an opponent discards: ';
     case 'opponentLoseLife': return 'When an opponent loses life: ';
+    case 'leaves': return ctx.scope === 'self' ? (ctx.zones ? 'When it dies or is exiled: ' : 'When it leaves the battlefield: ') : 'When a token of yours leaves the battlefield: ';
+    case 'opponentActivate': return 'When an opponent activates an ability: ';
+    case 'playerAttacks': return ctx.minAttackers ? `When a player attacks with ${ctx.minAttackers}+ creatures: ` : ctx.scope === 'opponents' ? 'When an opponent attacks another opponent: ' : 'When a player attacks your opponents: ';
+    case 'playerSacrifice': return ctx.scope === 'opponents' ? 'When an opponent sacrifices: ' : 'When a player sacrifices: ';
+    case 'opponentCrime': return 'When an opponent commits a crime: ';
     case 'ringTempts': return 'When the Ring tempts you: ';
     case 'lore': return 'When you add a lore counter to a Saga: ';
     case 'sacrifice': return 'When you sacrifice: ';
@@ -1803,6 +1823,15 @@ export function cardValue(card: SimCard): number {
       case 'enterCounters': v += 1.5; break;
       case 'manifest': v += e.who === 'targetController' ? -1 : 2 * mult; break;
       case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
+      case 'damageMod': v += e.op === 'times' ? 4 * (e.n - 1) : e.op === 'plus' ? 2 * e.n : 2; break;
+      case 'lifeRule': case 'noPrevent': v += 1.5; break;
+      case 'loseHalf': v += 3 * mult; break;
+      case 'deathExile': v += e.keep ? 2 : 1; break;
+      case 'reanimateExiled': v += e.all ? 4 : 2; break;
+      case 'returnDied': case 'returnAs': v += 2; break;
+      case 'triggerDoubler': v += 3; break;
+      case 'copyOpponentEtb': v += 2; break;
+      case 'preventNext': case 'deathShield': v += 1.5; break;
       default: v += graveyardValue(e, mult);
     }
   }

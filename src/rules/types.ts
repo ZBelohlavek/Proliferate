@@ -95,6 +95,8 @@ export interface Perm {
   lockedBy?: number;
   /** Charge counters. */
   charge?: number;
+  /** The creature type chosen as it entered (Roaming Throne). */
+  chosenType?: string;
   /** Combat damage to and from it is prevented this turn (Maze of Ith). */
   fogged?: boolean;
   /** The turn number on which it last attacked (boast, rule 702.142). */
@@ -160,6 +162,12 @@ export interface PlayerState {
   energy: number;
   /** Energy paid this turn (Blaster Hulk). */
   energyPaid?: number;
+  /** Turn number on which a permanent last left the battlefield under this player's control (revolt). */
+  revoltTurn?: number;
+  /** Deflecting Palm: the next damage from one source to this player this turn is prevented (`reflect`: and dealt to that source's controller). */
+  preventNext?: { reflect: boolean; card: SimCard };
+  /** Cosmic Intervention: on this turn number, this player's permanents going to a graveyard are exiled and return at the next end step. */
+  deathShield?: number;
   /** Combat damage dealt to this player is prevented this turn; `tokens`: and makes that many 2/1 flyers (Inkshield). */
   fogged?: { tokens: boolean };
   alive: boolean;
@@ -231,6 +239,19 @@ export interface StackItem {
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
   kicked?: number;
+  /** Triggered abilities: the seat of the player the trigger is about ("that player", see Effect.thatPlayer). */
+  about?: number;
+  /** Dies triggers: the card of the creature that died, for "return that card" (Minion's Return). */
+  died?: DiedCard;
+}
+
+/** A creature that just died: its card, its owner, and what it looked like on the battlefield. */
+export interface DiedCard {
+  card: SimCard;
+  owner: number;
+  /** +1/+1 counters (negative: -1/-1 counters) it had. */
+  counters: number;
+  flying: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import type {
   CastFilter, Color, CurseAbility, CurseAct, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
-  Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
+  Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, DiedCard, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
 } from './types';
 import { assembledCombo, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
 
@@ -55,6 +55,10 @@ interface PendingTrigger {
   subject?: number;
   /** The number "that much" refers to (life gained, for Sanguine Bond). */
   x: number;
+  /** The seat of the player the trigger is about ("that player"). */
+  about?: number;
+  /** Dies triggers: the creature that died. */
+  died?: DiedCard;
 }
 
 const PASS: Action = { type: 'pass' };
@@ -331,7 +335,11 @@ export class Game {
     // Untap step (502). No player gets priority.
     this.step = 'untap';
     this.fogAll = false;
-    for (const q of this.players) q.fogged = undefined;
+    for (const q of this.players) {
+      q.fogged = undefined;
+      // Deflecting Palm lasts "this turn".
+      q.preventNext = undefined;
+    }
     const untapLimit = this.untapLimits(p);
     for (const perm of p.battlefield) {
       // A stun counter is removed instead of untapping (rule 122.1d).
@@ -441,6 +449,8 @@ export class Game {
     }
     // Lynde: Curses put into her controller's graveyard come back attached to that player.
     if (this.curseReturns.length) yield* this.returnCurses();
+    // Cosmic Intervention, The Locust God: "at the beginning of the next end step".
+    if (this.endReturns.length) yield* this.returnAtEnd();
     if (this.monarch === p.seat) {
       this.say(`${p.name} draws a card as the monarch.`);
       this.draw(p, 1);
@@ -521,7 +531,7 @@ export class Game {
         for (const perm of o.battlefield) {
           // "Whenever an opponent draws their second card each turn" (Faerie Mastermind) counts that player's draws.
           const hits = perm.card.effects.filter((e) => e.when === 'opponentDraw' && (e.nth === undefined || e.nth === p.drawsThisTurn));
-          if (hits.length) this.trigger(o, perm.card, perm.id, hits);
+          if (hits.length) this.trigger(o, perm.card, perm.id, hits, 0, null, undefined, p.seat);
         }
       }
     }
@@ -556,6 +566,13 @@ export class Game {
   /** `p` sacrificed a permanent: "whenever you sacrifice" abilities trigger. */
   private sacrificed(p: PlayerState) {
     this.fire(p, 'sacrifice');
+    // Mayhem Devil: "whenever a player sacrifices a permanent"; Bloodroot Apothecary: "whenever an opponent sacrifices".
+    if (this.kindsInGame.has('when:playerSacrifice')) {
+      for (const q of this.alivePlayers()) for (const perm of q.battlefield) {
+        const hits = perm.card.effects.filter((e) => e.when === 'playerSacrifice' && (e.scope !== 'opponents' || q !== p));
+        if (hits.length) this.trigger(q, perm.card, perm.id, hits, 0, null, undefined, p.seat);
+      }
+    }
   }
 
   /** Satya's token copies: sacrificed at the next end step unless their controller pays energy equal to the mana value. */
@@ -777,6 +794,8 @@ export class Game {
     // Boast: only once this creature attacked this turn, and once each turn (rule 702.142).
     if (e.activation.boast && (perm.attackedTurn !== this.turnNumber || perm.usedThisTurn.includes(e))) return false;
     if (e.kind === 'transform' && (e.rider || !sorcery || !perm.card.back)) return false;
+    // The Darkness Crystal: only with a creature card exiled with it.
+    if (e.kind === 'reanimateExiled' && !(this.exiledWith.get(perm.id) ?? []).some((r) => this.players[r.owner].exile.includes(r.card))) return false;
     const act = e.activation;
     if (act.tap && (perm.tapped || (perm.sick && perm.card.isCreature && !this.hasKw(perm, 'haste')))) return false;
     if (act.cost.life >= p.life && act.cost.life > 0) return false;
@@ -1789,13 +1808,13 @@ export class Game {
     const times = card.isInstant || card.isSorcery ? this.triggerTimes(p, 'magecraft') : 1;
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(card, e.castFilter ?? 'any') && card.cmc >= (e.minCmc ?? 0) && counts(e));
-      if (hits.length) for (let i = 0; i < times; i++) this.trigger(p, perm.card, perm.id, hits, 0, null, item.id);
+      if (hits.length) for (let i = 0; i < times; i++) this.trigger(p, perm.card, perm.id, hits, 0, null, item.id, p.seat);
     }
     // "Whenever an opponent casts a spell" (Rhystic Study).
     for (const o of this.opponents(p)) {
       for (const perm of o.battlefield) {
         const hits = perm.card.effects.filter((e) => e.when === 'opponentCast' && matchesFilter(card, e.castFilter ?? 'any') && counts(e));
-        if (hits.length) this.trigger(o, perm.card, perm.id, hits, 0, null, item.id);
+        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, item.id, p.seat);
       }
     }
     if (this.anyCurse) this.curseEvent(p, 'casts', card);
@@ -1910,6 +1929,8 @@ export class Game {
       isCommander: false, sourceId: act.sacrifice || fodder === perm ? null : perm.id, attachTo: null, label: `${perm.card.name} ability`,
     });
     this.becameTarget(p, target, false);
+    // Harsh Mentor: "whenever an opponent activates an ability ... that isn't a mana ability".
+    if (this.kindsInGame.has('when:opponentActivate')) this.fireOpponents(p, 'opponentActivate');
     return true;
   }
 
@@ -1922,12 +1943,15 @@ export class Game {
    * `x`: the amount "that much" refers to. `left`: the source, when it has just left the battlefield.
    * `subject`: the spell that set it off, for "copy that spell".
    */
-  private trigger(controller: PlayerState, card: SimCard, sourceId: number | null, effects: Effect[], x = 0, left: Perm | null = null, subject?: number) {
+  private trigger(controller: PlayerState, card: SimCard, sourceId: number | null, effects: Effect[], x = 0, left: Perm | null = null, subject?: number, about?: number) {
     if (!controller.alive || !effects.length) return;
     const src = left ?? this.findPerm(sourceId);
     const kept: Effect[] = [];
+    const died = this.diedNow;
     for (const e of effects) {
       if (this.triggerBudget-- <= 0) return;
+      // "Return that card": only a creature card that qualifies (Luminous Broodmoth, Necroskitter, Oathkeeper).
+      if (e.kind === 'returnDied' && !this.returnDiedFits(e, died)) continue;
       // "If ~ has four or more quest counters on it" (rule 603.4).
       if (e.minCharge && (src?.charge ?? 0) < e.minCharge) continue;
       // "If" conditions the classifier couldn't read hold about half the time.
@@ -1938,12 +1962,17 @@ export class Game {
       }
       kept.push(e);
     }
-    if (kept.length) this.pending.push({ controller: controller.seat, card, sourceId, effects: kept, x, ...(subject !== undefined ? { subject } : {}) });
+    if (!kept.length) return;
+    // Roaming Throne, Harmonic Prodigy: some of your permanents' abilities trigger an additional time (rule 603.2d).
+    const times = src && src.seat === controller.seat && this.kindsInGame.has('triggerDoubler') ? 1 + this.extraTriggers(controller, src, kept) : 1;
+    for (let i = 0; i < times; i++) {
+      this.pending.push({ controller: controller.seat, card, sourceId, effects: kept, x, ...(subject !== undefined ? { subject } : {}), ...(about !== undefined ? { about } : {}), ...(died ? { died } : {}) });
+    }
   }
 
   /** Abilities of `p`'s opponents' permanents that trigger on something that happened to `p` (x = how much). */
   private fireOpponents(p: PlayerState, when: Trigger, x = 0) {
-    for (const o of this.opponents(p)) this.fire(o, when, x);
+    for (const o of this.opponents(p)) this.fire(o, when, x, p.seat);
   }
 
   private flushDepth = 0;
@@ -1954,6 +1983,7 @@ export class Game {
    * and Phantasmal Image and Jace's Illusions are sacrificed.
    */
   private becameTarget(by: PlayerState, t: Target | null, spell: boolean) {
+    this.crime(by, t);
     if (!t || t.kind !== 'perm') return;
     const perm = this.findPerm(t.id);
     if (!perm) return;
@@ -1984,10 +2014,10 @@ export class Game {
   }
 
   /** Abilities of `p`'s permanents that trigger on a simple event. */
-  private fire(p: PlayerState, when: Trigger, x = 0) {
+  private fire(p: PlayerState, when: Trigger, x = 0, about?: number) {
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === when);
-      if (hits.length) this.trigger(p, perm.card, perm.id, hits, x);
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits, x, null, undefined, about);
     }
   }
 
@@ -2034,6 +2064,13 @@ export class Game {
       const effects: Effect[] = [];
       const targets: (Target | null)[] = [];
       for (const e of t.effects) {
+        // "That player": the player the trigger is about, not a choice (Sheoldred, Quietus Spike).
+        if (e.thatPlayer) {
+          if (t.about === undefined || !this.players[t.about].alive) continue;
+          effects.push(e);
+          targets.push({ kind: 'player', seat: t.about });
+          continue;
+        }
         const all = this.targetCandidates(p, e, src);
         if (all === null) {
           effects.push(e);
@@ -2058,8 +2095,8 @@ export class Game {
         targets.push(chosen);
       }
       if (!effects.length) continue;
-      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: t.card, effects, targets, x: t.x, isCommander: false, sourceId: t.sourceId, attachTo: null, label: `${t.card.name} trigger`, ...(t.subject !== undefined ? { subject: t.subject } : {}) });
-      for (const aim of targets) this.becameTarget(p, aim, false);
+      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: t.card, effects, targets, x: t.x, isCommander: false, sourceId: t.sourceId, attachTo: null, label: `${t.card.name} trigger`, ...(t.subject !== undefined ? { subject: t.subject } : {}), ...(t.about !== undefined ? { about: t.about } : {}), ...(t.died ? { died: t.died } : {}) });
+      targets.forEach((aim, i) => { if (!effects[i].thatPlayer) this.becameTarget(p, aim, false); });
     }
     // Abilities that triggered on those targets go on the stack too (rule 603.3b).
     if (this.pending.length && this.flushDepth < 5) {
@@ -2150,6 +2187,12 @@ export class Game {
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
+    // Nexus of Fate: shuffled into its owner's library instead.
+    if (!isCommander && this.shufflesInstead(card)) {
+      p.library.splice(this.rng.int(p.library.length + 1), 0, card);
+      this.say(`${card.name} is shuffled into ${p.name}'s library instead.`);
+      return;
+    }
     // Rest in Peace: exiled instead.
     const to = this.exiledInstead(p) ? 'exile' : 'graveyard';
     p[to].push(card);
@@ -2262,12 +2305,12 @@ export class Game {
     this.say(`${p.name} casts a face-down creature.`);
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(priced, e.castFilter ?? 'any') && priced.cmc >= (e.minCmc ?? 0));
-      if (hits.length) this.trigger(p, perm.card, perm.id, hits);
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits, 0, null, undefined, p.seat);
     }
     for (const o of this.opponents(p)) {
       for (const perm of o.battlefield) {
         const hits = perm.card.effects.filter((e) => e.when === 'opponentCast' && matchesFilter(priced, e.castFilter ?? 'any'));
-        if (hits.length) this.trigger(o, perm.card, perm.id, hits);
+        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, undefined, p.seat);
       }
     }
     return true;
@@ -2470,12 +2513,25 @@ export class Game {
       for (const q of p.battlefield) for (const e of q.card.effects) if (e.kind === 'enterCounters') perm.counters += e.n * hurt;
     }
     if (card.entersTapped) perm.tapped = true;
+    // Roaming Throne: "as this enters, choose a creature type".
+    if (card.effects.some((e) => e.kind === 'triggerDoubler' && e.chosenType)) {
+      perm.chosenType = this.chooseCreatureType(p);
+      if (perm.chosenType) this.say(`${p.name} chooses ${perm.chosenType} for ${card.name}.`);
+    }
     p.battlefield.push(perm);
     if (card.name === 'Isochron Scepter') this.imprint(p, perm);
     // Kicked (or offspring paid): its "if it was kicked" enters abilities too. Kicker {X} sets the X they refer to.
     const etb = (kicks && !perm.printed ? this.kickedCard(card, kicks) : card).effects.filter((e) => e.when === 'resolve')
       .map((e) => (e.kind === 'steal' && e.maxCmc === -1 ? { ...e, maxCmc: x } : e));
     if (etb.length) for (let i = this.triggerTimes(p, 'permanentEnters', card); i > 0; i--) this.trigger(p, card, perm.id, etb);
+    // Aboleth Spawn: a creature entering under an opponent's control sets off its enters abilities for you too (a copy you control).
+    if (etb.length && card.isCreature && this.kindsInGame.has('copyOpponentEtb')) {
+      for (const o of this.opponents(p)) for (const q of o.battlefield) {
+        if (!q.card.effects.some((e) => e.kind === 'copyOpponentEtb' && e.when === 'static')) continue;
+        this.say(`${q.card.name} copies ${card.name}'s enters ability for ${o.name}.`);
+        this.trigger(o, card, q.id, etb.filter((e) => e.kind !== 'clone' && e.kind !== 'counters'));
+      }
+    }
     if (card.isCreature) this.creatureEntered(p, perm);
     // A Saga enters with a lore counter, which sets off chapter I (rule 714.3a).
     if (card.saga) this.addLore(p, perm);
@@ -2713,6 +2769,13 @@ export class Game {
       }
       case 'draw': {
         const count = e.n === -1 ? Math.max(x, 1) : e.n;
+        // "That player draws seven cards" (Forced Fruition), "the attacking player draws a card" (Breena).
+        if (e.thatPlayer && target?.kind === 'player') {
+          const who = this.players[target.seat];
+          this.draw(who, count);
+          this.say(`${who.name} draws ${count} card${count > 1 ? 's' : ''}.`);
+          break;
+        }
         this.draw(p, count, e.when === 'opponentDraw');
         this.say(`${p.name} draws ${count} card${count > 1 ? 's' : ''}.`);
         break;
@@ -2720,6 +2783,82 @@ export class Game {
       case 'removal':
         yield* this.resolveRemoval(p, e, src, x, target);
         break;
+      case 'loseHalf': {
+        const v = target?.kind === 'player' ? this.players[target.seat] : null;
+        if (!v?.alive || v.life <= 0) break;
+        const lost = this.loseLife(v, Math.ceil(v.life / 2), p, 'noncombat');
+        this.say(`${v.name} loses half their life: ${lost} (life ${v.life}).`);
+        break;
+      }
+      case 'preventNext':
+        p.preventNext = { reflect: e.reflect, card: card ?? this.resolvingCard ?? p.commandZone[0] };
+        this.say(`${p.name} will prevent the next damage a source deals to them this turn.`);
+        break;
+      case 'deathShield':
+        p.deathShield = this.turnNumber;
+        this.say(`This turn, ${p.name}'s permanents are exiled instead of going to the graveyard, and come back at the end step.`);
+        break;
+      case 'reanimateExiled': {
+        if (!src) break;
+        const pile = (this.exiledWith.get(src.id) ?? []).filter((r) => this.players[r.owner].exile.includes(r.card));
+        if (!pile.length) break;
+        // The Darkness Crystal: the best one. Gisa: all of them, with decayed.
+        const chosen = e.all ? pile : [pile.reduce((a, b) => (b.card.value > a.card.value ? b : a))];
+        this.exiledWith.set(src.id, pile.filter((r) => !chosen.includes(r)));
+        for (const r of chosen) {
+          const owner = this.players[r.owner];
+          owner.exile.splice(owner.exile.indexOf(r.card), 1);
+          this.say(`${r.card.name} comes back under ${p.name}'s control (${src.card.name}).`);
+          const perm = yield* this.enter(p, r.card, false, 0, null, owner);
+          if (!perm) continue;
+          if (e.tapped) perm.tapped = true;
+          if (e.counters) perm.counters += e.counters;
+          // Decayed (rule 702.147): it can't block, and it is sacrificed at end of combat when it attacks.
+          if (e.all) perm.kwCounters = [...(perm.kwCounters ?? []), 'decayed', "can't block"];
+        }
+        break;
+      }
+      case 'returnDied': {
+        const d = this.resolving?.died;
+        if (!d) break;
+        const owner = this.players[d.owner];
+        const i = owner.graveyard.indexOf(d.card);
+        if (i === -1 || this.graveyardLocked()) break;
+        owner.graveyard.splice(i, 1);
+        this.say(`${d.card.name} returns to the battlefield under ${p.name}'s control.`);
+        const perm = yield* this.enter(p, d.card, false, 0, null, owner);
+        if (perm && e.kw) perm.kwCounters = [...(perm.kwCounters ?? []), e.kw];
+        break;
+      }
+      case 'returnAs': {
+        if (!card) break;
+        const owner = p;
+        if (e.as === 'library') {
+          if (!owner.deck.commanders.includes(card)) this.tuck(owner, card, e.n ?? 0);
+          break;
+        }
+        if (!owner.graveyard.includes(card)) break;
+        if (e.as === 'handAtEnd') {
+          this.endReturns.push({ card, owner: owner.seat, to: 'hand', from: 'graveyard' });
+          break;
+        }
+        if (this.graveyardLocked()) break;
+        owner.graveyard.splice(owner.graveyard.indexOf(card), 1);
+        if (e.as === 'enchantment') {
+          // The Enduring cycle: back as an enchantment that isn't a creature, so it can't die and return again.
+          this.say(`${card.name} returns to the battlefield as an enchantment.`);
+          const perm = yield* this.enter(p, enchantmentOnly(card), false, 0, null);
+          if (perm) perm.printed = card;
+        } else {
+          this.say(`${card.name} returns to the battlefield${e.as === 'stunned' ? ` tapped with ${e.n ?? 2} stun counters` : ''}.`);
+          const perm = yield* this.enter(p, card, false, 0, null);
+          if (perm && e.as === 'stunned') {
+            perm.tapped = true;
+            perm.stun = (perm.stun ?? 0) + (e.n ?? 2);
+          }
+        }
+        break;
+      }
       case 'wipe': {
         const amount = n(e.amount);
         // Wrath of the Skies: pay all the energy you have; everything with mana value up to that goes.
@@ -2736,8 +2875,8 @@ export class Game {
             if (e.target === 'artifacts' && !perm.card.isArtifact) continue;
             if (perm.card.cmc > cap || (e.byEnergy && perm.card.isPlaneswalker && !perm.card.isCreature)) continue;
             if (e.mode === 'damage') {
-              if (perm.card.isCreature) this.hurt(perm, amount, e.shrink);
-            } else if (e.mode === 'exile' || e.mode === 'bounce' || !this.hasKw(perm, 'indestructible')) hit.push(perm);
+              if (perm.card.isCreature) this.hurt(perm, e.shrink ? amount : this.damagePerm(p, card ?? null, src, perm, amount), e.shrink);
+            } else if (e.mode === 'exile' || e.mode === 'bounce' || !this.hasKw(perm, 'indestructible') && !this.regenerated(perm)) hit.push(perm);
           }
         }
         if (hit.length) this.removePerms(hit, e.mode === 'exile' ? 'exile' : e.mode === 'bounce' ? 'hand' : 'graveyard');
@@ -2841,7 +2980,9 @@ export class Game {
         // "You gain life equal to the life lost this way": only what was really lost (Teferi's Protection stops it).
         for (const o of this.opponents(p)) {
           if (e.emptyHand && o.hand.length > 0) continue;
-          total += this.loseLife(o, amount, p, 'noncombat');
+          // "Deals 1 damage to each opponent": damage, so Torbran adds to it and prevention stops it.
+          const dealt = e.damage ? this.damageAfter(p, card ?? null, src, o, amount, false) : amount;
+          total += this.loseLife(o, dealt, p, 'noncombat');
         }
         this.gainLife(p, e.gain === -1 ? total : e.gain);
         this.say(e.emptyHand ? `${p.name} drains each opponent with an empty hand for ${amount}.` : `${p.name} drains each opponent for ${amount}.`);
@@ -2851,8 +2992,14 @@ export class Game {
         const victim = target?.kind === 'player' ? this.players[target.seat] : null;
         if (!victim?.alive) break;
         const amount = e.n === -1 ? Math.max(x, 1) : e.n;
+        // "That player loses 2 life" (Sheoldred) is life loss, not damage.
+        if (e.lifeLoss) {
+          const lost = this.loseLife(victim, amount, p, 'noncombat');
+          this.say(`${victim.name} loses ${lost} life (life ${victim.life}).`);
+          break;
+        }
         if (this.damageMills(p, victim, amount)) break;
-        const dealt = this.doubledDamage(victim, amount, p);
+        const dealt = this.doubledDamage(victim, this.damageAfter(p, card ?? null, src, victim, amount, false), p);
         this.loseLife(victim, dealt, p, 'noncombat');
         this.say(`${p.name} hits ${victim.name} for ${dealt} (life ${victim.life}).`);
         break;
@@ -3591,8 +3738,9 @@ export class Game {
         this.removePerm(gone, 'graveyard');
         this.sacrificed(victim);
       } else {
-        this.loseLife(victim, amount, p, 'noncombat');
-        this.say(`${p.name} deals ${amount} damage to ${victim.name} (life ${victim.life}).`);
+        const dealt = this.doubledDamage(victim, this.damageAfter(p, this.resolvingCard, src, victim, amount, false), p);
+        this.loseLife(victim, dealt, p, 'noncombat');
+        this.say(`${p.name} deals ${dealt} damage to ${victim.name} (life ${victim.life}).`);
       }
       return;
     }
@@ -3624,8 +3772,16 @@ export class Game {
           this.say(`${perm.card.name} (${owner.name}) takes ${pay} damage (${pay} energy paid).`);
           break;
         }
-        this.hurt(perm, amount, e.shrink);
-        this.say(e.shrink ? `${perm.card.name} (${owner.name}) gets -${amount}/-${amount}.` : `${perm.card.name} (${owner.name}) takes ${amount} damage.`);
+        if (e.shrink) {
+          this.hurt(perm, amount, e.shrink);
+          this.say(`${perm.card.name} (${owner.name}) gets -${amount}/-${amount}.`);
+          break;
+        }
+        {
+          const dealt = this.damagePerm(p, this.resolvingCard, src, perm, amount);
+          this.hurt(perm, dealt);
+          this.say(`${perm.card.name} (${owner.name}) takes ${dealt} damage.`);
+        }
         break;
       case 'fight': {
         let fighter = src && src.card.isCreature && p.battlefield.includes(src) ? src : null;
@@ -3635,7 +3791,7 @@ export class Game {
           const pick = mine.length === 1 ? [0] : yield* this.choose(p, 'fighter', `Which of your creatures deals damage to ${perm.card.name}?`, mine.map((q) => ({ label: `${q.card.name} (${this.power(q)}/${this.toughness(q)})`, card: q.card, permId: q.id })), 1, 1);
           fighter = mine[pick[0] ?? 0];
         }
-        const dealt = this.power(fighter);
+        const dealt = this.damagePerm(p, fighter.card, fighter, perm, this.power(fighter));
         perm.damage += dealt;
         if (dealt > 0 && this.hasKw(fighter, 'deathtouch')) perm.deathtouched = true;
         this.say(`${fighter.card.name} deals ${dealt} damage to ${perm.card.name} (${owner.name}).`);
@@ -3827,6 +3983,8 @@ export class Game {
 
   gainLife(p: PlayerState, amount: number) {
     if (amount <= 0) return;
+    if (this.kindsInGame.has('lifeRule')) amount = this.lifeGained(p, amount);
+    if (amount <= 0) return;
     p.life += amount;
     this.fire(p, 'gainLife', amount);
   }
@@ -3983,7 +4141,7 @@ export class Game {
 
   /** Destroy a permanent. Indestructible permanents stay (rule 702.12). */
   private destroy(perm: Perm) {
-    if (this.hasKw(perm, 'indestructible')) return;
+    if (this.hasKw(perm, 'indestructible') || this.regenerated(perm)) return;
     this.removePerm(perm, 'graveyard');
   }
 
@@ -3999,20 +4157,35 @@ export class Game {
    */
   private removePerms(perms: Perm[], to: 'graveyard' | 'exile' | 'hand' | 'library') {
     const watchers = to === 'graveyard' && this.kindsInGame.has('when:creatureDies') ? this.allPerms().map((w) => ({ w, seat: w.seat })) : [];
-    const died: { perm: Perm; seat: number; worn: Perm[] }[] = [];
+    const died: { perm: Perm; seat: number; worn: Perm[]; real: DiedCard | undefined }[] = [];
     const landsDied: PlayerState[] = [];
+    const leaving: { perm: Perm; seat: number; dest: typeof to; power: number }[] = [];
     for (const perm of perms) {
       const controller = this.players[perm.seat];
       const owner = this.players[perm.owner ?? perm.seat];
       const idx = controller.battlefield.indexOf(perm);
       if (idx === -1) continue;
       const worn = to === 'graveyard' && perm.card.isCreature ? this.attachments(perm) : NONE;
+      const power = perm.card.isCreature ? this.power(perm) : 0;
+      const flying = perm.card.isCreature && this.hasKw(perm, 'flying');
       controller.battlefield.splice(idx, 1);
+      controller.revoltTurn = this.turnNumber;
       // Rest in Peace, Dauthi Voidwalker: exiled instead, so nothing "dies". An unearthed creature is exiled if it would leave.
       let dest = to;
       if (dest === 'graveyard' && this.exiledInstead(owner)) dest = 'exile';
       if (this.unearthed.delete(perm.id)) dest = 'exile';
       if (this.finality.delete(perm.id) && dest === 'graveyard') dest = 'exile';
+      // Gisa, Vren, The Darkness Crystal: an opponent's creature that would die is exiled instead (rule 614.1a).
+      let exiler: { q: Perm; e: Extract<Effect, { kind: 'deathExile' }> } | null = null;
+      if (dest === 'graveyard' && (exiler = this.deathExiler(controller, perm))) {
+        dest = 'exile';
+        this.say(`${perm.card.name} is exiled instead (${exiler.q.card.name}).`);
+        if (exiler.e.gain && !perm.token) this.gainLife(this.players[exiler.q.seat], exiler.e.gain);
+      }
+      // Cosmic Intervention: exiled instead, and back at the beginning of the next end step.
+      const shielded = dest === 'graveyard' && controller.deathShield === this.turnNumber && !perm.token;
+      if (shielded) dest = 'exile';
+      let real: DiedCard | undefined;
 
       // Tokens cease to exist once they leave the battlefield (rule 704.5d). A copy goes back to being its own card.
       // A merged permanent's cards all go to the same zone (rule 721.3).
@@ -4029,6 +4202,18 @@ export class Game {
             } else owner.library.splice(this.rng.int(owner.library.length + 1), 0, card);
             continue;
           }
+          // Nexus of Fate, Blightsteel Colossus: shuffled into the library instead.
+          if (dest === 'graveyard' && this.shufflesInstead(card)) {
+            owner.library.splice(this.rng.int(owner.library.length + 1), 0, card);
+            this.say(`${card.name} is shuffled into ${owner.name}'s library instead.`);
+            continue;
+          }
+          if (dest === 'exile' && exiler?.e.keep && card.isCreature) {
+            const pile = this.exiledWith.get(exiler.q.id) ?? [];
+            pile.push({ card, owner: owner.seat });
+            this.exiledWith.set(exiler.q.id, pile);
+          }
+          if (shielded && dest === 'exile' && !commander) this.endReturns.push({ card, owner: owner.seat, to: 'battlefield', from: 'exile' });
           if (dest === 'graveyard') {
             owner.graveyard.push(card);
             if (card.curse && owner.battlefield.some((q) => q.card.effects.some((e) => e.kind === 'returnCurses'))) this.curseReturns.push({ seat: owner.seat, card });
@@ -4036,6 +4221,7 @@ export class Game {
           else owner.hand.push(card);
           if (commander) this.pendingCommander.push({ seat: owner.seat, card, to: dest });
         }
+        if (cards.length === 1 && dest === 'graveyard' && owner.graveyard[owner.graveyard.length - 1] === cards[0].card) real = { card: cards[0].card, owner: owner.seat, counters: perm.counters, flying };
         // Persist (no -1/-1 counter on it) and undying (no +1/+1 counter): it returns (rules 702.79, 702.93).
         const card = cards.length === 1 ? cards[0].card : null;
         const persist = card?.persist;
@@ -4043,7 +4229,8 @@ export class Game {
           this.trigger(owner, card, null, [{ kind: 'returnSelf', counters: persist === 'persist' ? -1 : 1, when: 'creatureDies', scope: 'self' }]);
         }
       }
-      if (perm.card.isCreature && dest === 'graveyard' && controller.alive) died.push({ perm, seat: controller.seat, worn });
+      if (perm.card.isCreature && dest === 'graveyard' && controller.alive) died.push({ perm, seat: controller.seat, worn, real });
+      leaving.push({ perm, seat: controller.seat, dest, power });
       if (perm.landInfo && dest === 'graveyard' && controller.alive && this.kindsInGame.has('landDiesPunish')) landsDied.push(controller);
     }
     // Dingus Egg: each land that went to a graveyard hurts its controller.
@@ -4065,9 +4252,12 @@ export class Game {
       for (const q of this.allPerms()) if (q.lockedBy !== undefined && gone.has(q.lockedBy)) this.unlock(q);
     }
 
-    for (const { perm, seat, worn } of died) {
+    for (const { perm, seat, worn, real } of died) {
       const controller = this.players[seat];
-      const own = perm.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'self');
+      this.diedNow = real;
+      // "If it had no counters on it" (Unstoppable Slasher) is checked as it dies (rule 603.4).
+      const counted = perm.counters !== 0 || !!perm.charge || !!perm.stun;
+      const own = perm.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'self' && !(e.noCounters && counted));
       if (own.length) for (let i = this.triggerTimes(controller, 'dies'); i > 0; i--) this.trigger(controller, perm.card, null, own, 0, perm);
       for (const { w, seat: wSeat } of watchers) {
         const q = this.players[wSeat];
@@ -4084,6 +4274,20 @@ export class Game {
         const hits = eq.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'attached');
         const holder = this.players[eq.seat];
         if (hits.length) for (let i = this.triggerTimes(holder, 'dies'); i > 0; i--) this.trigger(holder, eq.card, eq.id, hits);
+      }
+      this.diedNow = undefined;
+    }
+    // "When ~ leaves the battlefield" / "dies or is put into exile" (x = its power), and "whenever a token you control leaves" (Nadier's Nightblade).
+    if (this.kindsInGame.has('when:leaves')) {
+      for (const { perm, seat, dest, power } of leaving) {
+        const controller = this.players[seat];
+        const own = perm.card.effects.filter((e) => e.when === 'leaves' && e.scope === 'self' && (!e.zones || e.zones.includes(dest)));
+        if (own.length) this.trigger(controller, perm.card, null, own, power, perm);
+        if (!perm.token) continue;
+        for (const w of controller.battlefield) {
+          const hits = w.card.effects.filter((e) => e.when === 'leaves' && e.scope === 'any');
+          if (hits.length) this.trigger(controller, w.card, w.id, hits);
+        }
       }
     }
   }
@@ -4512,7 +4716,7 @@ export class Game {
         if (perm.card.isCreature) {
           // 704.5f: toughness 0 or less. 704.5g/h: lethal or deathtouch damage destroys.
           const toughness = this.toughness(perm);
-          if (toughness <= 0 || ((perm.damage >= toughness || perm.deathtouched) && !this.hasKw(perm, 'indestructible'))) {
+          if (toughness <= 0 || ((perm.damage >= toughness || perm.deathtouched) && !this.hasKw(perm, 'indestructible') && !this.regenerated(perm))) {
             this.say(`${perm.card.name} (${q.name}) dies.`);
             dying.push(perm);
           } else {
@@ -4836,6 +5040,8 @@ export class Game {
         }
       }
     }
+    // "Whenever a player attacks (one of your opponents)" (Breena, Karazikar, Aurelia).
+    this.playerAttacked(p, attacking);
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -4897,6 +5103,12 @@ export class Game {
   }
 
   private endCombat() {
+    // Decayed (rule 702.147): a creature with decayed that attacked is sacrificed at end of combat.
+    const decayed = this.allPerms().filter((q) => q.attacking !== null && q.kwCounters?.includes('decayed'));
+    if (decayed.length) {
+      this.removePerms(decayed, 'graveyard');
+      for (const q of decayed) this.sacrificed(this.players[q.seat]);
+    }
     for (const q of this.players) {
       for (const perm of q.battlefield) {
         perm.attacking = null;
@@ -4904,6 +5116,259 @@ export class Game {
         perm.blocking = null;
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Replacement and prevention effects (rules 614, 615), regeneration (701.19),
+  // death and leave-the-battlefield replacements, trigger doublers (603.2d)
+  // -------------------------------------------------------------------------
+
+  /** Creature cards exiled "with" a permanent (Gisa, The Darkness Crystal), by the permanent's id. */
+  private exiledWith = new Map<number, { card: SimCard; owner: number }[]>();
+  /** Cards that come back at the beginning of the next end step (Cosmic Intervention, The Locust God). */
+  private endReturns: { card: SimCard; owner: number; to: 'battlefield' | 'hand'; from: 'exile' | 'graveyard' }[] = [];
+  /** While dies triggers are being noted: the creature that died (for "return that card"). */
+  private diedNow: DiedCard | undefined;
+  /** Damage redirected by a replacement (Phyrexian Vindicator, Deflecting Palm) isn't replaced again, so it can't loop. */
+  private redirecting = false;
+
+  /**
+   * The damage `amount` from `src` (a permanent `srcPerm`, or a spell) controlled by `from` really deals to `to`,
+   * after static replacement and prevention effects (rules 614.1a, 615): Torbran, Gisela, City on Fire, Ojer Axonil,
+   * Phyrexian Vindicator, Iroas, Deflecting Palm. The affected player picks the order (rule 616.1), so multiplying
+   * comes before adding, and prevention last.
+   */
+  damageAfter(from: PlayerState | null, src: SimCard | null, srcPerm: Perm | null, to: PlayerState | Perm, amount: number, combat: boolean): number {
+    if (amount <= 0) return amount;
+    const hasMods = this.kindsInGame.has('damageMod');
+    const toPlayer = 'battlefield' in to;
+    const victim = toPlayer ? to : this.players[to.seat];
+    if (!hasMods && !(toPlayer && victim.preventNext)) return amount;
+    const unpreventable = this.kindsInGame.has('noPrevent') && this.allPerms().some((q) => q.card.effects.some((e) => e.kind === 'noPrevent' && e.when === 'static'));
+    let out = amount;
+    const prevent: { q: Perm; e: Extract<Effect, { kind: 'damageMod' }> }[] = [];
+    if (hasMods) {
+      const plus: number[] = [];
+      let times = 1;
+      let floor = 0;
+      for (const q of this.allPerms()) for (const e of q.card.effects) {
+        if (e.kind !== 'damageMod' || e.when !== 'static') continue;
+        if (!this.damageModApplies(q, e, from, src, srcPerm, to, combat)) continue;
+        if (e.op === 'plus') plus.push(e.n);
+        else if (e.op === 'times') times *= e.n;
+        else if (e.op === 'toPower') floor = Math.max(floor, this.power(q));
+        else prevent.push({ q, e });
+      }
+      out = out * Math.min(times, 64) + plus.reduce((a, b) => a + b, 0);
+      if (floor > out) out = floor;
+    }
+    if (unpreventable) return out;
+    for (const { q, e } of prevent) {
+      const stopped = e.op === 'prevent' ? out : Math.ceil(out / 2);
+      out -= stopped;
+      if (stopped > 0) this.say(`${q.card.name} prevents ${stopped} damage${toPlayer ? ` to ${victim.name}` : ` to ${(to as Perm).card.name}`}.`);
+      // Phyrexian Vindicator: "when damage is prevented this way, it deals that much damage to any other target".
+      if (e.reflect && stopped > 0) this.trigger(this.players[q.seat], q.card, q.id, [{ kind: 'removal', target: 'creature', mode: 'damage', amount: stopped, anyTarget: true, when: 'resolve' }]);
+    }
+    // Deflecting Palm: the next damage an opponent's source would deal to this player this turn.
+    if (toPlayer && victim.preventNext && from && from !== victim && out > 0) {
+      const shield = victim.preventNext;
+      victim.preventNext = undefined;
+      this.say(`${shield.card.name} prevents ${out} damage to ${victim.name}.`);
+      if (shield.reflect && !this.redirecting) {
+        this.redirecting = true;
+        const back = this.damageAfter(victim, shield.card, null, from, out, false);
+        this.redirecting = false;
+        const lost = this.loseLife(from, back, victim, 'noncombat');
+        this.say(`${shield.card.name} deals ${lost} damage to ${from.name} (life ${from.life}).`);
+      }
+      out = 0;
+    }
+    return out;
+  }
+
+  private damageModApplies(q: Perm, e: Extract<Effect, { kind: 'damageMod' }>, from: PlayerState | null, src: SimCard | null, srcPerm: Perm | null, to: PlayerState | Perm, combat: boolean): boolean {
+    const owner = this.players[q.seat];
+    if (e.noncombat && combat) return false;
+    if (e.from === 'yours' && from !== owner) return false;
+    if (e.from === 'otherYours' && (from !== owner || srcPerm === q)) return false;
+    if (e.color && !(src && cardColors(src).includes(e.color))) return false;
+    if (e.subtypes && !(srcPerm?.card.isCreature && e.subtypes.some((t) => hasSubtype(srcPerm.card, t)))) return false;
+    if (e.withCounter && !(srcPerm?.card.isCreature && srcPerm.counters > 0)) return false;
+    if (e.revolt && owner.revoltTurn !== this.turnNumber) return false;
+    const toPlayer = 'battlefield' in to;
+    const victim = toPlayer ? to : this.players[to.seat];
+    switch (e.to) {
+      case 'any': return true;
+      case 'opponents': return victim !== owner;
+      case 'opponentPlayers': return toPlayer && victim !== owner;
+      case 'you': return victim === owner;
+      case 'self': return to === q;
+      case 'otherCreatures': return !toPlayer && to !== q && to.seat === q.seat && to.card.isCreature;
+      case 'attackers': return !toPlayer && to.seat === q.seat && to.attacking !== null;
+      case 'attached': return !toPlayer && q.attachedTo === to.id;
+    }
+    return false;
+  }
+
+  /** Damage `from`'s spell or permanent deals to a creature (or other permanent), after replacement and prevention. */
+  private damagePerm(from: PlayerState, src: SimCard | null, srcPerm: Perm | null, perm: Perm, amount: number, combat = false): number {
+    return this.kindsInGame.has('damageMod') ? this.damageAfter(from, src, srcPerm, perm, amount, combat) : amount;
+  }
+
+  /** Life `p` would gain, after Sulfuric Vortex, Tainted Remedy and Alhammarret's Archive (rule 614.1a). */
+  private lifeGained(p: PlayerState, amount: number): number {
+    const rules: { owner: PlayerState; rule: 'noGain' | 'double' | 'lossInstead' }[] = [];
+    for (const q of this.allPerms()) for (const e of q.card.effects) {
+      if (e.kind !== 'lifeRule' || e.when !== 'static') continue;
+      const owner = this.players[q.seat];
+      if (e.who === 'all' || (e.who === 'opponents' && owner !== p) || (e.who === 'you' && owner === p)) rules.push({ owner, rule: e.rule });
+    }
+    // The player gaining life orders replacements (rule 616.1); "gains no life" is never worse for them.
+    if (rules.some((r) => r.rule === 'noGain')) return 0;
+    const loss = rules.find((r) => r.rule === 'lossInstead');
+    if (loss) {
+      const lost = this.loseLife(p, amount, loss.owner, 'noncombat');
+      if (lost) this.say(`${p.name} loses ${lost} life instead of gaining it (life ${p.life}).`);
+      return 0;
+    }
+    return amount * 2 ** Math.min(rules.filter((r) => r.rule === 'double').length, 4);
+  }
+
+  /** A regeneration shield replaces being destroyed: tap it, remove its damage, take it out of combat (rule 701.19). */
+  private regenerated(perm: Perm): boolean {
+    const i = perm.tempKw.indexOf('regenerate');
+    if (i === -1) return false;
+    perm.tempKw.splice(i, 1);
+    perm.tapped = true;
+    perm.damage = 0;
+    perm.deathtouched = false;
+    perm.attacking = null;
+    perm.blocking = null;
+    this.say(`${perm.card.name} regenerates.`);
+    return true;
+  }
+
+  /** The triggered abilities of `src` trigger this many additional times for `p` (Roaming Throne, Harmonic Prodigy, Delney). */
+  private extraTriggers(p: PlayerState, src: Perm, effects: Effect[]): number {
+    let n = 0;
+    for (const q of p.battlefield) for (const e of q.card.effects) {
+      if (e.kind !== 'triggerDoubler' || e.when !== 'static') continue;
+      if (e.other && q === src) continue;
+      if (e.attack) {
+        // Firebender Ascension: a counter for each ability an attacking creature sets off, then copies from four counters on.
+        if (!src.card.isCreature || src.attacking === null || !effects.some((f) => f.when === 'attack')) continue;
+        this.addCharge(q, 1);
+        if ((q.charge ?? 0) >= (e.charged ?? 0)) n++;
+        continue;
+      }
+      const card = src.card;
+      if (e.colorless) {
+        if (cardColors(card).length || q === src) continue;
+      } else if (!card.isCreature) continue;
+      if (e.subtypes && !e.subtypes.some((t) => hasSubtype(card, t))) continue;
+      if (e.chosenType && (q === src || !q.chosenType || !hasSubtype(card, q.chosenType))) continue;
+      if (e.legendary && !card.isLegendary) continue;
+      if (e.maxPower !== undefined && this.power(src) > e.maxPower) continue;
+      n++;
+    }
+    return Math.min(n, 3);
+  }
+
+  /** "As ~ enters, choose a creature type" (Roaming Throne): the most common type among `p`'s creatures and creature cards. */
+  private chooseCreatureType(p: PlayerState): string | undefined {
+    const tally = new Map<string, number>();
+    const cards = [...p.battlefield.map((q) => q.card), ...p.hand, ...p.library, ...p.commandZone];
+    // Creatures with triggered abilities are what the choice is for; the rest count a little.
+    for (const c of cards) {
+      if (!c.isCreature) continue;
+      const weight = c.effects.some((e) => e.when !== 'static' && e.when !== 'activated' && e.when !== 'loyalty') ? 3 : 1;
+      for (const t of creatureTypes(c)) tally.set(t, (tally.get(t) ?? 0) + weight);
+    }
+    let best: string | undefined;
+    for (const [t, n] of tally) if (!best || n > tally.get(best)!) best = t;
+    return best;
+  }
+
+  private returnDiedFits(e: Extract<Effect, { kind: 'returnDied' }>, died: DiedCard | undefined): boolean {
+    if (!died || !died.card.isCreature) return false;
+    if (e.filter === 'noFlying' && died.flying) return false;
+    if (e.filter === 'minusCounter' && died.counters >= 0) return false;
+    if (e.subtype && !hasSubtype(died.card, e.subtype)) return false;
+    return true;
+  }
+
+  /** Gisa, The Darkness Crystal: a creature of `controller`'s that would die is exiled instead. Returns the permanent doing it, or null. */
+  private deathExiler(controller: PlayerState, perm: Perm): { q: Perm; e: Extract<Effect, { kind: 'deathExile' }> } | null {
+    if (!this.kindsInGame.has('deathExile') || !perm.card.isCreature) return null;
+    for (const o of this.opponents(controller)) for (const q of o.battlefield) for (const e of q.card.effects) {
+      if (e.kind !== 'deathExile' || e.when !== 'static') continue;
+      if (e.nontoken && perm.token) continue;
+      return { q, e };
+    }
+    return null;
+  }
+
+  /** Nexus of Fate, Blightsteel Colossus: shuffled into the library instead of going to a graveyard. */
+  private shufflesInstead(card: SimCard): boolean {
+    return card.effects.some((e) => e.kind === 'shuffleInstead');
+  }
+
+  /** Cosmic Intervention, The Locust God: cards that come back at the beginning of the end step. */
+  private *returnAtEnd(): Flow<void> {
+    const due = this.endReturns;
+    this.endReturns = [];
+    for (const r of due) {
+      const owner = this.players[r.owner];
+      const zone = owner[r.from];
+      const i = zone.indexOf(r.card);
+      if (i === -1 || !owner.alive) continue;
+      zone.splice(i, 1);
+      if (r.to === 'hand') {
+        owner.hand.push(r.card);
+        this.say(`${r.card.name} returns to ${owner.name}'s hand.`);
+      } else {
+        this.say(`${r.card.name} returns to the battlefield.`);
+        yield* this.enter(owner, r.card, false, 0, null);
+      }
+    }
+  }
+
+  /** Put a card from a graveyard or exile into its owner's library, `depth` cards from the top (0: the bottom). */
+  private tuck(owner: PlayerState, card: SimCard, depth: number): boolean {
+    for (const zone of [owner.graveyard, owner.exile]) {
+      const i = zone.indexOf(card);
+      if (i === -1) continue;
+      zone.splice(i, 1);
+      owner.library.splice(depth > 0 ? Math.min(depth - 1, owner.library.length) : owner.library.length, 0, card);
+      this.say(`${card.name} is put into ${owner.name}'s library${depth > 0 ? ` ${['', 'on top', 'second from the top', 'third from the top'][depth] ?? `${depth}th from the top`}` : ' on the bottom'}.`);
+      return true;
+    }
+    return false;
+  }
+
+  /** `by` attacks: "whenever a player attacks (one of your opponents / with three or more creatures)" (Breena, Karazikar, Aurelia). */
+  private playerAttacked(by: PlayerState, attackers: Perm[]) {
+    if (!this.kindsInGame.has('when:playerAttacks') || !attackers.length) return;
+    for (const q of this.alivePlayers()) for (const perm of q.battlefield) {
+      const hits = perm.card.effects.filter((e) => {
+        if (e.when !== 'playerAttacks') return false;
+        if (e.minAttackers && attackers.length < e.minAttackers) return false;
+        // "One of your opponents": someone other than the watcher was attacked; "an opponent attacks another of your opponents": and the attacker is an opponent too.
+        if (e.scope === 'opponents' && (by === q || !attackers.some((a) => a.attacking !== q.seat))) return false;
+        if (e.scope === 'any' && !attackers.some((a) => a.attacking !== q.seat)) return false;
+        return true;
+      });
+      if (hits.length) this.trigger(q, perm.card, perm.id, hits, attackers.length, null, undefined, by.seat);
+    }
+  }
+
+  /** `by` targeted something: if it belongs to someone else, that's a crime (rule 700.13) for "whenever an opponent commits a crime". */
+  private crime(by: PlayerState, t: Target | null) {
+    if (!t || !this.kindsInGame.has('when:opponentCrime')) return;
+    const seat = t.kind === 'player' ? t.seat : t.kind === 'perm' ? this.findPerm(t.id)?.seat : this.stack.find((s) => s.id === t.id)?.controller;
+    if (seat === undefined || seat === by.seat) return;
+    this.fireOpponents(by, 'opponentCrime');
   }
 
   /** Assign and deal one step of combat damage. All of it is dealt at once (rule 510.2). */
@@ -4955,16 +5420,17 @@ export class Game {
       if (a && a.attacking !== null && power > 0) toPerm.push({ from: b, to: a, amount: power });
     }
     if (firstStrikeStep) for (const c of this.allPerms()) if ((c.attacking !== null || c.blocking !== null) && strikes(c)) this.struckFirst.add(c.id);
-    // Fog, Maze of Ith, Inkshield: prevented combat damage is never dealt (rule 615.1).
-    if (this.fogAll) {
+    // Fog, Maze of Ith, Inkshield: prevented combat damage is never dealt (rule 615.1), unless damage can't be prevented (Sunspine Lynx).
+    const unpreventable = this.kindsInGame.has('noPrevent') && this.allPerms().some((q) => q.card.effects.some((e) => e.kind === 'noPrevent' && e.when === 'static'));
+    if (this.fogAll && !unpreventable) {
       if (toPerm.length || toPlayer.length) this.say('All combat damage is prevented.');
       toPerm.length = 0;
       toPlayer.length = 0;
     }
-    for (let i = toPerm.length - 1; i >= 0; i--) if (toPerm[i].from.fogged || toPerm[i].to.fogged) toPerm.splice(i, 1);
+    for (let i = toPerm.length - 1; i >= 0; i--) if (!unpreventable && (toPerm[i].from.fogged || toPerm[i].to.fogged)) toPerm.splice(i, 1);
     for (let i = toPlayer.length - 1; i >= 0; i--) {
       const d = toPlayer[i];
-      if (!d.from.fogged && !d.to.fogged) continue;
+      if (unpreventable || !d.from.fogged && !d.to.fogged) continue;
       toPlayer.splice(i, 1);
       if (d.to.fogged?.tokens && !d.from.fogged) {
         // Inkshield: a 2/1 flying Inkling for each 1 damage prevented.
@@ -4977,6 +5443,14 @@ export class Game {
       }
     }
 
+    // Damage replacement and prevention: Torbran, Gisela, Iroas, Phyrexian Vindicator (rules 614, 615).
+    if (this.kindsInGame.has('damageMod') || this.players.some((q) => q.preventNext)) {
+      // Deflecting Palm's "source of your choice": the biggest hit.
+      if (this.players.some((q) => q.preventNext)) toPlayer.sort((a, b) => b.amount - a.amount);
+      for (const d of [...toPerm, ...toPlayer]) d.amount = this.damageAfter(this.players[d.from.seat], d.from.card, d.from, d.to, d.amount, true);
+      for (let i = toPerm.length - 1; i >= 0; i--) if (toPerm[i].amount <= 0) toPerm.splice(i, 1);
+      for (let i = toPlayer.length - 1; i >= 0; i--) if (toPlayer[i].amount <= 0) toPlayer.splice(i, 1);
+    }
     const hitPlayer = new Set<Perm>();
     const before = new Map<PlayerState, number>();
     // Lifelink: all the damage one creature deals in a step is one life gain event; separate creatures are separate events (rule 702.15e).
@@ -5038,10 +5512,10 @@ export class Game {
     for (const a of hitPlayer) {
       const own = a.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
       // "You get that many {E}" (Aurora Shifter): the damage it dealt.
-      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0));
+      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, undefined, a.attacking ?? undefined);
       for (const eq of this.attachments(a)) {
         const hits = eq.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
-        if (hits.length) this.trigger(p, eq.card, eq.id, hits);
+        if (hits.length) this.trigger(p, eq.card, eq.id, hits, 0, null, undefined, a.attacking ?? undefined);
       }
     }
     if (hitPlayer.size) {
@@ -5138,6 +5612,30 @@ export function isInstantSpeed(card: SimCard): boolean {
 /** Is this a card of the given color, for "exile a blue card from your hand"? Colors come from its mana cost. */
 export function pitchable(card: SimCard, color: Color): boolean {
   return card.cost.pips.some((pip) => pip.includes(color));
+}
+
+/** An Enduring creature back as an enchantment: not a creature, so it neither attacks nor dies (the Enduring cycle). Cached per card. */
+const ENCHANTMENT_ONLY = new WeakMap<SimCard, SimCard>();
+export function enchantmentOnly(card: SimCard): SimCard {
+  let out = ENCHANTMENT_ONLY.get(card);
+  if (!out) {
+    out = { ...card, isCreature: false, isEnchantment: true, power: 0, toughness: 0, typeLine: card.typeLine.replace(/\bCreature\b/, 'Enchantment').replace(/\bEnchantment Enchantment\b/, 'Enchantment'), effects: card.effects.filter((e) => !(e.when === 'creatureDies' && e.scope === 'self')) };
+    ENCHANTMENT_ONLY.set(card, out);
+  }
+  return out;
+}
+
+/** A card's colors, from the colored symbols in its mana cost (rule 202.2). */
+export function cardColors(card: SimCard): Color[] {
+  const out = new Set<Color>();
+  for (const pip of card.cost.pips) for (const m of pip) if (m !== 'C') out.add(m);
+  return [...out];
+}
+
+/** The creature types on a card's type line ("Creature — Elf Druid" -> Elf, Druid). */
+export function creatureTypes(card: SimCard): string[] {
+  const m = card.typeLine.match(/—\s*(.*)$/);
+  return m ? m[1].split(/\s+/).filter(Boolean) : [];
 }
 
 export function hasSubtype(card: SimCard, subtype: string): boolean {
