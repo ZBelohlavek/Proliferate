@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
+import { LOCK_STATIC_KINDS, lockLineHandled, lockTrigger, lockValue, recogniseLocks } from './classifyLocks';
 import { EMBLEM_COST, EMBLEM_STATIC_KINDS, emblemCost, emblemTrigger, recogniseEmblems, rewriteEmblems } from './classifyEmblems';
 import { recogniseReplace, replaceTrigger, rewriteReplace } from './classifyReplace';
 import { castingBase, castingKeywords, castingLineHandled, recogniseCasting } from './classifyCasting';
@@ -694,6 +695,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   recogniseMechanics(line, out, fullLine);
   // --- Counters, station and additional combats (see classifyCounters.ts) ---------
   recogniseCounters(line, out, fullLine);
+  // --- Lockouts, animation, winning and losing (see classifyLocks.ts) -------------
+  recogniseLocks(line, out, fullLine);
   // --- Attack and block rules, goad, suspect, protection (see classifyCombat.ts) ---
   recogniseCombat(line, out, fullLine);
   // --- Counting effects, variable mana, tap and untap (see classifyCounting.ts) ------
@@ -845,6 +848,9 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   let m: RegExpMatchArray | null;
   // Rarer wordings (classifyRare.ts).
   l = rewriteExile(rewriteRare(l));
+  // Lockouts, animation, winning and losing (classifyLocks.ts).
+  const locked = lockTrigger(l);
+  if (locked) return locked;
   l = rewriteReplace(l);
   // Rooms, Food, extra phases and "-X" loyalty abilities (classifyEmblems.ts).
   const emblem = emblemTrigger(l);
@@ -1708,7 +1714,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
-  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line) || castingLineHandled(line)) return true;
+  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line) || castingLineHandled(line) || lockLineHandled(line)) return true;
   if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
@@ -1775,7 +1781,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1845,6 +1851,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'unblocked': return 'When it attacks and isn\'t blocked: ';
     case 'opponentSearch': return 'When an opponent searches their library: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
+    case 'crewed': return 'When it becomes crewed: ';
     case 'unlock': return 'When this door unlocks: ';
     case 'fullyUnlock': return 'When you fully unlock a Room: ';
     case 'sacrificeFood': return 'When you sacrifice a Food: ';
@@ -1963,7 +1970,7 @@ export function cardValue(card: SimCard): number {
       case 'triggerDoubler': v += 3; break;
       case 'copyOpponentEtb': v += 2; break;
       case 'preventNext': case 'deathShield': v += 1.5; break;
-      default: v += controlValue(e, mult) ?? graveyardValue(e, mult) + exileValue(e, mult);
+      default: v += controlValue(e, mult) ?? graveyardValue(e, mult) + exileValue(e, mult) + lockValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;

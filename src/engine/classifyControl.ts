@@ -160,7 +160,7 @@ export function recogniseControl(line: string, fullLine: string, _card: { isPerm
   // Ivy: "you may copy that spell. The copy targets Ivy." (controlTrigger rewrites the body).
   if (/^copy that spell to ~$/.test(line)) return push({ kind: 'copySpell', what: 'trigger', toSource: true }, 'Copy a spell aimed at one creature, aimed at itself instead');
   // Jin-Gitaxias: "whenever an opponent casts ..., counter that spell".
-  if (/^counter that spell\.?$/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter that spell');
+  if (/^counter that spell\.?$/.test(line)) return push({ kind: 'counter', target: 'any', subject: true }, 'Counter that spell');
   // Taigam: "copy it, then exile the spell you cast with four time counters on it" (the suspend half is left out).
   if (/^copy it, then exile the spell you cast/.test(line)) return push({ kind: 'copySpell', what: 'trigger' }, 'Copy that spell (its suspend half is left out)');
 

@@ -105,7 +105,10 @@ export function threat(g: Game, perm: Perm): number {
   }
   if (perm.isCommander) t += 4;
   // Combo pieces and alternative win conditions are worth answering even when they look harmless.
-  if (WINCON_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw')) t += 6;
+  if (WINCON_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw' || e.kind === 'winIf')) t += 6;
+  // Platinum Angel, Phyrexian Unlife: what keeps a player at 0 or less life in the game.
+  const shield = card.effects.find((e) => e.kind === 'cantLose' && e.when === 'static');
+  if (shield && shield.kind === 'cantLose') t += g.players[perm.seat].life <= 0 ? 30 : shield.lifeOnly ? 2 : 6;
   if (perm.token) t *= 0.7;
   return t;
 }
@@ -233,6 +236,8 @@ export class Bot implements Agent {
       case 'choose': return this.choose(g, p, d);
       case 'confirm':
         if (d.reason === 'mulligan') return !this.keepable(p.hand, p.mulligans);
+        // Vihaan: Treasures become 3/3 attackers when there are enough of them to matter.
+        if (d.reason === 'animate') return p.treasures >= 3;
         // A commander that was bounced is cheaper to recast from hand (no tax); otherwise take it back.
         return d.to !== 'hand';
     }
@@ -268,7 +273,8 @@ export class Bot implements Agent {
       this.castingX = x;
       return { action: a ? Math.max(0, actions.indexOf(a)) : 0, x };
     };
-    const casts = actions.filter((a): a is CastAction => a.type === 'cast');
+    // A Pact is only cast when its upkeep payment will be there.
+    const casts = actions.filter((a): a is CastAction => a.type === 'cast' && this.pactPayable(g, p, a.card));
     const top = g.stack[g.stack.length - 1];
 
     // Madness and miracle: now or never (rules 702.35, 702.94).
@@ -332,7 +338,7 @@ export class Bot implements Agent {
       if (unlock) return pick(unlock);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       // Before combat: haste and evasion abilities, tapping a blocker, hasty copies (Kiki-Jiki), borrowed attackers, and keeping a blocker out of the way (Zirda).
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext'))) ?? this.chooseCombatShaping(g, p, actions));
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext' || a.effect.kind === 'becomeCreature'))) ?? this.chooseCombatShaping(g, p, actions));
     }
 
     // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
@@ -919,6 +925,9 @@ export class Bot implements Agent {
     // A Room's door is unlocked as it enters, so "when you unlock this door" happens now (rule 709.5h).
     const kinds = new Set(card.effects.filter((e) => e.when === 'resolve' || e.when === 'static' || (e.when === 'unlock' && !!card.room)).map((e) => e.kind));
     if (fromCommand) return 85 + card.value;
+    // Lockouts: only when they hurt the table more than us (Cursed Totem, Dress Down), Silence before a big turn.
+    if (!this.lockWorthIt(g, p, card)) return null;
+    if (kinds.has('silence') && kinds.size === 1) return 45;
 
     // Combos and alternative wins: the missing piece goes down as soon as possible.
     if (missingComboPieces(p).has(card.name)) return this.comboReady(p, card) ? 120 : null;
@@ -1046,6 +1055,40 @@ export class Bot implements Agent {
    * Whether to put a combo piece down now. Isochron Scepter waits until
    * Dramatic Reversal is in hand to go under it (it is exiled as it enters).
    */
+  /** A Pact can be cast if its cost can be paid next upkeep: enough lands and mana rocks, of the right colors. */
+  private pactPayable(g: Game, p: PlayerState, card: SimCard): boolean {
+    const pact = card.effects.find((e) => e.kind === 'pact');
+    if (!pact || pact.kind !== 'pact') return true;
+    const sources = g.landCount(p) + p.battlefield.filter((q) => !q.landInfo && q.card.effects.some((e) => e.kind === 'mana')).length;
+    const colors = g.colorsAvailable(p);
+    return sources >= pact.cost.generic + pact.cost.pips.length + 1 && pact.cost.pips.every((pip) => pip.some((c) => colors.has(c)));
+  }
+
+  /**
+   * Symmetric lockouts hurt us too. Cursed Totem only if opponents lose more creature abilities than we do, Dress Down
+   * only if their creatures have more abilities, Silence only on our own turn with a big attack or a win to protect.
+   */
+  private lockWorthIt(g: Game, p: PlayerState, card: SimCard): boolean {
+    for (const e of card.effects) {
+      if (e.when !== 'static' && e.when !== 'resolve') continue;
+      if (e.kind === 'abilityLock' && e.who === 'all') {
+        const users = (q: PlayerState) => q.battlefield.filter((x) => (e.perms === 'creatures' ? x.card.isCreature : x.card.isArtifact) && x.card.effects.some((f) => f.when === 'activated' || f.kind === 'mana')).length;
+        const ours = users(p) + p.hand.filter((c) => (e.perms === 'creatures' ? c.isCreature : c.isArtifact) && c.effects.some((f) => f.when === 'activated' || f.kind === 'mana')).length;
+        if (ours >= Math.max(...g.opponents(p).map(users), 1)) return false;
+      }
+      if (e.kind === 'loseAbilities' && e.what === 'creatures') {
+        const worth = (q: PlayerState) => q.battlefield.filter((x) => x.card.isCreature).reduce((n, x) => n + x.card.effects.length + x.card.keywords.length, 0);
+        if (worth(p) >= Math.max(...g.opponents(p).map(worth), 1)) return false;
+      }
+      if (e.kind === 'silence') {
+        if (g.activeSeat !== p.seat || g.step !== 'main1') return false;
+        const power = this.readyAttackers(g, p).reduce((n, q) => n + g.power(q), 0);
+        if (power < 8 && !p.hand.some((c) => c !== card && (WINCON_NAMES.has(c.name) || c.effects.some((f) => f.kind === 'winIf' || f.kind === 'extraTurn')))) return false;
+      }
+    }
+    return true;
+  }
+
   private comboReady(p: PlayerState, card: SimCard): boolean {
     if (card.name !== 'Isochron Scepter') return true;
     return p.hand.some((c) => c.name === 'Dramatic Reversal');
@@ -1063,6 +1106,9 @@ export class Bot implements Agent {
         }
         if (e.kind === 'wipe') return this.wipeIsGood(g, p, e, 0);
         if (e.kind === 'recursion') return g.recursionPool(p, e).length > 0;
+        // Tezzeret's -5: a big attack before combat. Vraska's -2: a creature worth removing.
+        if (e.kind === 'becomeCreature') return e.what !== 'artifacts' || (g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.filter((q) => q.card.isArtifact && !q.card.isCreature && !q.landInfo).length >= 3);
+        if (e.kind === 'becomeTreasure') return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && g.canTarget(p, q) && threat(g, q) >= 4));
         // Jace's -8: draw the rest of the library and win.
         if (e.kind === 'draw') return e.n < p.library.length || winsOnEmptyDraw(p);
         // Tezzeret the Seeker's -X: only with an artifact in reach.
@@ -1123,6 +1169,13 @@ export class Bot implements Agent {
         case 'lore': return true;
         // Zur: before combat, an enchantment worth at least a 3/3 body.
         case 'animate': return g.step === 'main1' && g.activeSeat === p.seat && (g.targetCandidates(p, e, perm) ?? []).some((t) => t.kind === 'perm' && (g.findPerm(t.id)?.card.cmc ?? 0) >= 3);
+        // Destiny Spinner, Katsumasa, Peacewalker Colossus, Bespoke Battlewagon: an extra attacker before combat.
+        case 'becomeCreature': {
+          if (g.step !== 'main1' || g.activeSeat !== p.seat || perm.card.isCreature && e.what === 'self') return false;
+          if (e.what === 'land' && p.battlefield.filter((q) => q.card.isEnchantment).length < 3) return false;
+          const aims = g.targetCandidates(p, e, perm);
+          return aims === null || aims.length > 0;
+        }
         case 'gainLife': return p.life < 30 && g.activeSeat !== p.seat;
         // Tinybones: only when someone has an empty hand.
         case 'drain': return !e.emptyHand || g.opponents(p).some((o) => o.hand.length === 0);
@@ -1454,6 +1507,17 @@ export class Bot implements Agent {
         const pool = theirs.length ? theirs : perms;
         return asTarget(bestOf(pool, (q) => colors(q) * 2 + (q.card.isBasic ? 0 : 1) + (q.unlocked && !q.unlocked.isBasic ? 1 : 0) - (q.seat === p.seat ? 10 : 0))) ?? d.candidates[0];
       }
+      case 'becomeCreature':
+        // The biggest artifact or Vehicle, or an untapped land.
+        return asTarget(bestOf(mine, (q) => (e.what === 'land' ? (q.tapped ? 0 : 1) : q.card.cmc + q.card.power))) ?? d.candidates[0];
+      case 'blank':
+      case 'slime':
+      case 'becomeTreasure': {
+        const theirs = perms.filter((q) => q.seat !== p.seat);
+        return asTarget(bestOf(theirs, (q) => threat(g, q))) ?? asTarget(bestOf(perms, (q) => -threat(g, q))) ?? d.candidates[0];
+      }
+      case 'becomeArtifact':
+        return asTarget(mine[0]) ?? d.candidates[0];
       case 'animate':
         // Zur: the biggest enchantment we have.
         return asTarget(bestOf(mine, (q) => q.card.cmc)) ?? d.candidates[0];
