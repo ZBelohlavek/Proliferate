@@ -5,7 +5,7 @@
 // the rules is handed out as a Decision and comes back as an answer, so the
 // same game can be played by a person, a bot, or any mix of the two.
 
-import type { Color, Effect, LandInfo, LossReason, SimCard, SimDeck } from '../engine/types';
+import type { Color, Effect, FlashFilter, LandInfo, LossReason, SimCard, SimDeck } from '../engine/types';
 
 /** Steps of a turn, in order (rules 500–514). */
 export type Step =
@@ -111,6 +111,17 @@ export interface Perm {
   fragile?: 'spell' | 'any';
   /** A crewed Vehicle: its card while it isn't a creature. */
   uncrewed?: SimCard;
+  /** Impending (rule 702.176): time counters left. While it has any it isn't a creature: `card` is the noncreature version and `impendingCard` the real one. */
+  impending?: number;
+  impendingCard?: SimCard;
+  /** Cast with blitz (rule 702.152): sacrificed at the next end step, and draws a card when it dies. */
+  blitzed?: boolean;
+  /** Cast with warp (rule 702.185): exiled at the next end step, then castable from exile on a later turn. */
+  warped?: boolean;
+  /** Cipher (rule 702.99): spell cards encoded on this creature. */
+  encoded?: SimCard[];
+  /** Hideaway (rule 702.75): the card exiled face down with it. */
+  hidden?: SimCard;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
@@ -176,6 +187,18 @@ export interface PlayerState {
   /** How many times the Ring has tempted this player, up to 4 (rule 701.54), and the current ring-bearer. */
   ringLevel: number;
   ringBearer: number | null;
+  /** Cards exiled to be cast later: foretold, plotted, suspended (with `time` counters) or warped (rules 702.143, 702.170, 702.62, 702.185). */
+  held?: HeldCard[];
+  /** "As though it had flash" for a while (Borne Upon a Wind, Teferi): what it covers, until when, and the turn it began. */
+  flashGrants?: { what: FlashFilter; until: 'turn' | 'yourNextTurn'; turn: number }[];
+  /** Turns this player has begun (Jace Reawakened). */
+  turnsTaken?: number;
+  /** Turn number on which a Rogue of theirs last dealt combat damage to a player (prowl). */
+  rogueHit?: number;
+  /** Turn number of their last creature spell (The Blue Spirit). */
+  creatureCastTurn?: number;
+  /** Madness and miracle (rules 702.35, 702.94): cards that may be cast now for that cost, until this player next passes priority. */
+  windows?: { card: SimCard; how: 'madness' | 'miracle' }[];
   /** Permanent types already cast or played from the graveyard this turn (Muldrotha). */
   graveyardTypes?: Set<string>;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
@@ -187,6 +210,16 @@ export interface PlayerState {
   earlyNames: Set<string>;
   drawnNames: Set<string>;
   castNames: Set<string>;
+}
+
+/** A card in exile that its owner may cast later (see PlayerState.held). */
+export interface HeldCard {
+  card: SimCard;
+  way: 'foretell' | 'plot' | 'suspend' | 'warp';
+  /** Turn number it was exiled on: foretold, plotted and warped cards are cast on a later turn. */
+  turn: number;
+  /** Suspend: time counters left. */
+  time?: number;
 }
 
 /** Something a spell or ability can target. */
@@ -221,8 +254,14 @@ export interface StackItem {
   finality?: boolean;
   /** A copy of a spell (rule 707.10): it ceases to exist instead of going anywhere when it leaves the stack. */
   copy?: boolean;
-  /** Cast with an alternative cost that changes what happens on resolution (evoke, dash). */
-  alt?: 'evoke' | 'dash';
+  /** Cast with an alternative cost that changes what happens on resolution (evoke, dash, blitz, warp, impending). */
+  alt?: 'evoke' | 'dash' | 'blitz' | 'warp' | 'impending';
+  /** Buyback paid (rule 702.27): it returns to its owner's hand as it resolves. */
+  buyback?: boolean;
+  /** Gift promised (rule 702.174): the opponent who gets it, before the spell's other effects. */
+  gift?: number;
+  /** Cast from suspend: a creature spell has haste (rule 702.62a). */
+  suspended?: boolean;
   /** Triggered abilities: the spell that set it off ("whenever you cast a spell, copy that spell"). */
   subject?: number;
   /** Cast face down for {3} (morph, disguise): the real card. `card` is then the nameless 2/2 everyone sees. */
@@ -245,7 +284,11 @@ export type Action =
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
   /** `kick`: pay its kicker (or offspring) cost this many times (rule 702.33). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number }
+  /** From exile: 'foretell' (for its foretell cost), 'plot' (free, as a sorcery), 'exile' (a warped card, for its mana cost). 'madness' and 'miracle': for that cost, right after it was discarded or drawn. */
+  /** `modes`: spree or tiered modes chosen, as bits (rule 702.172). */
+  | { type: 'cast'; card: SimCard; from: CastFrom; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number; modes?: number }
+  /** Use a card from hand without casting it: foretell, plot or suspend it (exile it to cast later), transmute or channel it. */
+  | { type: 'hand'; card: SimCard; how: 'foretell' | 'plot' | 'suspend' | 'transmute' | 'channel' }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
@@ -263,13 +306,15 @@ export type Action =
   /** Activate an ability of a permanent (`effect` is one of its card's effects). */
   | { type: 'activate'; permId: number; effect: Effect };
 
+export type CastFrom = 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'foretell' | 'plot' | 'exile' | 'madness' | 'miracle';
+
 export interface ChoiceOption {
   label: string;
   card?: SimCard;
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'cipher' | 'gift' | 'hideaway';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =
