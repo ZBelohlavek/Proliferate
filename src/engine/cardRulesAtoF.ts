@@ -2,7 +2,7 @@
 // share no mechanic with other cards. Each is written in wordings the reader knows; what is left
 // out or approximated is said in `why`. Spread into CARD_RULES (cardRules.ts), which explains the
 // fields. Cards whose only gap is a keyword another file reads (cascade, living weapon, job
-// select, landwalk, myriad, vanishing, fabricate, assist) have no entry here.
+// select, landwalk, myriad, vanishing, fabricate, assist, "you have hexproof", evasion by power) have no entry here.
 
 import type { CardRule } from './cardRules';
 import type { Effect } from './types';
@@ -115,10 +115,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Aven Interrupter': {
     text: 'Flash\nFlying\nWhen ~ enters, exile target spell. It becomes plotted.',
     why: 'The {2} tax on opponents\' spells cast from graveyards and exile is left out.',
-  },
-  'Azure Beastbinder': {
-    text: "Vigilance\n~ can't be blocked.\nWhenever ~ attacks, up to one target artifact, creature, or planeswalker an opponent controls loses all abilities until your next turn. If it's a creature, it also has base power and toughness 2/2 until your next turn.",
-    why: 'Can\'t be blocked by power 2 or greater: nearly every blocker in Commander, so played as unblockable.',
   },
   'Ballot Broker': {
     text: '',
@@ -304,10 +300,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Contraband Livestock': {
     text: 'Exile target creature.',
     why: 'Its controller gets a token from a d20 roll (4/4, 2/2 or 0/1); left out.',
-  },
-  'Crystal Barricade': {
-    text: 'Defender\nPrevent all noncombat damage that would be dealt to other creatures you control.',
-    why: 'You having hexproof is left out.',
   },
   'Crystal Spray': {
     text: 'Draw a card.',
