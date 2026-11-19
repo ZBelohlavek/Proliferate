@@ -305,8 +305,16 @@ export class Bot implements Agent {
       const level = actions.find((a) => a.type === 'level');
       if (level) return pick(level);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      // Before combat: haste and evasion abilities.
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate'))));
+      // Before combat: haste and evasion abilities, and tapping a blocker.
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))));
+    }
+
+    // An opponent's beginning of combat: tap their biggest attacker (Mind Games, Thassa, Ring of the Lucii).
+    if (!myTurn && g.step === 'beginCombat' && this.tapWorthNow(g, p)) {
+      const spell = this.chooseSpell(g, p, casts.filter((a) => a.card.effects.some((e) => e.kind === 'tap' && e.when === 'resolve')), true);
+      if (spell) return pick(spell.action, spell.x);
+      const tap = this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'tap'));
+      if (tap) return pick(tap);
     }
 
     // Combat tricks once blockers are known, then abilities that save or pump a creature in the fight.
@@ -795,6 +803,8 @@ export class Bot implements Agent {
       const power = [...ready, ...back].reduce((n, q) => n + g.power(q), 0) * Math.max(1, extra.n);
       return power >= 4 ? 50 + power : null;
     }
+    // Mind Games: tap a blocker before our attack, or an attacker at an opponent's beginning of combat.
+    if (spell && kinds.has('tap') && !removal) return this.tapWorthNow(g, p) ? 25 + card.value : null;
     const untap = card.effects.find((e) => e.kind === 'untap' && e.when === 'resolve');
     if (untap && untap.kind === 'untap' && spell) {
       // Dramatic Reversal and friends: worth it when they give back more mana than they cost.
@@ -937,6 +947,7 @@ export class Bot implements Agent {
         case 'exileGraveyards': return e.cards ? g.opponents(p).some((o) => o.graveyard.some((c) => c.value >= 5)) : g.opponents(p).some((o) => o.graveyard.length >= 8);
         case 'entomb': return true;
         case 'stun': case 'bounty': case 'poison': return true;
+        case 'tap': return this.tapWorthNow(g, p);
         case 'kwCounter': return e.on !== 'self' || !perm.kwCounters?.includes(e.kw);
         // Midnight Clock: wind it forward when a fresh hand of seven beats what we hold, and not if the graveyard is our engine.
         case 'hours': return p.hand.length <= 2 && !this.leansOnGraveyard(p) && (perm.hours ?? 0) >= 6;
@@ -949,6 +960,33 @@ export class Bot implements Agent {
         default: return false;
       }
     });
+  }
+
+  /**
+   * Is tapping an opponent's creature useful right now? Before our attack (main phase or beginning of combat) when it
+   * would remove a blocker, or at an opponent's beginning of combat when they have a creature worth stopping.
+   */
+  private tapWorthNow(g: Game, p: PlayerState): boolean {
+    if (g.activeSeat === p.seat) {
+      if (g.step !== 'main1' && g.step !== 'beginCombat') return false;
+      if (!this.readyAttackers(g, p).length) return false;
+      return g.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && !q.tapped && g.canTarget(p, q)));
+    }
+    if (g.step !== 'beginCombat') return false;
+    const active = g.players[g.activeSeat];
+    return active.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3 && g.canTarget(p, q));
+  }
+
+  /** Which opponent's permanent to tap: their best blocker on our turn, the active player's biggest attacker on theirs. */
+  private tapTarget(g: Game, p: PlayerState, perms: Perm[]): Perm | null {
+    const theirs = perms.filter((q) => q.seat !== p.seat && !q.tapped);
+    const creatures = theirs.filter((q) => q.card.isCreature);
+    const pool = g.activeSeat === p.seat ? creatures : creatures.filter((q) => q.seat === g.activeSeat && !q.sick);
+    const list = pool.length ? pool : creatures.length ? creatures : theirs;
+    if (!list.length) return null;
+    // Our turn: the blocker that stops the most (toughness, then threat). Theirs: the attacker that hurts most.
+    const score = (q: Perm) => (g.activeSeat === p.seat ? g.toughness(q) + threat(g, q) * 0.3 : g.power(q) + threat(g, q) * 0.3) + (q.card.isCreature ? 5 : q.card.effects.some((e) => e.kind === 'mana') ? 1 : 0);
+    return list.reduce((a, b) => (score(b) > score(a) ? b : a));
   }
 
   /** "~ gains haste / indestructible until end of turn": when that changes something. */
@@ -1091,6 +1129,8 @@ export class Bot implements Agent {
         const score = (seat: number) => (e.kind === 'mill' ? -g.players[seat].library.length : g.players[seat].hand.length);
         return { kind: 'player', seat: seats.reduce((a, c) => (score(c) > score(a) ? c : a)) };
       }
+      case 'tap':
+        return asTarget(this.tapTarget(g, p, perms)) ?? d.candidates[0];
       case 'stun':
       case 'bounty':
         return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => threat(g, q) - (e.kind === 'stun' && q.tapped ? 0 : 1))) ?? d.candidates[0];
