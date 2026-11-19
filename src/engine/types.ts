@@ -72,6 +72,7 @@ export type Trigger =
   | 'opponentSacrifice' // an opponent sacrifices a nontoken permanent, the trigger is about that card (scope 'all': or discards a permanent card, Tergrid)
   | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
   | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
+  | 'proliferate' // you proliferate (rule 701.34)
   | 'discard' // you discard a card (once for each card)
   | 'static'; // always on while the permanent is on the battlefield
 
@@ -604,6 +605,21 @@ export type EffectBody =
   /** Return the blocked creature that set this off to its owner's hand (Grazilaxx). */
   | { kind: 'returnBlocked' }
   /**
+   * Static: whenever a source deals damage to this permanent, that source's controller sacrifices that many permanents
+   * ('sacrifice', Phyrexian Obliterator) or gets a poison counter ('poison', Reaper of Sheoldred).
+   */
+  | { kind: 'damagedPunish'; what: 'sacrifice' | 'poison' }
+  /** Static: whenever a creature or planeswalker an opponent controls with a bounty counter on it is dealt damage, destroy it (Termination Facilitator). */
+  | { kind: 'bountyDestroy' }
+  /** Static: if you would proliferate, proliferate twice instead (Tekuthal); two of them make it four times. */
+  | { kind: 'proliferateTwice' }
+  /** Static: you have hexproof, so opponents' spells and abilities can't target you (rule 702.11c; Teyo, Crystal Barricade). */
+  | { kind: 'playerHexproof' }
+  /** Static: at the beginning of your end step, return this permanent to its owner's hand (Reinforced Ronin). */
+  | { kind: 'bounceSelfAtEnd' }
+  /** Static: at the beginning of your end step, your life total becomes n (The Endstone: half your starting life total). */
+  | { kind: 'lifeBecomes'; n: number }
+  /**
    * The player this creature attacked, when it attacked and wasn't blocked: loses life for each card in their graveyard
    * ('graveyard', Guiltfeeder) or discards `n` cards after you sacrifice the creature ('discard', Dauthi Mindripper).
    */
@@ -890,6 +906,8 @@ export interface SimCard {
   cycling?: { cost: ManaCost; land?: boolean; /** "When you cycle ~" (Fractured Sanity). */ effects?: Effect[] };
   /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
   cumulativeUpkeep?: ManaCost;
+  /** Vanishing N (rule 702.63): enters with N time counters, loses one each upkeep, sacrificed when the last is removed. */
+  vanishing?: number;
   /** Toxic N (rule 702.164): combat damage to a player also gives that many poison counters. */
   toxic?: number;
   /** "As ~ enters, choose a creature type" (see Perm.chosenType). */

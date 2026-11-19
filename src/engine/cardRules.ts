@@ -20,6 +20,7 @@
 // A card with an entry counts as fully read: the entry is the statement of how this engine
 // plays it, approximations included (said in `why`).
 
+import { RULES_P_TO_Z } from './cardRulesPZ';
 import type { Effect, SimCard } from './types';
 import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
 
@@ -177,6 +178,9 @@ export const CARD_RULES: Record<string, CardRule> = {
 
   // --- One-off cards, G to O (cardRulesGtoO.ts) ----------------------------------------------
   ...CARD_RULES_G_TO_O,
+
+  // --- One-off cards named P to Z (cardRulesPZ.ts) --------------------------------------
+  ...RULES_P_TO_Z,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */
