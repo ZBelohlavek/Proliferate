@@ -24,7 +24,9 @@ import type {
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { recogniseReplace, replaceTrigger, rewriteReplace } from './classifyReplace';
+import { countingKeywords, countingLineHandled, countingMana, manaNote, countingTrigger, recogniseCounting, rewriteCounting } from './classifyCounting';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
+import { exileLineHandled, exileTrigger, exileValue, recogniseExile, rewriteExile } from './classifyExile';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
 /** Card data normalised from either Archidekt or Scryfall. */
@@ -177,6 +179,9 @@ function removalTargetOf(phrase: string): RemovalTarget | null {
 function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature: boolean }, fullLine = line): Found[] {
   const out: Found[] = [];
   let m: RegExpMatchArray | null;
+  // Playing cards from exile or the top of a library, free spells, searching (classifyExile.ts): whole abilities, read first.
+  const exiled = recogniseExile(line, fullLine);
+  if (exiled) return exiled;
 
   // --- Ramp: search for basic lands onto the battlefield -----------------
   m = line.match(new RegExp(`search your library for (up to )?${NUM} (basic land|land|basic \\w+|forest|plains|island|swamp|mountain)[^.]*? cards?`));
@@ -663,6 +668,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   recogniseMechanics(line, out, fullLine);
   // --- Counters, station and additional combats (see classifyCounters.ts) ---------
   recogniseCounters(line, out, fullLine);
+  // --- Counting effects, variable mana, tap and untap (see classifyCounting.ts) ------
+  recogniseCounting(line, out, fullLine);
   if ((m = line.match(/(tap up to one target creature and )?put a stun counter on (?:up to one )?(?:target (nonland permanent|creature|permanent|tapped creature)|it\b)/)) && (m[2] || m[1])) {
     const tap = !!m[1];
     const tapped = m[2] === 'tapped creature';
@@ -804,12 +811,18 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   let l = line.replace(/^[a-z' ]+ — (?=(when|whenever|at|if|as|~|you|creatures|target|each|draw|create))/, '');
   let m: RegExpMatchArray | null;
   // Rarer wordings (classifyRare.ts).
-  l = rewriteRare(l);
+  l = rewriteExile(rewriteRare(l));
   l = rewriteReplace(l);
+  const exiled = exileTrigger(l);
+  if (exiled) return exiled;
   const rare = rareTrigger(l);
   if (rare) return rare;
   const replaced = replaceTrigger(l);
   if (replaced) return replaced;
+  // Counting effects, variable mana, tap and untap (classifyCounting.ts).
+  l = rewriteCounting(l);
+  const counting = countingTrigger(l);
+  if (counting) return counting;
 
   const mech = mechanicTrigger(l);
   if (mech) return mech;
@@ -1241,7 +1254,8 @@ export function classifyCard(raw: RawCard): SimCard {
       // Mana abilities on nonland permanents (rocks and dorks).
       const manaMatch = ctx.when === 'activated' ? sentence.match(/^(?:for each [^,]*, )?add (.*)$/) : null;
       // Rituals: mana from an instant or sorcery is kept as that many Treasures.
-      const ritual = (!isPermanent || /^when ~ enters/.test(line)) && ctx.when === 'resolve' ? sentence.match(/^add (.*)$/) : null;
+      // Planeswalkers' and Sagas' "add {C}{C}{C}" (Ugin, The Legend of Roku) are one-shot mana too.
+      const ritual = ((!isPermanent || /^when ~ enters/.test(line)) && ctx.when === 'resolve') || ctx.when === 'loyalty' || ctx.when === 'chapter' ? sentence.match(/^add (.*)$/) : null;
       if (ritual) {
         const p = parseProduced(ritual[1]);
         const n = /for each/.test(sentence) ? 3 : p?.amount ?? 0;
@@ -1250,6 +1264,13 @@ export function classifyCard(raw: RawCard): SimCard {
           if (isModal && bullet) modalFound.push({ found: f, ctx });
           else pushEffect(card, f, ctx);
         }
+        continue;
+      }
+      // Mana counted from something, from +1/+1 counters, or only some of the time (classifyCounting.ts).
+      const counted = manaMatch ? countingMana(sentence, line, ctx) : null;
+      if (counted) {
+        manaLines++;
+        card.effects.push(counted);
         continue;
       }
       // Mana from charge counters (Astral Cornucopia, Empowered Autogenerator, Pentad Prism) or paid with energy (Solar Transformer).
@@ -1347,8 +1368,10 @@ export function classifyCard(raw: RawCard): SimCard {
 
   const manaEffect = card.effects.find((e) => e.kind === 'mana');
   if (manaEffect && manaEffect.kind === 'mana') {
-    card.notes.push(`Mana: +${manaEffect.amount} ${manaEffect.colors === 'any' ? 'any color' : manaEffect.colors.join('/')}`);
+    card.notes.push(`Mana: +${manaEffect.amount} ${manaEffect.colors === 'any' ? 'any color' : manaEffect.colors.join('/')}${manaNote(manaEffect)}`);
   }
+  // Further mana abilities that only work some of the time or count something (Glistening Sphere's corrupted one).
+  for (const e of card.effects) if (e !== manaEffect && e.kind === 'mana' && manaNote(e)) card.notes.push(`Mana: +${e.amount} ${e.colors === 'any' ? 'any color' : e.colors.join('/')}${manaNote(e)}`);
 
   if (modalFound.length) {
     const priority = ['wipe', 'removal', 'counter', 'draw', 'tokens', 'ramp', 'pump', 'protect'];
@@ -1489,10 +1512,12 @@ export function classifyCard(raw: RawCard): SimCard {
   } else if (/^(affinity for artifacts|improvise)/m.test(text)) card.discount = { per: 'artifacts', amount: 1 };
   else if (/^convoke/m.test(text)) card.discount = { per: 'creatures', amount: 1 };
   else if (/^delve/m.test(text)) card.discount = { per: 'graveyard', amount: 1 };
-  if (card.discount) card.notes.push(`Costs {${card.discount.amount}} less for each ${{ artifacts: 'artifact you control', creatures: 'creature you control', allCreatures: 'creature on the battlefield', graveyardCreatures: 'creature card in your graveyard', graveyard: 'card in your graveyard' }[card.discount.per]}`);
+  if (card.discount) card.notes.push(`Costs {${card.discount.amount}} less for each ${({ artifacts: 'artifact you control', creatures: 'creature you control', allCreatures: 'creature on the battlefield', graveyardCreatures: 'creature card in your graveyard', graveyard: 'card in your graveyard' } as Record<string, string>)[card.discount.per]}`);
+  // "Gets +1/+0 for each ...", other counted powers, and other ways spells cost less (classifyCounting.ts).
+  countingKeywords(text, card, raw);
 
-  // Playing off the top of the library every turn is roughly an extra card a turn.
-  if (isPermanent && /you may (play lands and )?cast spells from the top of your library/.test(text)) {
+  // Playing off the top of the library every turn is roughly an extra card a turn (unless read as a real permission, classifyExile.ts).
+  if (isPermanent && /you may (play lands and )?cast spells from the top of your library/.test(text) && !card.effects.some((e) => e.kind === 'playTop')) {
     card.effects.push({ kind: 'draw', n: 1, when: 'upkeep' });
     card.notes.push('Each turn: play off the top of your library (≈ draw 1)');
   }
@@ -1603,7 +1628,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
-  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line)) return true;
+  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line)) return true;
   if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
@@ -1667,7 +1692,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1723,6 +1748,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'targeted': return `When ${ctx.scope === 'self' ? 'it' : ctx.castFilter === 'creature' ? 'a creature you control' : 'a permanent you control'} becomes the target of ${ctx.targetedBy === 'you' ? 'your' : ctx.targetedBy === 'opponents' ? "an opponent's" : 'a'} spell${ctx.spellOnly ? '' : ' or ability'}: `;
     case 'eachUpkeep': return 'Each upkeep: ';
     case 'hourTwelve': return 'At the twelfth hour counter: ';
+    case 'opponentSearch': return 'When an opponent searches their library: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
     default: return '';
   }
@@ -1751,7 +1777,7 @@ export function cardValue(card: SimCard): number {
     const mult = repeating ? 2.5 : 1;
     switch (e.kind) {
       case 'ramp': v += 2.5 * Math.max(e.lands, 1) + e.toHand; break;
-      case 'mana': v += 2.5 * e.amount; break;
+      case 'mana': v += 2.5 * (e.count || e.fromCounters ? 2 : e.corrupted || e.sacArtifact ? 1 : e.amount); break;
       case 'costReduction': v += 2 * e.amount; break;
       case 'draw': v += 1.5 * Math.max(e.n, 2) * mult; break;
       case 'removal': v += 3 * mult; break;
@@ -1822,6 +1848,12 @@ export function cardValue(card: SimCard): number {
       case 'baseSize': v += 2; break;
       case 'enterCounters': v += 1.5; break;
       case 'manifest': v += e.who === 'targetController' ? -1 : 2 * mult; break;
+      case 'abilityDiscount': v += 1.5 * e.amount; break;
+      case 'manaBoost': v += e.what === 'swamps' || e.what === 'colorless' ? 3 : 4; break;
+      case 'tokenMana': v += 2; break;
+      case 'tap': v += 0.8 * mult; break;
+      case 'tapAllies': v += 2; break;
+      case 'untapRule': case 'upkeepCost': v += 0.5; break;
       case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
       case 'damageMod': v += e.op === 'times' ? 4 * (e.n - 1) : e.op === 'plus' ? 2 * e.n : 2; break;
       case 'lifeRule': case 'noPrevent': v += 1.5; break;
@@ -1832,7 +1864,7 @@ export function cardValue(card: SimCard): number {
       case 'triggerDoubler': v += 3; break;
       case 'copyOpponentEtb': v += 2; break;
       case 'preventNext': case 'deathShield': v += 1.5; break;
-      default: v += graveyardValue(e, mult);
+      default: v += graveyardValue(e, mult) + exileValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;

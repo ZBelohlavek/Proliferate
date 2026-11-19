@@ -168,6 +168,9 @@ export interface PlayerState {
   preventNext?: { reflect: boolean; card: SimCard };
   /** Cosmic Intervention: on this turn number, this player's permanents going to a graveyard are exiled and return at the next end step. */
   deathShield?: number;
+  /** Creature spells and instant or sorcery spells cast this turn ("the first creature spell you cast each turn"). */
+  creatureSpellsThisTurn?: number;
+  instantSorceryThisTurn?: number;
   /** Combat damage dealt to this player is prevented this turn; `tokens`: and makes that many 2/1 flyers (Inkshield). */
   fogged?: { tokens: boolean };
   alive: boolean;
@@ -184,6 +187,12 @@ export interface PlayerState {
   /** How many times the Ring has tempted this player, up to 4 (rule 701.54), and the current ring-bearer. */
   ringLevel: number;
   ringBearer: number | null;
+  /** Cards in exile this player may play (impulse draw, theft; rule 611.2). The card sits in its owner's exile. */
+  mayPlay?: MayPlay[];
+  /** Turns this player has begun, to tell when "until the end of your next turn" runs out. */
+  turnsTaken?: number;
+  /** The turn number on which One with the Multiverse's free spell was used. */
+  freeSpellTurn?: number;
   /** Permanent types already cast or played from the graveyard this turn (Muldrotha). */
   graveyardTypes?: Set<string>;
   /** Can't lose life or take commander damage until their next turn (Teferi's Protection). */
@@ -195,6 +204,30 @@ export interface PlayerState {
   earlyNames: Set<string>;
   drawnNames: Set<string>;
   castNames: Set<string>;
+}
+
+/** Permission to play a card from exile (rule 611.2: it lasts as long as the effect says). */
+export interface MayPlay {
+  card: SimCard;
+  /** Seat of the owner: the card is in that player's exile. */
+  owner: number;
+  /** 'turn': until the end of the turn on which it was given (`turn`). 'nextTurn': until the end of this player's next turn (`turnsAt`). 'exiled': as long as it stays exiled. */
+  until: 'turn' | 'nextTurn' | 'exiled';
+  turn: number;
+  turnsAt: number;
+  anyMana?: boolean;
+  payLife?: boolean;
+  free?: boolean;
+  castOnly?: boolean;
+  ownTurn?: boolean;
+  /** Only cards of this kind may be played (Arvinox: permanent spells). */
+  only?: import('../engine/typesExile').CardKind;
+  /** "You may play one of those cards": entries sharing a group lapse once one of them is played. */
+  group?: number;
+  /** Only while this permanent stays on the battlefield (Nightveil Specter). */
+  sourceId?: number;
+  /** Where it came from, for the log. */
+  source: string;
 }
 
 /** Something a spell or ability can target. */
@@ -239,6 +272,10 @@ export interface StackItem {
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
   kicked?: number;
+  /** Seat of the card's owner, when its controller cast it from someone else's library, exile or graveyard. */
+  owner?: number;
+  /** Exiled instead of going anywhere else when it leaves the stack (Wrexial, Mizzix's Mastery's copies are copies). */
+  exileAfter?: boolean;
   /** Triggered abilities: the seat of the player the trigger is about ("that player", see Effect.thatPlayer). */
   about?: number;
   /** Dies triggers: the card of the creature that died, for "return that card" (Minion's Return). */
@@ -262,11 +299,12 @@ export interface DiedCard {
 export type Action =
   | { type: 'pass' }
   /** Play a land from hand. `back` plays the land side of a modal double-faced card. `fromGraveyard`: Crucible of Worlds. */
-  | { type: 'land'; card: SimCard; back: boolean; fromGraveyard?: boolean }
+  | { type: 'land'; card: SimCard; back: boolean; fromGraveyard?: boolean; /** Played from exile or the top of the library (see PlayerState.mayPlay, playTop). */ from?: 'exile' | 'library' }
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
   /** `kick`: pay its kicker (or offspring) cost this many times (rule 702.33). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number }
+  /** `exile`: a card the player may play from exile (PlayerState.mayPlay). `library`: the top card of their library (playTop). */
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'exile' | 'library'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number; /** Without paying its mana cost, once each turn (One with the Multiverse). */ free?: boolean }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */
@@ -290,7 +328,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =
