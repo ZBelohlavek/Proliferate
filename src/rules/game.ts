@@ -148,6 +148,8 @@ export class Game {
   private pending: PendingTrigger[] = [];
   /** Commanders that just went to a graveyard, exile or hand (rule 903.9). */
   private pendingCommander: { seat: number; card: SimCard; to: 'graveyard' | 'exile' | 'hand' | 'library' }[] = [];
+  /** Damage dealt to permanents that something watches (Phyrexian Obliterator, bounty counters), handled with state-based actions. */
+  private damagedQueue: { perm: Perm; seat: number; amount: number }[] = [];
   /** Attackers that dealt combat damage in the first-strike step (rule 510.4). */
   private struckFirst = new Set<number>();
   /** False while nothing is attached to anything, to skip the search for attachments. */
@@ -543,9 +545,18 @@ export class Game {
     this.unearthed.clear();
     // Dash: the creature returns to its owner's hand at the beginning of the end step (rule 702.109a).
     for (const perm of [...p.battlefield]) {
-      if (!perm.dashed) continue;
-      this.say(`${perm.card.name} returns to ${p.name}'s hand (dash).`);
+      // Reinforced Ronin: "at the beginning of your end step, return ~ to its owner's hand".
+      const own = perm.card.effects.some((e) => e.kind === 'bounceSelfAtEnd');
+      if (!perm.dashed && !own) continue;
+      this.say(`${perm.card.name} returns to ${p.name}'s hand${own ? '' : ' (dash)'}.`);
       this.removePerm(perm, 'hand');
+    }
+    // The Endstone: "your life total becomes half your starting life total, rounded up" (rule 119.5).
+    for (const perm of p.battlefield) for (const e of perm.card.effects) {
+      if (e.kind !== 'lifeBecomes' || p.life === e.n) continue;
+      if (p.life > e.n) this.loseLife(p, p.life - e.n, p, 'noncombat');
+      else p.life = e.n;
+      this.say(`${p.name}'s life total becomes ${e.n} (${perm.card.name}).`);
     }
     this.questCounters();
     // Blitz, warp and impending (rules 702.152, 702.185, 702.176).
@@ -2574,7 +2585,7 @@ export class Game {
     for (const q of this.players) {
       if (!q.alive) continue;
       for (const perm of q.battlefield) for (const e of perm.card.effects) {
-        if (e.kind === 'spellTax' && (e.all || q !== p) && (e.filter === 'any' || !card.isCreature)) tax += e.amount;
+        if (e.kind === 'spellTax' && (e.all || q !== p) && (e.filter === 'any' || !card.isCreature) && (e.minCmc === undefined || card.cmc >= e.minCmc)) tax += e.amount;
       }
     }
     return tax;
@@ -2847,6 +2858,13 @@ export class Game {
    * doesn't target; an empty list means it targets but nothing is legal.
    */
   targetCandidates(p: PlayerState, e: Effect, src: Perm | null): Target[] | null {
+    const out = this.targetCandidatesAny(p, e, src);
+    // "You have hexproof" (Teyo, Leyline of Sanctity): opponents can't target that player (rule 702.11c).
+    if (!out || !this.kindsInGame.has('playerHexproof')) return out;
+    return out.filter((t) => t.kind !== 'player' || t.seat === p.seat || !this.players[t.seat].battlefield.some((q) => q.card.effects.some((x) => x.kind === 'playerHexproof' && x.when === 'static')));
+  }
+
+  private targetCandidatesAny(p: PlayerState, e: Effect, src: Perm | null): Target[] | null {
     switch (e.kind) {
       case 'removal': {
         if (e.each) return null;
@@ -4574,7 +4592,10 @@ export class Game {
         break;
       }
       case 'draw': {
-        const count = e.n === -1 ? Math.max(x, 1) : e.n;
+        // "Draw half X cards, rounded down" (Wan Shi Tong): a fractional xTimes on a spell or enters ability.
+        const half = e.xTimes !== undefined && e.xTimes < 1;
+        const count = e.n === -1 ? (half ? Math.floor(x * e.xTimes!) : Math.max(x, 1)) : e.n;
+        if (count <= 0) break;
         // "That player draws seven cards" (Forced Fruition), "the attacking player draws a card" (Breena).
         if (e.thatPlayer && target?.kind === 'player') {
           const who = this.players[target.seat];
@@ -4979,33 +5000,39 @@ export class Game {
         const creatures = p.battlefield.filter((q) => q.card.isCreature && (!e.artifact || q.card.isArtifact));
         if (e.proliferate) {
           // Proliferate: you choose, so +1/+1 counters on your creatures and -1/-1 counters on your opponents' (rule 701.34).
-          // Doubling Season only doubles counters on permanents you control.
-          for (const perm of creatures) if (perm.counters > 0) perm.counters += amount;
-          for (const perm of this.allPerms()) if (perm.seat !== p.seat && perm.card.isCreature && perm.counters < 0) perm.counters -= 1;
-          for (const perm of p.battlefield) if (perm.loyalty !== undefined && perm.card.isPlaneswalker) perm.loyalty += amount;
-          // Proliferate also reaches players (rule 701.34a): one more poison counter on each poisoned opponent,
-          // and one more counter on our other permanents that have some (quest and charge counters).
-          for (const o of this.opponents(p)) {
-            if (o.poison > 0 && !o.shielded) {
-              o.poison++;
-              o.lastHitBy = p.seat;
-              o.lastHitKind = 'noncombat';
-              this.say(`${o.name} gets a poison counter from proliferate (${o.poison} of 10).`);
+          // Doubling Season only doubles counters on permanents you control. Tekuthal: twice instead, for each one.
+          const twice = p.battlefield.filter((q) => q.card.effects.some((t) => t.kind === 'proliferateTwice' && t.when === 'static')).length;
+          const times = 2 ** Math.min(twice, 3);
+          if (times > 1) this.say(`${p.name} proliferates ${times} times.`);
+          for (let rep = 0; rep < times; rep++) {
+            for (const perm of creatures) if (perm.counters > 0) perm.counters += amount;
+            for (const perm of this.allPerms()) if (perm.seat !== p.seat && perm.card.isCreature && perm.counters < 0) perm.counters -= 1;
+            for (const perm of p.battlefield) if (perm.loyalty !== undefined && perm.card.isPlaneswalker) perm.loyalty += amount;
+            // Proliferate also reaches players (rule 701.34a): one more poison counter on each poisoned opponent,
+            // and one more counter on our other permanents that have some (quest and charge counters).
+            for (const o of this.opponents(p)) {
+              if (o.poison > 0 && !o.shielded) {
+                o.poison++;
+                o.lastHitBy = p.seat;
+                o.lastHitKind = 'noncombat';
+                this.say(`${o.name} gets a poison counter from proliferate (${o.poison} of 10).`);
+              }
             }
-          }
-          for (const perm of p.battlefield) {
-            if (perm.charge) {
-              perm.charge++;
-              this.chargeWins(perm);
+            for (const perm of p.battlefield) {
+              if (perm.charge) {
+                perm.charge++;
+                this.chargeWins(perm);
+              }
+              if (perm.card.isCreature || perm.card.isPlaneswalker) continue;
+              if (perm.loyalty !== undefined) perm.loyalty++;
+              else if (perm.hours) this.addHours(perm, 1);
+              else if (perm.counters > 0) perm.counters++;
             }
-            if (perm.card.isCreature || perm.card.isPlaneswalker) continue;
-            if (perm.loyalty !== undefined) perm.loyalty++;
-            else if (perm.hours) this.addHours(perm, 1);
-            else if (perm.counters > 0) perm.counters++;
+            // Players' counters too: energy and experience (rule 701.34a).
+            if (p.energy > 0) p.energy++;
+            if (p.experience > 0) p.experience++;
+            this.fire(p, 'proliferate');
           }
-          // Players' counters too: energy and experience (rule 701.34a).
-          if (p.energy > 0) p.energy++;
-          if (p.experience > 0) p.experience++;
         } else if (e.all) {
           for (const perm of creatures) this.putCounters(perm, amount);
         } else if (src && src.card.isCreature && p.battlefield.includes(src) && !e.other) {
@@ -6549,6 +6576,16 @@ export class Game {
    */
   private cumulativeUpkeep(p: PlayerState) {
     for (const perm of [...p.battlefield]) {
+      // Vanishing: age counts the time counters removed so far.
+      if (perm.card.vanishing) {
+        perm.age = (perm.age ?? 0) + 1;
+        if (perm.age >= perm.card.vanishing) {
+          this.say(`The last time counter comes off ${perm.card.name}; ${p.name} sacrifices it (vanishing).`);
+          this.removePerm(perm, 'graveyard');
+          this.sacrificed(p, perm);
+        }
+        continue;
+      }
       const cost = perm.card.cumulativeUpkeep;
       if (!cost) continue;
       perm.age = (perm.age ?? 0) + 1;
@@ -6939,7 +6976,7 @@ export class Game {
     let out = cache.get(card);
     if (!out) {
       out = {
-        ...card, keywords: [], effects: [], scales: undefined, crew: undefined, persist: undefined, toxic: undefined, cumulativeUpkeep: undefined, noUntap: undefined, levels: undefined, station: undefined,
+        ...card, keywords: [], effects: [], scales: undefined, crew: undefined, persist: undefined, toxic: undefined, cumulativeUpkeep: undefined, vanishing: undefined, noUntap: undefined, levels: undefined, station: undefined,
         ...(size ? { power: size.p, toughness: size.t } : {}), notes: [...card.notes, `Has lost all abilities${size ? ` (${size.p}/${size.t})` : ''}`],
       };
       cache.set(card, out);
@@ -7213,6 +7250,7 @@ export class Game {
   /** Check state-based actions until nothing changes, then put waiting triggers on the stack. */
   private *checkState(): Flow<void> {
     for (let i = 0; i < 100; i++) {
+      if (this.damagedQueue.length) yield* this.damagedEvents();
       let changed = this.stateBasedActions();
       // A commander that went to a graveyard or exile may go to the command zone
       // instead (rule 903.9a); one headed for its owner's hand may too (903.9b).
@@ -7572,6 +7610,14 @@ export class Game {
     // Shadow blocks and is blocked only by shadow (702.28b). Fear: only artifact or black creatures block it (702.36b).
     if (this.hasKw(attacker, 'shadow') !== this.hasKw(blocker, 'shadow')) return false;
     if (this.hasKw(attacker, 'fear') && !blocker.card.isArtifact && !blocker.card.cost.pips.some((pip) => pip.includes('B'))) return false;
+    for (const k of attacker.card.keywords) {
+      const m = k.match(/^can't be blocked by power (\d+) or (less|greater)$/);
+      if (m && (m[2] === 'less' ? this.power(blocker) <= +m[1] : this.power(blocker) >= +m[1])) return false;
+    }
+    // Skulk: can't be blocked by creatures with greater power (702.118b).
+    if (this.hasKw(attacker, 'skulk') && this.power(blocker) > this.power(attacker)) return false;
+    // Landwalk: unblockable while the defending player controls a land of that type (702.14c).
+    for (const [kw, type] of LANDWALKS) if (this.hasKw(attacker, kw) && this.players[blocker.seat].battlefield.some((q) => q.card.isLand && hasSubtype(q.card, type))) return false;
     // The Ring, first ability: the ring-bearer can't be blocked by creatures with greater power.
     if (this.ringLevel(attacker) >= 1 && this.power(blocker) > this.power(attacker)) return false;
     // Lord of the Nazgûl: Wraiths have protection from ring-bearers, so a ring-bearer can't block them (rule 702.16e).
@@ -7689,6 +7735,21 @@ export class Game {
     if (this.anyCurse) for (const seat of defenders) if (attacking.some((a) => a.attacking === seat)) this.curseEvent(this.players[seat], 'attacked', undefined, p);
     // The Ring, second ability: whenever the ring-bearer attacks, draw a card, then discard a card.
     for (const a of attacking) if (this.ringLevel(a) >= 2) yield* this.loot(p, `${a.card.name} carries the Ring`);
+    // Myriad (702.116): a token copy attacking each other opponent, exiled at end of combat (here: at end of turn).
+    for (const a of attacking) {
+      if (!this.hasKw(a, 'myriad')) continue;
+      for (const seat of defenders) {
+        if (seat === a.attacking || !this.players[seat].alive) continue;
+        const token = yield* this.makeCopyToken(p, this.copyCard(a.faceDown ? a.card : a.unlocked ?? a.card, {}), a.landInfo);
+        if (!token) continue;
+        token.tapped = true;
+        token.attacking = seat;
+        token.attackedTurn = this.turnNumber;
+        token.atEnd = 'exile';
+        this.anyTemporary = true;
+        this.say(`${a.card.name} has myriad: a token copy attacks ${this.players[seat].name}.`);
+      }
+    }
     // Isshin: abilities that creatures attacking set off trigger an additional time.
     const times = this.triggerTimes(p, 'attack');
     for (let i = 0; i < times; i++) {
@@ -7896,7 +7957,49 @@ export class Game {
 
   /** Damage `from`'s spell or permanent deals to a creature (or other permanent), after replacement and prevention. */
   private damagePerm(from: PlayerState, src: SimCard | null, srcPerm: Perm | null, perm: Perm, amount: number, combat = false): number {
-    return this.kindsInGame.has('damageMod') ? this.damageAfter(from, src, srcPerm, perm, amount, combat) : amount;
+    const dealt = this.kindsInGame.has('damageMod') ? this.damageAfter(from, src, srcPerm, perm, amount, combat) : amount;
+    this.noteDamaged(from.seat, perm, dealt);
+    return dealt;
+  }
+
+  /** Remember damage dealt to a permanent when something cares about it (see damagedQueue). */
+  private noteDamaged(seat: number, perm: Perm, amount: number) {
+    if (amount <= 0) return;
+    if (this.kindsInGame.has('damagedPunish') || (perm.bounty && this.kindsInGame.has('bountyDestroy'))) this.damagedQueue.push({ perm, seat, amount });
+  }
+
+  /**
+   * Phyrexian Obliterator and Reaper of Sheoldred: the source's controller sacrifices that many permanents, or gets a
+   * poison counter. Termination Facilitator: a damaged creature with a bounty counter is destroyed (here marked like
+   * deathtouch damage, so indestructible and regeneration still save it).
+   */
+  private *damagedEvents(): Flow<void> {
+    while (this.damagedQueue.length) {
+      const { perm, seat, amount } = this.damagedQueue.shift()!;
+      if (perm.bounty && this.allPerms().some((q) => q.seat !== perm.seat && q.card.effects.some((e) => e.kind === 'bountyDestroy'))) {
+        perm.deathtouched = true;
+        this.say(`${perm.card.name} has a bounty counter and is dealt damage: it is destroyed.`);
+      }
+      for (const e of perm.card.effects) {
+        if (e.kind !== 'damagedPunish') continue;
+        const v = this.players[seat];
+        if (!v.alive) continue;
+        if (e.what === 'poison') {
+          v.poison += 1;
+          v.lastHitBy = perm.seat;
+          this.say(`${v.name} gets a poison counter from damaging ${perm.card.name} (${v.poison} of 10).`);
+          continue;
+        }
+        const perms = v.battlefield;
+        const n = Math.min(amount, perms.length);
+        if (!n) continue;
+        const picks = n === perms.length ? perms.map((_, i) => i) : yield* this.choose(v, 'sacrifice', `${perm.card.name}: sacrifice ${n} permanent${n > 1 ? 's' : ''}.`, perms.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), n, n);
+        const gone = picks.map((i) => perms[i]).filter(Boolean);
+        this.say(`${v.name} sacrifices ${gone.map((q) => q.card.name).join(', ')} for damaging ${perm.card.name}.`);
+        this.removePerms(gone, 'graveyard');
+        for (const q of gone) this.sacrificed(v, q);
+      }
+    }
   }
 
   /** Life `p` would gain, after Sulfuric Vortex, Tainted Remedy and Alhammarret's Archive (rule 614.1a). */
@@ -8151,6 +8254,7 @@ export class Game {
       if (this.hasKw(d.from, 'wither') || this.hasKw(d.from, 'infect')) d.to.counters -= d.amount;
       else d.to.damage += d.amount;
       if (this.hasKw(d.from, 'deathtouch')) d.to.deathtouched = true;
+      this.noteDamaged(d.from.seat, d.to, d.amount);
     }
     for (const d of toPlayer) {
       // The Mindskinner: prevented, and the player mills that many instead.
@@ -8662,6 +8766,8 @@ export function creatureTypes(card: SimCard): string[] {
 }
 
 const subtypeCache = new Map<string, boolean>();
+const LANDWALKS: [string, string][] = [['islandwalk', 'Island'], ['swampwalk', 'Swamp'], ['forestwalk', 'Forest'], ['mountainwalk', 'Mountain'], ['plainswalk', 'Plains']];
+
 export function hasSubtype(card: SimCard, subtype: string): boolean {
   if (card.keywords.includes('changeling')) return true;
   const key = `${card.typeLine}|${subtype}`;

@@ -20,6 +20,7 @@
 // A card with an entry counts as fully read: the entry is the statement of how this engine
 // plays it, approximations included (said in `why`).
 
+import { RULES_P_TO_Z } from './cardRulesPZ';
 import type { Effect, SimCard } from './types';
 
 export interface CardRule {
@@ -173,6 +174,9 @@ export const CARD_RULES: Record<string, CardRule> = {
     notes: ['Return all creatures attacking you to their owners\' hands'],
     why: 'Only creatures attacking you: in multiplayer the bot casts it when it is attacked.',
   },
+
+  // --- One-off cards named P to Z (cardRulesPZ.ts) --------------------------------------
+  ...RULES_P_TO_Z,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */
