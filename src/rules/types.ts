@@ -277,7 +277,7 @@ export interface StackItem {
   /** Exiled instead of going anywhere else when it leaves the stack (Wrexial, Mizzix's Mastery's copies are copies). */
   exileAfter?: boolean;
   /** Triggered abilities: the seat of the player the trigger is about ("that player", see Effect.thatPlayer). */
-  about?: number;
+  aboutSeat?: number;
   /** Dies triggers: the card of the creature that died, for "return that card" (Minion's Return). */
   died?: DiedCard;
 }

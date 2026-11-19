@@ -80,7 +80,7 @@ interface PendingTrigger {
   /** The number "that much" refers to (life gained, for Sanguine Bond). */
   x: number;
   /** The seat of the player the trigger is about ("that player"). */
-  about?: number;
+  aboutSeat?: number;
   /** Dies triggers: the creature that died. */
   died?: DiedCard;
 }
@@ -570,7 +570,7 @@ export class Game {
         for (const perm of o.battlefield) {
           // "Whenever an opponent draws their second card each turn" (Faerie Mastermind) counts that player's draws.
           const hits = perm.card.effects.filter((e) => e.when === 'opponentDraw' && (e.nth === undefined || e.nth === p.drawsThisTurn));
-          if (hits.length) this.trigger(o, perm.card, perm.id, hits, 0, null, undefined, p.seat);
+          if (hits.length) this.trigger(o, perm.card, perm.id, hits, 0, null, undefined, undefined, p.seat);
         }
       }
     }
@@ -609,7 +609,7 @@ export class Game {
     if (this.kindsInGame.has('when:playerSacrifice')) {
       for (const q of this.alivePlayers()) for (const perm of q.battlefield) {
         const hits = perm.card.effects.filter((e) => e.when === 'playerSacrifice' && (e.scope !== 'opponents' || q !== p));
-        if (hits.length) this.trigger(q, perm.card, perm.id, hits, 0, null, undefined, p.seat);
+        if (hits.length) this.trigger(q, perm.card, perm.id, hits, 0, null, undefined, undefined, p.seat);
       }
     }
   }
@@ -2543,13 +2543,13 @@ export class Game {
     const times = card.isInstant || card.isSorcery ? this.triggerTimes(p, 'magecraft') : 1;
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(card, e.castFilter ?? 'any') && card.cmc >= (e.minCmc ?? 0) && counts(e));
-      if (hits.length) for (let i = 0; i < times; i++) this.trigger(p, perm.card, perm.id, hits, 0, null, item.id, p.seat);
+      if (hits.length) for (let i = 0; i < times; i++) this.trigger(p, perm.card, perm.id, hits, 0, null, item.id, undefined, p.seat);
     }
     // "Whenever an opponent casts a spell" (Rhystic Study).
     for (const o of this.opponents(p)) {
       for (const perm of o.battlefield) {
         const hits = perm.card.effects.filter((e) => e.when === 'opponentCast' && matchesFilter(card, e.castFilter ?? 'any') && counts(e));
-        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, item.id, p.seat);
+        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, item.id, undefined, p.seat);
       }
     }
     if (this.anyCurse) this.curseEvent(p, 'casts', card);
@@ -2679,7 +2679,7 @@ export class Game {
    * `x`: the amount "that much" refers to. `left`: the source, when it has just left the battlefield.
    * `subject`: the spell that set it off, for "copy that spell".
    */
-  private trigger(controller: PlayerState, card: SimCard, sourceId: number | null, effects: Effect[], x = 0, left: Perm | null = null, subject?: number, about?: number) {
+  private trigger(controller: PlayerState, card: SimCard, sourceId: number | null, effects: Effect[], x = 0, left: Perm | null = null, subject?: number, _about?: undefined, aboutSeat?: number) {
     if (!controller.alive || !effects.length) return;
     const src = left ?? this.findPerm(sourceId);
     const kept: Effect[] = [];
@@ -2702,7 +2702,7 @@ export class Game {
     // Roaming Throne, Harmonic Prodigy: some of your permanents' abilities trigger an additional time (rule 603.2d).
     const times = src && src.seat === controller.seat && this.kindsInGame.has('triggerDoubler') ? 1 + this.extraTriggers(controller, src, kept) : 1;
     for (let i = 0; i < times; i++) {
-      this.pending.push({ controller: controller.seat, card, sourceId, effects: kept, x, ...(subject !== undefined ? { subject } : {}), ...(about !== undefined ? { about } : {}), ...(died ? { died } : {}) });
+      this.pending.push({ controller: controller.seat, card, sourceId, effects: kept, x, ...(subject !== undefined ? { subject } : {}), ...(aboutSeat !== undefined ? { aboutSeat } : {}), ...(died ? { died } : {}) });
     }
   }
 
@@ -2750,10 +2750,10 @@ export class Game {
   }
 
   /** Abilities of `p`'s permanents that trigger on a simple event. */
-  private fire(p: PlayerState, when: Trigger, x = 0, about?: number) {
+  private fire(p: PlayerState, when: Trigger, x = 0, aboutSeat?: number) {
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === when);
-      if (hits.length) this.trigger(p, perm.card, perm.id, hits, x, null, undefined, about);
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits, x, null, undefined, undefined, aboutSeat);
     }
   }
 
@@ -2805,9 +2805,9 @@ export class Game {
       for (const e of t.effects) {
         // "That player": the player the trigger is about, not a choice (Sheoldred, Quietus Spike).
         if (e.thatPlayer) {
-          if (t.about === undefined || !this.players[t.about].alive) continue;
+          if (t.aboutSeat === undefined || !this.players[t.aboutSeat].alive) continue;
           effects.push(e);
-          targets.push({ kind: 'player', seat: t.about });
+          targets.push({ kind: 'player', seat: t.aboutSeat });
           continue;
         }
         const all = this.targetCandidates(p, e, src);
@@ -2834,7 +2834,7 @@ export class Game {
         targets.push(chosen);
       }
       if (!effects.length) continue;
-      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: t.card, effects, targets, x: t.x, isCommander: false, sourceId: t.sourceId, attachTo: null, label: `${t.card.name} trigger`, ...(t.subject !== undefined ? { subject: t.subject } : {}), ...(t.about !== undefined ? { about: t.about } : {}), ...(t.died ? { died: t.died } : {}) });
+      this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card: t.card, effects, targets, x: t.x, isCommander: false, sourceId: t.sourceId, attachTo: null, label: `${t.card.name} trigger`, ...(t.subject !== undefined ? { subject: t.subject } : {}), ...(t.aboutSeat !== undefined ? { aboutSeat: t.aboutSeat } : {}), ...(t.died ? { died: t.died } : {}) });
       targets.forEach((aim, i) => { if (!effects[i].thatPlayer) this.becameTarget(p, aim, false); });
     }
     // Abilities that triggered on those targets go on the stack too (rule 603.3b).
@@ -3046,12 +3046,12 @@ export class Game {
     this.say(`${p.name} casts a face-down creature.`);
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === 'cast' && matchesFilter(priced, e.castFilter ?? 'any') && priced.cmc >= (e.minCmc ?? 0));
-      if (hits.length) this.trigger(p, perm.card, perm.id, hits, 0, null, undefined, p.seat);
+      if (hits.length) this.trigger(p, perm.card, perm.id, hits, 0, null, undefined, undefined, p.seat);
     }
     for (const o of this.opponents(p)) {
       for (const perm of o.battlefield) {
         const hits = perm.card.effects.filter((e) => e.when === 'opponentCast' && matchesFilter(priced, e.castFilter ?? 'any'));
-        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, undefined, p.seat);
+        if (hits.length) this.trigger(o, perm.card, perm.id, hits, p.spellsThisTurn, null, undefined, undefined, p.seat);
       }
     }
     return true;
@@ -6163,7 +6163,7 @@ export class Game {
         if (e.scope === 'any' && !attackers.some((a) => a.attacking !== q.seat)) return false;
         return true;
       });
-      if (hits.length) this.trigger(q, perm.card, perm.id, hits, attackers.length, null, undefined, by.seat);
+      if (hits.length) this.trigger(q, perm.card, perm.id, hits, attackers.length, null, undefined, undefined, by.seat);
     }
   }
 
@@ -6316,10 +6316,10 @@ export class Game {
     for (const a of hitPlayer) {
       const own = a.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
       // "You get that many {E}" (Aurora Shifter): the damage it dealt.
-      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined, a.attacking ?? undefined);
+      if (own.length) this.trigger(p, a.card, a.id, own, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined, undefined, a.attacking ?? undefined);
       for (const eq of this.attachments(a)) {
         const hits = eq.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'self');
-        if (hits.length) this.trigger(p, eq.card, eq.id, hits, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined, a.attacking ?? undefined);
+        if (hits.length) this.trigger(p, eq.card, eq.id, hits, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined, undefined, a.attacking ?? undefined);
       }
     }
     if (hitPlayer.size) {
