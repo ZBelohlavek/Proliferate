@@ -63,3 +63,14 @@ describe('win-rate misreads', () => {
     expect(a.battlefield.filter((q) => q.card.name === 'Mind Stone').length).toBeGreaterThan(1);
   });
 });
+
+describe('turn counting', () => {
+  it('counts each turn a player takes once', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const before = a.turnsTaken ?? 0;
+    t.finishTurn();
+    t.finishTurn();
+    expect(a.turnsTaken).toBe(before + 1);
+  });
+});
