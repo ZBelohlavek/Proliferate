@@ -111,6 +111,11 @@ export const FINAL_RULES: Record<string, CardRule> = {
     notes: ['When a permanent of yours with counters leaves: put them on another of yours', '{4}{W}: Move counters between your permanents'],
     why: '+1/+1 (and -1/-1) counters are moved; other kinds are left out. Bots use the activated ability to save counters from a permanent about to be removed.',
   },
+  'Isochron Scepter': {
+    effects: [{ kind: 'castImprinted', when: 'activated', activation: act(cost(2), true) }],
+    notes: ['{2}, {T}: Cast a copy of the exiled instant without paying its mana cost'],
+    why: 'Imprint exiles the best instant with mana value 2 or less from your hand as it enters (Dramatic Reversal first). Bots use the copy when the instant has something to do: a counter with a spell to counter, removal with a target, anything else at the end of an opponent\'s turn.',
+  },
   'Kill Switch': {
     effects: [{ kind: 'tapArtifacts', when: 'activated', activation: act(cost(2), true) }],
     notes: ['{2}, {T}: Tap all other artifacts; they stay tapped while this stays tapped'],

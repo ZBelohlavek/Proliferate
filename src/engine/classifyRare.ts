@@ -219,13 +219,16 @@ export function recogniseRare(line: string, out: Found[], card: { isPermanent: b
     const protect = grant.includes('indestructible');
     return push({ kind: 'pump', p: parseInt(m[2], 10), t: parseInt(m[3], 10), protect, ...(grant.length ? { grant } : {}) }, `Combat trick +${m[2]}/+${m[3]}${grant.length ? ` and ${grant.join(', ')}` : ''}`);
   }
-  if ((m = line.match(/^until end of turn, double target creature's power and it gains (first strike|double strike|trample)/))) return push({ kind: 'pump', p: 3, t: 0, protect: false, grant: [m[1]] }, `Double a creature's power (≈ +3/+0) and ${m[1]}`);
-  if (/^double target creature's power until end of turn/.test(line)) return push({ kind: 'pump', p: 3, t: 0, protect: false }, "Double a creature's power (≈ +3/+0)");
+  if ((m = line.match(/^until end of turn, double target creature's power and it gains (first strike|double strike|trample)/))) return push({ kind: 'pump', p: 3, t: 0, protect: false, grant: [m[1]], doublePower: true }, `Double a creature's power and ${m[1]}`);
+  if (/^double target creature's power until end of turn/.test(line)) return push({ kind: 'pump', p: 3, t: 0, protect: false, doublePower: true }, "Double a creature's power");
   if (/^it and other creatures you control that share a creature type with it each get \+(\d)\/\+(\d)/.test(line)) {
     const [, p, t] = line.match(/\+(\d)\/\+(\d)/)!;
     return push({ kind: 'overrun', p: parseInt(p, 10), t: parseInt(t, 10), trample: false }, `Creatures of its type get +${p}/+${t} this turn`);
   }
-  if (/^(?:until end of turn, )?target creature( you control)? gains "when ~ dies, return it to the battlefield/.test(fullLine) && /target creature/.test(line)) return push({ kind: 'protect' }, 'It comes back if it dies this turn (≈ protection)');
+  if (/^(?:until end of turn, )?target creature( you control)? gains "when ~ dies, return it to the battlefield/.test(fullLine) && /target creature/.test(line)) {
+    const plus = /with a \+1\/\+1 counter on it/.test(fullLine) ? 1 : 0;
+    return push({ kind: 'protect', returns: plus }, `It returns to the battlefield tapped if it dies this turn${plus ? ', with a +1/+1 counter' : ''}`);
+  }
   if (/^up to x target creatures phase out/.test(line)) return push({ kind: 'protect' }, 'Phase out creatures (≈ protection)');
   if (/^all creatures gain hexproof and indestructible until end of turn/.test(line)) return push({ kind: 'protect', all: true }, 'Everything is protected this turn');
   if (/^you can't lose the game this turn and your opponents can't win the game this turn/.test(line)) return push({ kind: 'protect', player: true }, "You can't lose this turn (≈ protected until your next turn)");

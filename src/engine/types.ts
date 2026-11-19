@@ -267,11 +267,11 @@ export type EffectBody =
   | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
   /** self: the source itself ("~ gains haste until end of turn"), no target. */
-  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean }
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean; /** "Double its power": +X/+0 where X is its power as this resolves (p is the bots' estimate). */ doublePower?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
   | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean; /** The enchanted permanent loses all abilities: a vanilla creature of `lockSize` (Amphibian Downpour) or a land that taps for {C} (Imprisoned in the Moon). */ lock?: 'blank' | 'land'; lockSize?: { p: number; t: number } }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
-  | { kind: 'protect'; all?: boolean; player?: boolean }
+  | { kind: 'protect'; all?: boolean; player?: boolean; /** Undying Malice, Not Dead After All: instead of protection, it returns tapped if it dies this turn, with this many +1/+1 counters. */ returns?: number }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
   /** devotion: n is your devotion to this color instead (Gray Merchant). */
   | { kind: 'drain'; n: number; gain: number; devotion?: Color; /** Only opponents with no cards in hand (Tinybones). */ emptyHand?: boolean; /** "Deals N damage to each opponent": damage, so Torbran and prevention apply. */ damage?: boolean }
@@ -301,7 +301,7 @@ export type EffectBody =
   /** Put the top (or bottom) card of your library into your graveyard; a creature card with power up to the source's goes onto the battlefield (Grenzo). */
   | { kind: 'millReanimate'; fromBottom: boolean }
   /** Persist and undying: the creature that just died returns with a -1/-1 (persist) or +1/+1 (undying) counter. */
-  | { kind: 'returnSelf'; counters: number }
+  | { kind: 'returnSelf'; counters: number; tapped?: boolean }
   /** proliferate: only creatures that already have a counter. */
   /** byExperience: as many counters as you have experience counters (Kratos). */
   | { kind: 'counters'; n: number; all: boolean; /** "Each artifact creature you control" (Steel Overseer). */ artifact?: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
@@ -783,6 +783,8 @@ export type EffectBody =
   | { kind: 'noCounters' }
   /** Tap all other artifacts; they don't untap during their controllers' untap steps for as long as the source stays tapped (Kill Switch). */
   | { kind: 'tapArtifacts' }
+  /** Isochron Scepter: copy the card exiled with this and cast the copy without paying its mana cost. */
+  | { kind: 'castImprinted' }
   /** Target permanent you own (even one an opponent controls) is destroyed or put on the bottom of your library (Despotic Scepter, Tel-Jilad Stylus). */
   | { kind: 'ownPerm'; to: 'destroy' | 'bottom' }
   /** Remove target attacking creature you control from combat and untap it (Reconnaissance, rule 506.4). */

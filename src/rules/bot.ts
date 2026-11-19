@@ -572,7 +572,7 @@ export class Bot implements Agent {
       const perm = g.findPerm(t.id);
       if (!perm || perm.seat !== p.seat || threat(g, perm) < 5) continue;
       // Protection, or a blink that makes the removal lose its target.
-      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'protect' || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
+      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => (f.kind === 'protect' && (f.returns === undefined || ((e.mode === 'destroy' || e.mode === 'damage') && perm.card.isCreature && !perm.token))) || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
       if (save) return save;
     }
     return undefined;
@@ -1325,6 +1325,19 @@ export class Bot implements Agent {
         }
         // Kill Switch: after our own turn's work, when opponents' artifacts matter more than ours.
         case 'tapArtifacts': return g.activeSeat === p.seat && g.step === 'main2' && this.killSwitchGain(g, p, perm) >= 4;
+        // Isochron Scepter: the imprinted instant when it has something to do.
+        case 'castImprinted': {
+          const card = g.imprinted.get(perm.id);
+          if (!card) return false;
+          const top = g.stack[g.stack.length - 1];
+          if (card.effects.some((f) => f.kind === 'counter')) return !!top && top.kind === 'spell' && top.controller !== p.seat && card.effects.some((f) => f.kind === 'counter' && counterMatches(f.target, top.card)) && this.wantsToCounter(g, p, top);
+          if (g.stack.length) return false;
+          // Dramatic Reversal and other untaps: when our tapped mana rocks give back more than the {2}.
+          if (card.effects.some((f) => f.kind === 'untap')) return g.activeSeat === p.seat && p.battlefield.filter((q) => q !== perm && !q.landInfo && q.tapped && q.card.effects.some((f) => f.kind === 'mana')).length >= 2;
+          const aimed = card.effects.find((f) => f.when === 'resolve' && (f.kind === 'removal' || f.kind === 'tap'));
+          if (aimed) return (g.targetCandidates(p, aimed, perm) ?? []).some((t) => (t.kind === 'perm' && g.findPerm(t.id)?.seat !== p.seat && threat(g, g.findPerm(t.id)!) >= 2));
+          return g.activeSeat !== p.seat && g.step === 'end';
+        }
         default: return false;
       }
     });

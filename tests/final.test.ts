@@ -295,3 +295,68 @@ describe('Alter Reality and Whim of Volrath', () => {
     expect(knight.card.keywords.some((k) => k.startsWith('pro:'))).toBe(true);
   });
 });
+
+describe('Isochron Scepter', () => {
+  it('imprints an instant and casts a copy of it for {2}, keeping the original exiled', () => {
+    const t = new Table();
+    const [p0] = t.game.players;
+    t.lands(0, 3);
+    p0.hand.push(artifact('Isochron Scepter', '{2}', 2, 'Imprint — When this artifact enters, you may exile an instant card with mana value 2 or less from your hand.\n{2}, {T}: You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.'));
+    p0.hand.push(spell('Quick Study', '{G}', 1, 'Instant', 'Draw two cards.'));
+    const cast = castOnce('Isochron Scepter');
+    let used = 0;
+    t.handlers[0] = (g, d) => {
+      const r = cast(g, d);
+      if (r !== undefined) return r;
+      if (d.kind !== 'priority' || used) return undefined;
+      const i = d.actions.findIndex((a) => a.type === 'activate' && a.effect.kind === 'castImprinted');
+      if (i === -1) return undefined;
+      used++;
+      return { action: i };
+    };
+    t.lands(0, 2);
+    t.until((g) => used > 0 && g.stack.length === 0 && log(t, /draws 2 cards/).length > 0);
+    expect(log(t, /exiles Quick Study with Isochron Scepter/)).toHaveLength(1);
+    expect(log(t, /casts a copy of Quick Study/)).toHaveLength(1);
+    expect(p0.exile.some((c) => c.name === 'Quick Study')).toBe(true);
+    expect(p0.graveyard.some((c) => c.name === 'Quick Study')).toBe(false);
+  });
+
+  it('Dramatic Reversal reads as an untap, so bots use it with mana rocks', () => {
+    const dr = spell('Dramatic Reversal', '{1}{U}', 2, 'Instant', 'Untap all nonland permanents you control.');
+    expect(dr.effects.some((e) => e.kind === 'untap')).toBe(true);
+  });
+});
+
+describe('Undying Malice', () => {
+  it('a creature that dies this turn comes back tapped with a +1/+1 counter', () => {
+    const t = new Table();
+    const [p0] = t.game.players;
+    const malice = spell('Undying Malice', '{G}', 1, 'Instant', 'Until end of turn, target creature gains "When this creature dies, return it to the battlefield tapped under its owner\'s control with a +1/+1 counter on it."');
+    expect(malice.effects).toEqual([expect.objectContaining({ kind: 'protect', returns: 1 })]);
+    expect(malice.notes!.join(' ')).not.toContain('≈');
+    t.game.put(0, creature('Grizzly Bears', '{1}{G}', 2, 2, 2));
+    t.lands(0, 3);
+    p0.hand.push(malice, spell('Murder', '{2}', 2, 'Instant', 'Destroy target creature.'));
+    const first = castOnce('Undying Malice');
+    const second = castOnce('Murder', () => log(t, /will return/).length > 0);
+    t.handlers[0] = (g, d) => first(g, d) ?? second(g, d);
+    t.until((g) => g.stack.length === 0 && log(t, /returns to the battlefield/).length > 0);
+    const bear = p0.battlefield.find((q) => q.card.name === 'Grizzly Bears')!;
+    expect(bear.tapped).toBe(true);
+    expect(bear.counters).toBe(1);
+  });
+});
+
+describe('doubling power', () => {
+  it('Bulk Up gives +X/+0 where X is the creature\'s power as it resolves', () => {
+    const t = new Table();
+    const [p0] = t.game.players;
+    const wurm = t.game.put(0, creature('Craw Wurm', '{4}{G}{G}', 6, 6, 4));
+    t.lands(0, 2);
+    p0.hand.push(spell('Bulk Up', '{1}{G}', 2, 'Instant', "Double target creature's power until end of turn."));
+    t.handlers[0] = castOnce('Bulk Up');
+    t.until((g) => g.stack.length === 0 && p0.graveyard.some((c) => c.name === 'Bulk Up'));
+    expect(t.game.power(wurm)).toBe(12);
+  });
+});

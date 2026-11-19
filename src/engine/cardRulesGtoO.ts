@@ -216,10 +216,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     text: 'Whenever ~ attacks, return target artifact card from your graveyard to the battlefield.',
     why: '"Attacks alone": played on any attack by it. A commander attacking alone is left out.',
   },
-  'Isochron Scepter': {
-    text: '{2}, {T}: You may copy the exiled card. If you do, you may cast the copy without paying its mana cost.',
-    why: 'Imprint is handled by the engine by name: it exiles the best instant with mana value 2 or less from your hand.',
-  },
   "Jace's Phantasm": {
     text: 'Flying',
     why: '+4/+4 while an opponent has ten cards in their graveyard is left out.',

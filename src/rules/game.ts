@@ -4671,6 +4671,16 @@ export class Game {
   private *resolveFinal(p: PlayerState, e: Effect, src: Perm | null, x: number, target: Target | null): Flow<void> {
     const aimed = target?.kind === 'perm' ? this.findPerm(target.id) : null;
     switch (e.kind) {
+      case 'castImprinted': {
+        // Isochron Scepter: the copy is cast as the ability resolves (rule 707.12), and ceases to exist if it can't be.
+        const card = src ? this.imprinted.get(src.id) : undefined;
+        if (!card) {
+          this.say(`${src?.card.name ?? 'It'} has no card exiled with it.`);
+          break;
+        }
+        this.pendingCasts.push({ seat: p.seat, card: { ...card }, copy: true, why: src!.card.name });
+        break;
+      }
       case 'tapArtifacts': {
         // Kill Switch: "tap all other artifacts. They don't untap during their controllers' untap steps for as long as this artifact remains tapped."
         const hit = this.allPerms().filter((q) => q !== src && !q.emblem && (q.card.isArtifact || this.foodAbility(q)));
@@ -4927,6 +4937,7 @@ export class Game {
 
     switch (e.kind) {
       case 'tapArtifacts':
+      case 'castImprinted':
       case 'ownPerm':
       case 'removeFromCombat':
       case 'forceBlocks':
@@ -5209,11 +5220,12 @@ export class Game {
       case 'pump': {
         const perm = e.self ? (src && this.players[src.seat].battlefield.includes(src) ? src : null) : target?.kind === 'perm' ? this.findPerm(target.id) : null;
         if (!perm) break;
-        perm.tempP += n(e.p);
+        const doubled = e.doublePower ? Math.max(0, this.power(perm)) : 0;
+        perm.tempP += e.doublePower ? doubled : n(e.p);
         perm.tempT += n(e.t);
         if (e.protect) perm.tempKw.push('indestructible', 'hexproof');
         if (e.grant) perm.tempKw.push(...e.grant);
-        this.say(e.grant && !e.p && !e.t ? `${perm.card.name} gains ${e.grant.join(', ')} until end of turn.` : `${perm.card.name} gets +${n(e.p)}/+${n(e.t)} until end of turn.`);
+        this.say(e.grant && !e.p && !e.t ? `${perm.card.name} gains ${e.grant.join(', ')} until end of turn.` : `${perm.card.name} gets +${e.doublePower ? doubled : n(e.p)}/+${n(e.t)} until end of turn.`);
         break;
       }
       case 'protect': {
@@ -5225,6 +5237,11 @@ export class Game {
         }
         const perm = target?.kind === 'perm' ? this.findPerm(target.id) : null;
         if (!perm) break;
+        if (e.returns !== undefined) {
+          perm.tempKw.push(`returns:${e.returns}`);
+          this.say(`${perm.card.name} will return to the battlefield if it dies this turn.`);
+          break;
+        }
         perm.tempKw.push('indestructible', 'hexproof');
         this.say(`${perm.card.name} is protected until end of turn.`);
         break;
@@ -5417,8 +5434,9 @@ export class Game {
         // Persist and undying: the card comes back from its owner's graveyard with a counter (rule 702.79, 702.93).
         if (!card || !p.graveyard.includes(card) || this.graveyardLocked()) break;
         p.graveyard.splice(p.graveyard.indexOf(card), 1);
-        this.say(`${card.name} returns to the battlefield with a ${e.counters > 0 ? '+1/+1' : '-1/-1'} counter.`);
+        this.say(`${card.name} returns to the battlefield${e.tapped ? ' tapped' : ''}${e.counters ? ` with a ${e.counters > 0 ? '+1/+1' : '-1/-1'} counter` : ''}.`);
         const perm = yield* this.enter(p, card, false, 0, null);
+        if (perm && e.tapped) perm.tapped = true;
         if (perm && e.counters < 0) this.minusCounters(perm, -e.counters, p);
         else if (perm && !this.countersBlocked(perm)) perm.counters += e.counters;
         break;
@@ -6991,6 +7009,11 @@ export class Game {
         const persist = card?.persist;
         if (card && persist && dest === 'graveyard' && card.isCreature && (persist === 'persist' ? perm.counters >= 0 : perm.counters <= 0)) {
           this.trigger(owner, card, null, [{ kind: 'returnSelf', counters: persist === 'persist' ? -1 : 1, when: 'creatureDies', scope: 'self' }]);
+        }
+        // Undying Malice, Not Dead After All: "when this creature dies, return it to the battlefield tapped under its owner's control".
+        const back = perm.tempKw.find((k) => k.startsWith('returns:'));
+        if (card && back && dest === 'graveyard' && card.isCreature) {
+          this.trigger(owner, card, null, [{ kind: 'returnSelf', counters: Number(back.slice(8)), tapped: true, when: 'creatureDies', scope: 'self' }]);
         }
       }
       if (perm.card.isCreature && dest === 'graveyard') this.diedThisTurn++;
