@@ -56,6 +56,10 @@ export type Trigger =
   | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
+  | 'unlock' // this door of a Room is unlocked, by casting it or paying its unlock cost (rule 709.5h)
+  | 'fullyUnlock' // you fully unlock a Room (rule 709.5i)
+  | 'sacrificeFood' // you sacrifice a Food
+  | 'postcombatMain' // the beginning of each of your postcombat main phases
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
@@ -78,6 +82,10 @@ export type Effect = EffectBody & {
   chance?: number;
   /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
   loyalty?: number;
+  /** "-X:" loyalty abilities (rule 606.4): X loyalty is removed, chosen as it is activated. */
+  loyaltyX?: boolean;
+  /** "Three times X": the X the effect sees is this many times the X paid. */
+  xTimes?: number;
   /** Saga chapter abilities: the chapters (lore counts) this ability triggers on. */
   chapters?: number[];
   /** Creature-enters triggers that only watch nontoken creatures. */
@@ -123,6 +131,8 @@ export type Effect = EffectBody & {
     removeCounters?: { n: number; from: 'self' | 'any' };
     /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
     boast?: boolean;
+    /** "Sacrifice a Food", "sacrifice five artifacts": other permanents of yours sacrificed as part of the cost. */
+    sacOther?: { what: 'food' | 'artifact'; n: number };
   };
 };
 
@@ -147,7 +157,7 @@ export type EffectBody =
   /** replace: a destroyed land's controller may search for a basic land to put onto the battlefield (Ghost Quarter). */
   /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
   | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean; /** Only mana value up to this (-1: X, Ugin's -X). */ maxCmc?: number; /** Only permanents that are one or more colors. */ colored?: boolean }
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
@@ -186,7 +196,7 @@ export type EffectBody =
   /** A drawback: you lose this much life (Bitterblossom, Dark Confidant). */
   | { kind: 'loseLife'; n: number }
   /** creatureToBattlefield: finds a creature and puts it straight onto the battlefield. */
-  | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean }
+  | { kind: 'tutor'; creatureToBattlefield?: boolean; /** Only creatures with mana value X or less. */ xLimit?: boolean; /** An artifact card onto the battlefield instead (Tezzeret the Seeker). */ artifactToBattlefield?: boolean }
   /**
    * Return cards from a graveyard. what: which cards it can return (default creatures). toTop: onto the library instead of into the hand.
    * all: every matching card instead of n of them. from: whose graveyard ('any' graveyard, or only 'opponents''; default your own);
@@ -230,7 +240,11 @@ export type EffectBody =
   /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
   | { kind: 'toughnessMatters'; defenders: boolean; /** Only your creatures. */ yours?: boolean }
   /** Reveal from the top of your library until a nonland permanent card, and put it onto the battlefield. */
-  | { kind: 'digPermanent' }
+  | { kind: 'digPermanent'; /** Every artifact card among the top `among` cards instead (Tezzeret, Master of the Bridge). */ artifacts?: boolean; among?: number }
+  /** Target player separates their permanents into two piles and sacrifices one (Liliana of the Veil): about half of them. */
+  | { kind: 'sacrificeHalf' }
+  /** Cast a card from your graveyard without paying its mana cost (Vadrok). */
+  | { kind: 'freeFromGraveyard'; maxCmc: number; noncreature?: boolean }
   /** Opponents can't cast their commanders from the command zone. */
   | { kind: 'commandLock' }
   /** Cards that would go to a graveyard are exiled instead (only your opponents' cards, with `opponents`: Dauthi Voidwalker). */
@@ -243,10 +257,28 @@ export type EffectBody =
   /** whileSource: only "for as long as you control ~" (Sower of Temptation): the creature goes back when the source leaves. */
   /** what: an artifact instead of a creature (Thieving Skydiver; an Equipment is then attached to the source). maxCmc: only mana value up to this; -1 = X. */
   /** payEnergy: Confiscation Coup gives this much energy, then the steal costs energy equal to the target's mana value. */
-  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number; what?: 'artifact'; maxCmc?: number }
+  | { kind: 'steal'; from: 'battlefield' | 'library'; whileSource?: boolean; payEnergy?: number; what?: 'artifact'; maxCmc?: number; noncreature?: boolean }
   /** Put a creature card from your hand onto the battlefield. */
   | { kind: 'cheat' }
-  | { kind: 'extraTurn' }
+  | { kind: 'extraTurn'; /** Take this many (Teferi, Master of Time's two). */ n?: number }
+  /** You get an emblem with these abilities (rule 114): they work from the command zone for the rest of the game. */
+  | { kind: 'emblem'; card: SimCard }
+  /**
+   * Make real artifact tokens: Food ("{2}, {T}, sacrifice: gain 3 life"), Blood ("{1}, {T}, discard a card,
+   * sacrifice: draw a card") or an Incubator with `size` +1/+1 counters ("{2}: transform" into a Phyrexian artifact
+   * creature, rule 701.53). n: how many (-1: X).
+   */
+  | { kind: 'artifactToken'; token: 'food' | 'blood' | 'incubator'; n: number; size?: number }
+  /** Transform target Incubator token you control into its Phyrexian side (Progenitor Exarch). */
+  | { kind: 'hatch' }
+  /** "There is an additional beginning phase after this phase" (Sphinx of the Second Sun, rule 500.8). */
+  | { kind: 'extraPhase'; phase: 'beginning' }
+  /** Static: this creature can't attack during extra turns (Medomai the Ageless). */
+  | { kind: 'noExtraTurnAttack' }
+  /** Static: planeswalkers you control have "[0]: proliferate" and "[-12]: take an extra turn after this one" (Ichormoon Gauntlet). */
+  | { kind: 'pwAbilities' }
+  /** Static: unlock costs you pay cost this much less (Inquisitive Glimmer, rule 709.5e). */
+  | { kind: 'unlockDiscount'; n: number }
   /** Look at the top n cards and keep or bin each. Surveil puts the rest in the graveyard, scry on the bottom. */
   | { kind: 'scry'; n: number; surveil: boolean }
   /**
@@ -264,7 +296,7 @@ export type EffectBody =
   /** You get an experience counter. */
   | { kind: 'experience' }
   /** Put a stun counter on an opponent's nonland permanent (its next untap doesn't happen). */
-  | { kind: 'stun'; /** Tap it first (Fear of Sleep Paralysis). */ tap?: boolean; /** Only a tapped creature (Cryogen Relic). */ tapped?: boolean }
+  | { kind: 'stun'; /** Tap it first (Fear of Sleep Paralysis). */ tap?: boolean; /** Only a tapped creature (Cryogen Relic). */ tapped?: boolean; /** Up to this many creatures (-1: the times this creature has mutated, Archipelagore). */ n?: number }
   /** Mathas: a bounty counter on an opponent's creature; when it dies, its controller's opponents each draw 1 and gain 2. */
   | { kind: 'bounty'; /** Only the counter: the creature doesn't get Mathas's "when this dies, each opponent draws and gains 2". */ plain?: boolean; /** Any creature, not only an opponent's (Bounty Board). */ any?: boolean }
   /** Static: whenever a creature with a bounty counter dies, each of its controller's opponents draws and gains 2 (Bounty Board), or this gets `n` +1/+1 counters (Shay Cormac). */
@@ -272,7 +304,7 @@ export type EffectBody =
   /** Static: an opponent's creature that becomes the target of your spell or ability gets a bounty counter (Shay Cormac). */
   | { kind: 'bountyOnTarget' }
   /** Players get poison counters (rule 122.1f): each opponent, each player, or one target player. */
-  | { kind: 'poison'; n: number; who: 'opponents' | 'each' | 'target' }
+  | { kind: 'poison'; n: number; who: 'opponents' | 'each' | 'target'; /** Up to this many in total (Vraska's "equal to the difference"). */ upTo?: number }
   /** A keyword counter (rule 122.1b): an indestructible or flying counter on the source ('self') or one of your creatures ('yours'). */
   | { kind: 'kwCounter'; kw: string; on: 'self' | 'yours' }
   /** Korvold: sacrifice another permanent (part of the trigger, not optional). */
@@ -580,6 +612,11 @@ export interface SimCard {
   /** Ninjutsu (rule 702.49): return an unblocked attacker you control to hand to put this onto the battlefield tapped and attacking. `commander`: also from the command zone. */
   ninjutsu?: { cost: ManaCost; commander?: boolean };
   morph?: { cost: ManaCost; /** Megamorph: a +1/+1 counter when turned face up. */ counter?: boolean; /** Disguise: the face-down creature has ward {2}. */ ward?: boolean };
+  /**
+   * Room (rule 709.5): a split enchantment whose doors unlock separately. The card itself is the door cast
+   * (its effects, cost and name); `door` is the other, locked door, unlocked as a sorcery for its mana cost.
+   */
+  room?: { door: SimCard };
   /** Transforming double-faced card: its back face (rule 712). */
   back?: SimCard;
   /** Modal double-faced card whose back is a land. */

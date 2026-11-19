@@ -62,6 +62,8 @@ export interface Perm {
   stun?: number;
   /** Goaded by these seats, until each one's next turn (rule 701.15). */
   goadedBy?: number[];
+  /** An emblem (rule 114): kept with its owner's permanents so its abilities work, but it can't be touched. */
+  emblem?: boolean;
   /** Sagas: lore counters (rule 714). */
   lore?: number;
   /** Classes: the level it has reached (rule 716). Its card then carries the abilities of every level so far. */
@@ -231,6 +233,8 @@ export interface StackItem {
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
   kicked?: number;
+  /** A Room cast as its other door: what enters (`card` is still the card that goes to the graveyard). */
+  door?: SimCard;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +249,10 @@ export type Action =
   /** Cast a spell. maxX is the largest X that can be paid (0 for spells without X). */
   /** `alt` casts it for its alternative cost (see SimCard.altCost). `mutate`: cast for its mutate cost, onto a creature chosen as the target. `faceDown`: cast face down for {3} (morph). */
   /** `kick`: pay its kicker (or offspring) cost this many times (rule 702.33). */
-  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number }
+  /** `door`: cast a Room's other door (`card.room.door`) instead of the one the card shows (rule 709.5d). */
+  | { type: 'cast'; card: SimCard; from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt'; maxX: number; mutate?: boolean; faceDown?: boolean; kick?: number; door?: boolean }
+  /** Pay a Room's locked door's mana cost to unlock it (rule 709.5e). A special action. */
+  | { type: 'unlock'; permId: number }
   /** Give a Class its next level (rule 716.2a). */
   | { type: 'level'; permId: number }
   /** Turn a face-down permanent face up for its morph cost, or its mana cost if it is a manifested creature card (rule 702.37e, 701.40b). A special action. */

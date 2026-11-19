@@ -5,9 +5,10 @@
 // It reads the same public game state a person at the table would, plus its
 // own hand. It never looks at other players' hands or at any library.
 
+import { isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
+import { cardColored, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -248,7 +249,7 @@ export class Bot implements Agent {
   // -------------------------------------------------------------------------
 
   private priority(g: Game, p: PlayerState, actions: Action[]): PriorityAnswer {
-    const pick = (a: Action | undefined, x = 0): PriorityAnswer => {
+    const pick = (a: Action | undefined, x = a?.type === 'activate' && a.effect.loyaltyX ? this.loyaltyX(g, p, a) : 0): PriorityAnswer => {
       this.castingX = x;
       return { action: a ? Math.max(0, actions.indexOf(a)) : 0, x };
     };
@@ -304,6 +305,9 @@ export class Bot implements Agent {
       // Classes: gain the next level once there is nothing better to spend the mana on.
       const level = actions.find((a) => a.type === 'level');
       if (level) return pick(level);
+      // Rooms: unlock the other door once there is nothing better to do, unless unlocking it would hurt us.
+      const unlock = actions.find((a) => a.type === 'unlock' && this.unlockWorth(g, p, a.permId));
+      if (unlock) return pick(unlock);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       // Before combat: haste and evasion abilities.
       return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate'))));
@@ -615,7 +619,7 @@ export class Bot implements Agent {
         if (alt.pitch || alt.returnIslands || casts.some((b) => b.card === a.card && b.from === 'hand')) continue;
         if (alt.evoke && !a.card.effects.some((e) => e.when === 'resolve')) continue;
       }
-      const card = a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
+      const card = a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.door ? 'door' : a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from);
       const fromCommand = a.from === 'command';
       const kick = a.kick ? this.kickWorth(g, p, a.card, a.kick, a.maxX) : 0;
       if (kick === null) continue;
@@ -702,7 +706,8 @@ export class Bot implements Agent {
 
   /** How much the bot wants to cast this now. null = don't. */
   private castScore(g: Game, p: PlayerState, card: SimCard, fromCommand: boolean, x: number, instantWindow: boolean): number | null {
-    const kinds = new Set(card.effects.filter((e) => e.when === 'resolve' || e.when === 'static').map((e) => e.kind));
+    // A Room's door is unlocked as it enters, so "when you unlock this door" happens now (rule 709.5h).
+    const kinds = new Set(card.effects.filter((e) => e.when === 'resolve' || e.when === 'static' || (e.when === 'unlock' && !!card.room)).map((e) => e.kind));
     if (fromCommand) return 85 + card.value;
 
     // Combos and alternative wins: the missing piece goes down as soon as possible.
@@ -718,7 +723,7 @@ export class Bot implements Agent {
     if (kinds.has('overrun')) return g.step === 'main1' && this.readyAttackers(g, p).length >= 3 ? 60 : null;
 
     if (kinds.has('wipe')) {
-      const wipe = card.effects.find((e): e is Wipe => e.kind === 'wipe')!;
+      const wipe = card.effects.find((e): e is Wipe => e.kind === 'wipe' && (e.when === 'resolve' || e.when === 'unlock'))!;
       return this.wipeIsGood(g, p, wipe, x) ? 95 : null;
     }
 
@@ -797,6 +802,7 @@ export class Bot implements Agent {
       const thinnest = Math.min(...g.opponents(p).map((o) => o.library.length));
       score = Math.max(score, 45 + card.value + (thinnest < 30 ? 15 : 0));
     }
+    if (kinds.has('artifactToken')) score = Math.max(score, 30 + card.value);
     if (kinds.has('tutor') || kinds.has('recursion') || kinds.has('tokens') || kinds.has('drain') || kinds.has('damagePlayer') || kinds.has('counters')) {
       score = Math.max(score, 40 + card.value);
     }
@@ -847,14 +853,23 @@ export class Bot implements Agent {
         if (e.kind === 'recursion') return g.recursionPool(p, e).length > 0;
         // Jace's -8: draw the rest of the library and win.
         if (e.kind === 'draw') return e.n < p.library.length || winsOnEmptyDraw(p);
+        // Tezzeret the Seeker's -X: only with an artifact in reach.
+        if (e.kind === 'tutor' && e.artifactToBattlefield) return p.library.some((c) => c.isArtifact && !c.isLand && c.cmc <= (g.findPerm(a.permId)?.loyalty ?? 0) && c.value >= 2);
+        if (e.kind === 'sacrificeHalf') return g.opponents(p).some((o) => o.battlefield.filter((q) => !q.landInfo && !q.emblem).length >= 3);
+        if (e.kind === 'poison') return g.opponents(p).some((o) => o.poison < 9);
         return e.kind !== 'gainLife' && e.kind !== 'scry';
       };
       const minus = loyal.filter((a) => (a.effect.loyalty ?? 0) < 0 && worth(a)).sort((x, y) => (x.effect.loyalty ?? 0) - (y.effect.loyalty ?? 0))[0];
-      const plus = loyal.filter((a) => (a.effect.loyalty ?? 0) >= 0).sort((x, y) => (y.effect.loyalty ?? 0) - (x.effect.loyalty ?? 0))[0];
+      const plus = loyal.filter((a) => (a.effect.loyalty ?? 0) >= 0 && !a.effect.loyaltyX).sort((x, y) => (y.effect.loyalty ?? 0) - (x.effect.loyalty ?? 0))[0];
       const perm = minus ? g.findPerm(minus.permId) : null;
       // Keep at least one loyalty unless the ability is removal that matters.
       const winsNow = !!minus && minus.effect.kind === 'draw' && minus.effect.n >= p.library.length && winsOnEmptyDraw(p);
-      if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe' || winsNow)) return minus;
+      // Ultimates (emblems, extra turns, the big minus abilities) are worth the planeswalker.
+      const ultimate = !!minus && ((minus.effect.loyalty ?? 0) <= -6 || ['emblem', 'extraTurn', 'sacrificeHalf', 'digPermanent'].includes(minus.effect.kind));
+      if (minus && perm && ((perm.loyalty ?? 0) + (minus.effect.loyalty ?? 0) >= 1 || minus.effect.kind === 'removal' || minus.effect.kind === 'wipe' || winsNow || ultimate)) return minus;
+      // "-X": worth it once X reaches something worth having.
+      const xAbility = loyal.find((a) => a.effect.loyaltyX && this.loyaltyX(g, p, a) > 0);
+      if (xAbility && (g.findPerm(xAbility.permId)?.loyalty ?? 0) >= 4) return xAbility;
       if (plus) return plus;
     }
     // Abilities that spend energy or charge counters come before the ones that make them.
@@ -923,8 +938,10 @@ export class Bot implements Agent {
         case 'cheat': return p.hand.some((c) => c.isCreature);
         case 'goad': return e.all || g.opponents(p).length >= 2;
         case 'blink': return p.battlefield.some((q) => q !== perm && !q.token && (e.what === 'permanent' || q.card.isCreature) && etbWorth(q) >= 2.5);
-        // Transform when the other face is the better card.
-        case 'transform': return !!perm.card.back && perm.card.back.value >= perm.card.value * 0.8;
+        // Transform when the other face is the better card. An Incubator hatches into a creature as big as its counters.
+        case 'transform': return isIncubator(perm.card) ? perm.counters >= 1 : !!perm.card.back && perm.card.back.value >= perm.card.value * 0.8;
+        case 'hatch': return p.battlefield.some((q) => isIncubator(q.card) && q.counters >= 1);
+        case 'artifactToken': return true;
         default: return false;
       }
     });
@@ -1351,10 +1368,55 @@ export class Bot implements Agent {
     return worth;
   }
 
+  /**
+   * The X to use for a "-X" loyalty ability (rule 606.4), or 0 when no X is worth it. It keeps the planeswalker
+   * alive unless X = all of its loyalty wins outright.
+   */
+  private loyaltyX(g: Game, p: PlayerState, a: Extract<Action, { type: 'activate' }>): number {
+    const loyalty = g.findPerm(a.permId)?.loyalty ?? 0;
+    const e = a.effect;
+    const keep = Math.max(0, loyalty - 1);
+    const times = e.xTimes ?? 1;
+    switch (e.kind) {
+      case 'wipe': {
+        // Ugin: the X that takes the most from the opponents and the least from us.
+        let best = 0;
+        for (let x = 1; x <= keep; x++) if (this.wipeIsGood(g, p, e, x)) best = x;
+        return best;
+      }
+      case 'mill': {
+        // Jace: mill a library out if the loyalty is there, else as much as stays safe.
+        const thinnest = Math.min(...g.opponents(p).map((o) => o.library.length));
+        if (loyalty * times >= thinnest) return Math.min(loyalty, Math.ceil(thinnest / times));
+        return keep;
+      }
+      case 'tutor': {
+        const reach = p.library.filter((c) => c.isArtifact && !c.isLand && c.cmc <= keep && c.value >= 2).map((c) => c.cmc);
+        return reach.length ? Math.max(...reach) : 0;
+      }
+      default:
+        return keep;
+    }
+  }
+
+  /** Unlock a Room's other door: its "when you unlock this door" must be good for us (Restricted Office's wipe). */
+  private unlockWorth(g: Game, p: PlayerState, permId: number): boolean {
+    const door = g.findPerm(permId)?.card.room?.door;
+    if (!door) return false;
+    for (const e of door.effects) {
+      if (e.when !== 'unlock') continue;
+      if (e.kind === 'wipe' && !this.wipeIsGood(g, p, e, 0)) return false;
+    }
+    return true;
+  }
+
   private wipeIsGood(g: Game, p: PlayerState, e: Wipe, x: number): boolean {
     const creaturesOnly = e.target === 'creatures';
     const affects = (perm: Perm) => {
-      if (perm.card.isLand) return false;
+      if (perm.card.isLand || perm.emblem) return false;
+      // Ugin, the Spirit Dragon: colored permanents with mana value X or less.
+      if (e.maxCmc !== undefined && perm.card.cmc > (e.maxCmc === -1 ? x : e.maxCmc)) return false;
+      if (e.colored && !cardColored(perm.card)) return false;
       if (creaturesOnly && !perm.card.isCreature) return false;
       // Wrath of the Skies: up to the energy we will have.
       if (e.byEnergy && perm.card.cmc > Math.max(0, x) + p.energy) return false;

@@ -195,7 +195,7 @@ function Table({ session, speed, onSpeed, redraw, onRestart, onQuit }: TableProp
   const permState = (perm: Perm): { cls: string; onClick?: () => void } => {
     if (!d) return { cls: '' };
     if (d.kind === 'priority') {
-      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'station' || a.type === 'turnFaceUp' || a.type === 'level') && a.permId === perm.id);
+      const mine = indexesFor((a) => (a.type === 'activate' || a.type === 'crew' || a.type === 'station' || a.type === 'turnFaceUp' || a.type === 'level' || a.type === 'unlock') && a.permId === perm.id);
       return mine.length ? { cls: 'can', onClick: () => choose(mine) } : { cls: '' };
     }
     if (d.kind === 'target' && isTarget({ kind: 'perm', id: perm.id })) return { cls: 'target', onClick: () => answer({ kind: 'perm', id: perm.id }) };
@@ -572,6 +572,10 @@ function effectLabel(e: Effect): string {
     case 'copySpell': return 'copy';
     case 'hours': return 'add an hour counter';
     case 'extraCombat': return 'take an additional combat';
+    case 'extraTurn': return 'take an extra turn';
+    case 'artifactToken': return `make ${e.token === 'incubator' ? 'an Incubator' : `a ${e.token === 'food' ? 'Food' : 'Blood'}`}`;
+    case 'hatch': return 'transform an Incubator';
+    case 'emblem': return 'get an emblem';
     default: return e.kind;
   }
 }
@@ -585,6 +589,7 @@ function actionLabel(g: Game, a: Action): string {
       if (a.mutate) return `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}`;
       if (a.from === 'overload') return `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}`;
       if (a.from === 'alt') return altLabel(a.card);
+      if (a.door && a.card.room) return `Cast ${a.card.room.door.name} ${costText(a.card.room.door)}`;
       if (a.kick) {
         const k = a.card.kicker!;
         const how = k.offspring ? 'with offspring' : k.multi ? `kicked ${a.kick}×` : 'kicked';
@@ -603,6 +608,10 @@ function actionLabel(g: Game, a: Action): string {
       const perm = g.findPerm(a.permId);
       const next = perm ? g.nextLevel(perm) : undefined;
       return `${perm?.card.name ?? 'Class'}: level ${next?.level ?? ''} ${next ? costText({ cost: next.cost } as SimCard) : ''}`;
+    }
+    case 'unlock': {
+      const door = g.findPerm(a.permId)?.card.room?.door;
+      return `Unlock ${door?.name ?? 'door'} ${door ? costText(door) : ''}`;
     }
     case 'crew': return `Crew ${g.findPerm(a.permId)?.card.name ?? 'Vehicle'}`;
     case 'station': return `Station ${g.findPerm(a.permId)?.card.name ?? 'Spacecraft'}`;

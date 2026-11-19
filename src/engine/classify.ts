@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
+import { EMBLEM_COST, EMBLEM_STATIC_KINDS, emblemCost, emblemTrigger, recogniseEmblems, rewriteEmblems } from './classifyEmblems';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
@@ -44,7 +45,7 @@ export interface RawCard {
   layout?: string;
   /** Printed loyalty of a planeswalker. */
   loyalty?: string | number | null;
-  back?: { name: string; types: string[]; subTypes: string[]; text: string; superTypes?: string[]; power?: string | null; toughness?: string | null; loyalty?: string | number | null } | null;
+  back?: { name: string; types: string[]; subTypes: string[]; text: string; superTypes?: string[]; power?: string | null; toughness?: string | null; loyalty?: string | number | null; /** Rooms: the other door's mana cost. */ manaCost?: string } | null;
   imageUrl?: string;
 }
 
@@ -358,15 +359,12 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'treasure', n }, note: `Treasure ×${n} (one-shot mana)` });
   }
 
-  if ((m = line.match(/\bincubate (\d+|x)/))) {
-    const n = m[1] === 'x' ? 3 : parseInt(m[1], 10);
-    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [] }, note: `Incubate ${n} (≈ a ${n}/${n} Phyrexian token)` });
-  }
+  // --- Ultimates, emblems, Food/Blood/Incubator, extra turns, Rooms (see classifyEmblems.ts) ---
+  recogniseEmblems(line, out, fullLine, readEmblem);
   if ((m = line.match(/\bamass (?:\w+ )?(\d+)/))) {
     const n = parseInt(m[1], 10);
     out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [], army: true }, note: `Amass ${n} (+${n}/+${n} counters on your Army)` });
   }
-  if (/create (a|an|one|two) food tokens?/.test(line) && !/treasure/.test(line)) out.push({ body: { kind: 'gainLife', n: 3 }, note: 'Food (≈ gain 3 life)' });
 
   // --- Anthems / overruns / pumps -------------------------------------------
   m = /^if x is/.test(line) ? null : line.match(/(other )?(creatures|creature tokens|\w+ creatures|\w+s) you control (?:of the chosen type )?(?:gain [a-z, ]+ and )?get \+(\d+|x)\/\+(\d+|x)/);
@@ -687,10 +685,6 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   if (/create a tapped and attacking token that's a copy of (up to one )?(other )?target (nontoken )?creature you control/.test(line)) {
     out.push({ body: { kind: 'copyCreature', temporary: /sacrifice that token/.test(fullLine) }, note: 'Attacking token copy of another creature you control' });
   }
-  if ((m = line.match(/create (that many|a|an|one|two|three) blood tokens?/))) {
-    const n = m[1] === 'that many' ? 2 : num(m[1], 1);
-    out.push({ body: { kind: 'scry', n, surveil: false }, note: `Blood ×${m[1] === 'that many' ? 'X' : n} (≈ loot, scry ${n})` });
-  }
   // Omnath, Locus of All: the top card goes to your hand either way, sometimes with three mana.
   if (/^if you don't reveal it, put it into your hand/.test(line)) out.push({ body: { kind: 'draw', n: 1 }, note: 'Draw 1' });
   if (/^if you do, add three mana in any combination of its colors/.test(line)) out.push({ body: { kind: 'treasure', n: 3 }, note: '3 one-shot mana', chance: 0.35 });
@@ -768,6 +762,11 @@ interface LineContext {
   selfToo?: boolean;
   nth?: number;
   turn?: 'own' | 'others';
+  /** "-X:" loyalty abilities and "three times X" (see classifyEmblems.ts). */
+  loyaltyX?: boolean;
+  xTimes?: number;
+  /** "Sacrifice a Food", "sacrifice five artifacts" as an activation cost. */
+  sacOther?: { what: 'food' | 'artifact'; n: number };
   /** Activation costs paid in energy or charge counters (see classifyMechanics.ts). */
   energy?: number;
   charge?: number;
@@ -797,6 +796,9 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   let m: RegExpMatchArray | null;
   // Rarer wordings (classifyRare.ts).
   l = rewriteRare(l);
+  // Rooms, Food, extra phases and "-X" loyalty abilities (classifyEmblems.ts).
+  const emblem = emblemTrigger(l);
+  if (emblem) return emblem;
   const rare = rareTrigger(l);
   if (rare) return rare;
 
@@ -912,7 +914,7 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if (/^-x: /.test(l)) return { when: 'static', body: '' };
 
   // Activated abilities: "COST: EFFECT" where cost is mana/tap symbols.
-  const COST_PART = '(?:(?:\\{[^}]+\\})+|' + MECHANIC_COST + '|sacrifice ~|sacrifice (?:a|an|another) (?!artifact|land|permanent|enchantment|treasure|food|clue)\\w+|pay \\d+ life|tap (?:two|three|four|five) untapped [a-z]+ you control)';
+  const COST_PART = '(?:(?:\\{[^}]+\\})+|' + MECHANIC_COST + '|' + EMBLEM_COST + '|sacrifice ~|sacrifice (?:a|an|another) (?!artifact|land|permanent|enchantment|treasure|food|clue)\\w+|pay \\d+ life|tap (?:two|three|four|five) untapped [a-z]+ you control)';
   if ((m = l.match(new RegExp(`^(${COST_PART}(?:, ${COST_PART})*):\\s*(.*)$`)))) {
     const costText = m[1];
     const tap = /\{t\}/.test(costText);
@@ -924,7 +926,7 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
     const life = costText.match(/pay (\d+) life/);
     if (life) cost.life += parseInt(life[1], 10);
     const tapCreatures = costText.match(/tap (two|three|four|five) untapped/);
-    return { when: 'activated', body: m[2], activationCost: cost, tap, sacrifice: /sacrifice ~/.test(costText) || !!extra.exileSelf, ...(extra.energy ? { energy: extra.energy } : {}), ...(extra.charge ? { charge: extra.charge } : {}), ...(extra.discard ? { discard: extra.discard } : {}), ...(extra.shrinkSelf ? { shrinkSelf: extra.shrinkSelf } : {}), ...(extra.removeCounters ? { removeCounters: extra.removeCounters } : {}), sacCreature: /sacrifice (a|an|another) (?!~)\w+/.test(costText), ...(tapCreatures ? { tapCreatures: num(tapCreatures[1], 4) } : {}) };
+    return { when: 'activated', body: m[2], activationCost: cost, tap, sacrifice: /sacrifice ~/.test(costText) || !!extra.exileSelf, ...(extra.energy ? { energy: extra.energy } : {}), ...(extra.charge ? { charge: extra.charge } : {}), ...(extra.discard ? { discard: extra.discard } : {}), ...(extra.shrinkSelf ? { shrinkSelf: extra.shrinkSelf } : {}), ...(extra.removeCounters ? { removeCounters: extra.removeCounters } : {}), sacCreature: /sacrifice (a|an|another) (?!~|foods?\b)\w+/.test(costText), ...(emblemCost(costText) ? { sacOther: emblemCost(costText) } : {}), ...(tapCreatures ? { tapCreatures: num(tapCreatures[1], 4) } : {}) };
   }
 
   // Other triggered/conditional lines we don't model.
@@ -1032,6 +1034,16 @@ function readKicker(raw: RawCard, card: SimCard, line: RegExpMatchArray, text: s
   for (const u of kicked.unread ?? []) if (!(card.unread ?? []).includes(u)) (card.unread ??= []).push(u);
 }
 
+/** The abilities of an emblem (rule 114), read like a permanent's: "you get an emblem with "..."". */
+function readEmblem(text: string): { body: EffectBody; note: string } | null {
+  const card = classifyCard({ name: 'An emblem', manaCost: '', cmc: 0, types: [], superTypes: [], subTypes: [], text, power: null, toughness: null, keywords: [], colorIdentity: [] });
+  if (!card.effects.length) return null;
+  card.typeLine = 'Emblem';
+  card.value = 0;
+  const what = card.notes.filter((n) => !/^Not read/.test(n)).join('; ');
+  return { body: { kind: 'emblem', card }, note: `Emblem: ${what}` };
+}
+
 export function classifyCard(raw: RawCard): SimCard {
   // Cards with their own rule may be read from rewritten text (see cardRules.ts).
   const rule = CARD_RULES[raw.name.split(' // ')[0]];
@@ -1046,7 +1058,7 @@ export function classifyCard(raw: RawCard): SimCard {
   const kickLine = fullText.match(KICKER_LINE);
   // Quest, oil, loot and other counters a permanent keeps on itself are read as charge counters.
   const named = rewriteCounters(kickLine ? kickerText(fullText, false) : fullText);
-  const text = named.text;
+  const text = rewriteEmblems(named.text, raw.name, raw.superTypes.some((t) => t.toLowerCase() === 'legendary'));
   const keywords = parseKeywords(raw, text);
 
   const card: SimCard = {
@@ -1230,7 +1242,8 @@ export function classifyCard(raw: RawCard): SimCard {
       // Mana abilities on nonland permanents (rocks and dorks).
       const manaMatch = ctx.when === 'activated' ? sentence.match(/^(?:for each [^,]*, )?add (.*)$/) : null;
       // Rituals: mana from an instant or sorcery is kept as that many Treasures.
-      const ritual = (!isPermanent || /^when ~ enters/.test(line)) && ctx.when === 'resolve' ? sentence.match(/^add (.*)$/) : null;
+      // A Saga chapter that adds mana (The Legend of Roku) is the same: mana for this main phase only.
+      const ritual = ((!isPermanent || /^when ~ enters/.test(line)) && ctx.when === 'resolve') || ctx.when === 'chapter' ? sentence.match(/^add (.*)$/) : null;
       if (ritual) {
         const p = parseProduced(ritual[1]);
         const n = /for each/.test(sentence) ? 3 : p?.amount ?? 0;
@@ -1258,8 +1271,8 @@ export function classifyCard(raw: RawCard): SimCard {
       }
       if (manaMatch) {
         const p = /^for each color/.test(sentence) ? { amount: 2, colors: 'any' as const } : parseProduced(manaMatch[1]);
-        if (p && ctx.sacCreature) {
-          pushEffect(card, { body: { kind: 'treasure', n: p.amount, ritual: true }, note: `Sacrifice a creature for ${p.amount} mana` }, ctx);
+        if (p && (ctx.sacCreature || ctx.sacOther)) {
+          pushEffect(card, { body: { kind: 'treasure', n: p.amount, ritual: true }, note: `Sacrifice a ${ctx.sacOther ? 'Food' : 'creature'} for ${p.amount} mana` }, ctx);
           continue;
         }
         const paid = ctx.activationCost ? ctx.activationCost.generic + ctx.activationCost.pips.length : 0;
@@ -1516,7 +1529,20 @@ export function classifyCard(raw: RawCard): SimCard {
   if (kickLine) readKicker(raw, card, kickLine, fullText);
   if (rule) applyCardRule(card, rule);
 
-  card.modeled = !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station;
+  // Rooms (rule 709.5): the other door is read on its own, and unlocked later for its mana cost.
+  if (raw.back && raw.subTypes.some((t) => t.toLowerCase() === 'room')) {
+    const b = raw.back;
+    const front = parseManaCost(raw.manaCost);
+    // Data without the back door's cost: what the card's total mana value leaves over.
+    const rest = Math.max(0, raw.cmc - front.generic - front.pips.length);
+    const manaCost = b.manaCost || `{${rest}}`;
+    const cost = parseManaCost(manaCost);
+    const door = classifyCard({ name: b.name, manaCost, cmc: cost.generic + cost.pips.length, types: b.types, superTypes: b.superTypes ?? [], subTypes: b.subTypes, text: b.text, power: null, toughness: null, keywords: [], colorIdentity: raw.colorIdentity, imageUrl: raw.imageUrl });
+    card.room = { door };
+    card.notes.push(`Room: ${b.name} is the other door (cast it, or unlock it for ${manaCost.toUpperCase()})${door.effects.length ? `: ${door.notes.filter((n) => !/^Not /.test(n)).join('; ')}` : ''}`);
+    for (const u of door.unread ?? []) (card.unread ??= []).push(u);
+  }
+  card.modeled = !!card.room?.door.modeled || !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   // Notes call quest, oil and other self counters by their own name (they are read as charge counters).
@@ -1627,6 +1653,8 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.spellOnly) effect.spellOnly = true;
   if (ctx.perTurn) effect.perTurn = ctx.perTurn;
   if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
+  if (ctx.loyaltyX) effect.loyaltyX = true;
+  if (ctx.xTimes) effect.xTimes = ctx.xTimes;
   if (ctx.chapters) effect.chapters = ctx.chapters;
   // "You win the game" only with a counter condition the engine checks (Simic Ascendancy); the rest are in wincons.ts.
   if ((effect.kind === 'winGame' || effect.kind === 'loseGame') && !ctx.minCharge && !f.chargeAtResolve) return;
@@ -1646,13 +1674,13 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.when === 'activated') {
     if (!ctx.activationCost) return;
     effect.activation = {
-      cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}), ...(ctx.tapCreatures ? { tapCreatures: ctx.tapCreatures } : {}), ...(ctx.boast ? { boast: true } : {}),
+      cost: ctx.activationCost, tap: !!ctx.tap, sacrifice: !!ctx.sacrifice, ...(ctx.sacCreature ? { sacCreature: true } : {}), ...(ctx.sacOther ? { sacOther: ctx.sacOther } : {}), ...(ctx.tapCreatures ? { tapCreatures: ctx.tapCreatures } : {}), ...(ctx.boast ? { boast: true } : {}),
       ...(ctx.energy ? { energy: ctx.energy } : {}), ...(ctx.charge ? { charge: ctx.charge } : {}), ...(ctx.sorcery ? { sorcery: true } : {}),
       ...(ctx.discard ? { discard: ctx.discard } : {}), ...(ctx.shrinkSelf ? { shrinkSelf: ctx.shrinkSelf } : {}), ...(ctx.removeCounters ? { removeCounters: ctx.removeCounters } : {}),
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', ...EMBLEM_STATIC_KINDS];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1696,7 +1724,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'countered': return 'When you counter a spell: ';
     case 'dieRoll': return 'When you roll a die: ';
     case 'opponentMonarch': return 'When an opponent becomes the monarch: ';
-    case 'loyalty': return `${(ctx.loyalty ?? 0) > 0 ? '+' : ''}${ctx.loyalty}: `;
+    case 'loyalty': return ctx.loyaltyX ? '-X: ' : `${(ctx.loyalty ?? 0) > 0 ? '+' : ''}${ctx.loyalty}: `;
     case 'chapter': return `Chapter ${(ctx.chapters ?? []).map((c) => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII'][c]).join(', ')}: `;
     case 'mutates': return ctx.scope === 'any' ? 'When a creature you control mutates: ' : 'When it mutates: ';
     case 'turnedFaceUp': return 'When it is turned face up: ';
@@ -1704,6 +1732,10 @@ function describeTrigger(ctx: LineContext): string {
     case 'eachUpkeep': return 'Each upkeep: ';
     case 'hourTwelve': return 'At the twelfth hour counter: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
+    case 'unlock': return 'When this door unlocks: ';
+    case 'fullyUnlock': return 'When you fully unlock a Room: ';
+    case 'sacrificeFood': return 'When you sacrifice a Food: ';
+    case 'postcombatMain': return 'Each postcombat main phase: ';
     default: return '';
   }
 }
