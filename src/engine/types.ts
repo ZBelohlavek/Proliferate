@@ -5,6 +5,8 @@
 // oracle text. Anything we couldn't recognise is simply ignored by the game
 // engine, and `modeled` records whether we understood the card at all.
 
+import type { ExileEffect } from './typesExile';
+
 export type Color = 'W' | 'U' | 'B' | 'R' | 'G';
 export const COLORS: Color[] = ['W', 'U', 'B', 'R', 'G'];
 /** A single unit of mana: a color, or 'C' for colorless. */
@@ -55,6 +57,7 @@ export type Trigger =
   | 'targeted' // a permanent becomes the target of a spell or ability (see scope, targetedBy, spellOnly)
   | 'eachUpkeep' // the beginning of every player's upkeep, not only yours (Midnight Clock)
   | 'hourTwelve' // the twelfth hour counter is put on this permanent (Midnight Clock)
+  | 'opponentSearch' // an opponent searches their library (Wan Shi Tong)
   | 'countersPut' // one or more +1/+1 counters are put on this permanent (scope 'self') or a creature you control ('any'); x = how many
   | 'static'; // always on while the permanent is on the battlefield
 
@@ -127,6 +130,7 @@ export type Effect = EffectBody & {
 };
 
 export type EffectBody =
+  | ExileEffect
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
   /**
    * energy: each use also costs this many energy counters (Solar Transformer).
