@@ -408,7 +408,6 @@ export class Game {
     p.turnsTaken = (p.turnsTaken ?? 0) + 1;
     this.triggerBudget = 300;
     this.lifeLostThisTurn.fill(0);
-    p.turnsTaken = (p.turnsTaken ?? 0) + 1;
     // "Until your next turn" flash (Teferi, Time Raveler) ends as this turn begins; "this turn" ones are long gone.
     if (p.flashGrants) p.flashGrants = p.flashGrants.filter((f) => f.until === 'turn' && f.turn === this.turnNumber);
 
