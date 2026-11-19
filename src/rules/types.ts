@@ -320,6 +320,8 @@ export interface StackItem {
   label: string;
   /** Cast with flashback (or escape, disturb): exiled when it leaves the stack. */
   flashback?: boolean;
+  /** Cast with escape (rule 702.138c: it "escaped"). */
+  escaped?: boolean;
   /** Cast from the graveyard with Noctis: the permanent enters with a finality counter (exiled instead of going to a graveyard). */
   finality?: boolean;
   /** A copy of a spell (rule 707.10): it ceases to exist instead of going anywhere when it leaves the stack. */
