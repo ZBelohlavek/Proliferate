@@ -8,7 +8,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import type { Effect, SimCard, SimDeck } from '../engine/types';
 import { describeProtection } from '../engine/classifyCombat';
 import { threat } from '../rules/bot';
-import type { Game } from '../rules/game';
+import { spreeLabel, type Game } from '../rules/game';
 import { Session } from '../rules/session';
 import { STEP_NAMES, type Action, type Decision, type Perm, type PlayerState, type Target } from '../rules/types';
 import { CardFace, usePreview } from './BoardView';
@@ -544,7 +544,8 @@ function altLabel(card: SimCard): string {
     a.returnIslands && `return ${a.returnIslands === 1 ? 'an Island' : `${a.returnIslands} Islands`}`,
     (a.mana.generic || a.mana.pips.length) && costText({ cost: a.mana } as SimCard),
   ].filter(Boolean).join(', ');
-  return `${a.evoke ? 'Evoke' : a.dash ? 'Dash' : 'Cast'} ${card.name} (${how || 'free'})`;
+  const verb = a.evoke ? 'Evoke' : a.dash ? 'Dash' : a.blitz ? 'Blitz' : a.warp ? 'Warp' : a.impending ? `Impending (${a.impending} time counters)` : a.prowl ? 'Prowl' : a.emerge ? `Emerge (sacrifice ${a.emerge === 'artifact' ? 'an artifact' : 'a creature'}, minus its mana value)` : 'Cast';
+  return `${verb} ${card.name} (${how || 'free'})`;
 }
 
 function costText(card: SimCard): string {
@@ -586,9 +587,14 @@ function actionLabel(g: Game, a: Action): string {
       if (a.mutate) return `Mutate ${a.card.name} ${costText({ cost: a.card.mutate!.cost } as SimCard)}${a.from === 'graveyard' ? ' from your graveyard' : ''}`;
       if (a.from === 'overload') return `Overload ${a.card.name} ${costText({ cost: a.card.overload!.cost } as SimCard)}`;
       if (a.from === 'alt') return altLabel(a.card);
+      if (a.modes) return `Cast ${a.card.name} (${spreeLabel(a.card, a.modes)}) ${costText(g.spreeCard(a.card, a.modes))}`;
+      if (a.from === 'foretell') return `Cast foretold ${a.card.name} ${costText(g.castCard(a.card, 'foretell'))}`;
+      if (a.from === 'plot') return `Cast plotted ${a.card.name} (free)`;
+      if (a.from === 'warp') return `Cast warped ${a.card.name} ${costText(a.card)}`;
+      if (a.from === 'madness' || a.from === 'miracle') return `Cast ${a.card.name} for its ${a.from} cost ${costText(g.castCard(a.card, a.from))}`;
       if (a.kick) {
         const k = a.card.kicker!;
-        const how = k.offspring ? 'with offspring' : k.multi ? `kicked ${a.kick}×` : 'kicked';
+        const how = k.offspring ? 'with offspring' : k.as === 'replicate' ? `replicated ${a.kick}×` : k.as ? { entwine: 'entwined', buyback: 'with buyback', bargain: 'bargained', gift: 'promising the gift', cleave: 'with cleave', casualty: 'with casualty', replicate: '' }[k.as] : k.multi ? `kicked ${a.kick}×` : 'kicked';
         return `Cast ${a.card.name} ${how} ${costText(g.kickedCard(a.card, a.kick))}`;
       }
       if (a.from !== 'graveyard') return `Cast ${a.card.name} ${costText(a.card)}`;
@@ -613,6 +619,17 @@ function actionLabel(g: Game, a: Action): string {
       return `Turn face up: ${perm?.faceDown?.name ?? 'creature'} ${costText({ cost: (perm && g.faceUpCost(perm)) ?? { generic: 0, pips: [], x: 0, life: 0 } } as SimCard)}`;
     }
     case 'cycle': return `Cycle ${a.card.name} ${costText({ cost: a.card.cycling!.cost } as SimCard)}`;
+    case 'hand': {
+      const c = a.card.casting!;
+      switch (a.how) {
+        case 'foretell': return `Foretell ${a.card.name} {2}`;
+        case 'plot': return `Plot ${a.card.name} ${costText({ cost: c.plot! } as SimCard)}`;
+        case 'suspend': return `Suspend ${a.card.name} ${costText({ cost: c.suspend!.cost } as SimCard)} (${c.suspend!.n} turns)`;
+        case 'transmute': return `Transmute ${a.card.name} ${costText({ cost: c.transmute! } as SimCard)}`;
+        case 'channel': return `Channel ${a.card.name} ${costText({ cost: c.channel!.cost } as SimCard)}`;
+      }
+      return a.card.name;
+    }
     case 'activate': {
       const name = g.findPerm(a.permId)?.card.name ?? 'ability';
       return a.effect.kind === 'equip' ? `Equip ${name} ${costText({ cost: a.effect.cost ?? { generic: 2, pips: [], x: 0, life: 0 } } as SimCard)}` : `${name}: ${effectLabel(a.effect)}`;

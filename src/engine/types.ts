@@ -544,7 +544,64 @@ export type EffectBody =
    * Copy a spell or ability on the stack. 'spell': target instant or sorcery spell; 'trigger': the spell
    * that set off this ability ("whenever you cast ..., copy that spell"); 'ability': target ability you control.
    */
-  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability' | 'permanentSpell' | 'creatureSpell'; /** Only spells you control. */ yours?: boolean; /** The copy isn't legendary (Double Major). */ nonlegendary?: boolean; /** "The copy targets ~" (Ivy): the copy's target is the source, and only spells that help it are copied. */ toSource?: boolean; /** "They may pay {2}. If they don't, ..." (Wandering Archaic): the caster pays when they can spare it. */ unlessPay?: number };
+  | { kind: 'copySpell'; what: 'spell' | 'trigger' | 'ability' | 'permanentSpell' | 'creatureSpell'; /** Only spells you control. */ yours?: boolean; /** The copy isn't legendary (Double Major). */ nonlegendary?: boolean; /** "The copy targets ~" (Ivy): the copy's target is the source, and only spells that help it are copied. */ toSource?: boolean; /** "They may pay {2}. If they don't, ..." (Wandering Archaic): the caster pays when they can spare it. */ unlessPay?: number }
+  /**
+   * You may cast spells of this kind as though they had flash (rule 702.8): static on a permanent, or for a while
+   * when it resolves ('turn': this turn, Borne Upon a Wind; 'yourNextTurn': until your next turn, Teferi, Time Raveler).
+   */
+  | { kind: 'flashGrant'; what: FlashFilter; until?: 'turn' | 'yourNextTurn' }
+  /** Hideaway (rule 702.75): play the card exiled with the source without paying its mana cost, if your graveyard holds `graveyard` cards. */
+  | { kind: 'playHidden'; graveyard?: number; /** Hideaway lands: creatures you control have total power 10+ (Mosswort Bridge), you attacked with three or more creatures this turn (Windbrisk Heights), an opponent was dealt 7+ damage this turn (Spinerock Knoll). */ cond?: 'power10' | 'attacked3' | 'damage7' }
+  /** Exile a nonland card with mana value up to `maxCmc` from your hand; it becomes plotted (rule 702.170, Jace Reawakened). */
+  | { kind: 'plotFromHand'; maxCmc: number };
+
+/** Which spells a flash grant covers. 'creatureFirst': the first creature spell you cast each turn (The Blue Spirit). */
+export type FlashFilter = 'all' | 'sorcery' | 'artifact' | 'colorless' | 'artifactOrColorless' | 'noncreature' | 'auraEquipment' | 'creatureFirst';
+
+/**
+ * Ways to cast a card other than paying its mana cost from hand, and things done with it from hand
+ * (see src/engine/classifyCasting.ts). Optional additional costs (entwine, buyback, bargain, gift, cleave,
+ * replicate, casualty) live in SimCard.kicker instead, since they work like kicker.
+ */
+export interface Casting {
+  /** The card has no mana cost, so it can't be cast from hand the usual way (rule 202.1b): suspend only. */
+  noCost?: boolean;
+  /** Foretell (702.143): on your turn pay {2} to exile it face down; on a later turn cast it for `cost`. `effects`: what it does "if this spell was cast from exile". */
+  foretell?: { cost: ManaCost; effects?: Effect[] };
+  /**
+   * Suspend N—cost (702.62): exile it with N time counters; one comes off each upkeep, and with the last it is cast
+   * without paying its mana cost (a creature has haste). `again`: it exiles itself with that many time counters as
+   * it resolves (Inspiring Refrain). `onOpponentCast`: a counter also comes off when an opponent casts a spell (Deep-Sea Kraken).
+   */
+  suspend?: { n: number; cost: ManaCost; again?: number; onOpponentCast?: boolean };
+  /** Plot (702.170): pay this and exile it as a sorcery; cast it on a later turn as a sorcery without paying its mana cost. */
+  plot?: ManaCost;
+  /** Transmute (702.53): pay this and discard it, as a sorcery, to find a card with the same mana value. */
+  transmute?: ManaCost;
+  /** Channel: pay this and discard it from your hand for `effects`. */
+  channel?: { cost: ManaCost; effects: Effect[] };
+  /** Hideaway N (702.75): as it enters, look at the top N cards and exile one face down (see Effect playHidden). */
+  hideaway?: number;
+  /** Madness (702.35): when discarded it is exiled, and may be cast for this right away. */
+  madness?: ManaCost;
+  /** Miracle (702.94): when it is the first card drawn in a turn, it may be cast for this right away. */
+  miracle?: ManaCost;
+  /** Cipher (702.99): as it resolves, encode it on a creature you control; whenever that creature deals combat damage to a player, cast a copy. */
+  cipher?: boolean;
+  /** Spree (702.172) or tiered: modes with their own additional costs; choose one or more (`one`: exactly one). */
+  spree?: { modes: { cost: ManaCost; effects: Effect[]; label: string }[]; one?: boolean };
+  /** "If this card is in your opening hand, you may begin the game with it on the battlefield." (Leylines) */
+  leyline?: boolean;
+  /** "Cast ~ only ..." (rule 601.3): during combat on an opponent's turn, in the declare blockers step of an opponent's turn, or before blockers are declared. */
+  timing?: 'opponentCombat' | 'opponentBlockers' | 'beforeBlockers';
+  /** "You can't cast ~ during your first, second, or third turns of the game." */
+  fromTurn?: number;
+  /** Flashback paid by sacrificing this many creatures (Dread Return). */
+  flashbackSac?: number;
+  /** "You may cast ~ as though it had flash by tapping three untapped creatures you control with flying" (Tegwyll's Scouring). */
+  flashByTapping?: number;
+}
+
 
 /** What a token copy or "becomes a copy" effect may copy. */
 export interface CopyFilter {
@@ -654,7 +711,7 @@ export interface SimCard {
   /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */
   freeWithCommander?: boolean;
   /** Cycling: pay this and discard the card to draw one (`land` searches for a land instead). */
-  cycling?: { cost: ManaCost; land?: boolean };
+  cycling?: { cost: ManaCost; land?: boolean; /** "When you cycle ~" (Fractured Sanity). */ effects?: Effect[] };
   /** Cumulative upkeep (rule 702.24): each upkeep it gets an age counter, then you pay this cost once per counter or sacrifice it. */
   cumulativeUpkeep?: ManaCost;
   /** Toxic N (rule 702.164): combat damage to a player also gives that many poison counters. */
@@ -711,7 +768,21 @@ export interface SimCard {
     creatures?: number;
     evoke?: boolean;
     dash?: boolean;
+    /** Warp (702.185): exiled at the next end step, then castable from exile on a later turn. */
+    warp?: boolean;
+    /** Blitz (702.152): haste and "when this dies, draw a card"; sacrificed at the next end step. */
+    blitz?: boolean;
+    /** Impending N (702.176): enters with N time counters and isn't a creature until the last is removed. */
+    impending?: number;
+    /** Prowl (702.76): only if a Rogue of yours dealt combat damage to a player this turn. */
+    prowl?: boolean;
+    /** Emerge (702.119): sacrifice a creature (or an artifact), and the cost is reduced by its mana value. */
+    emerge?: 'creature' | 'artifact';
+    /** What the spell does when cast this way, when that differs (prowl: "if this spell's prowl cost was paid"). */
+    effects?: Effect[];
   };
+  /** Alternative casting keywords and things done from hand (foretell, suspend, plot, transmute, spree ...). */
+  casting?: Casting;
   /**
    * Station (rule 702.184): tap another creature you control to put charge counters equal to its power on this,
    * as a sorcery. Each tier's abilities and keywords apply from `n` charge counters on; a Spacecraft becomes an
@@ -747,7 +818,18 @@ export interface SimCard {
    * Kicker, multikicker or offspring (rules 702.33, 702.175): an optional additional cost. `effects` is what the card
    * does when it was paid (its `effects` are the unkicked version). Multikicker may be paid any number of times.
    */
-  kicker?: { cost: ManaCost; multi?: boolean; offspring?: boolean; effects: Effect[]; /** Enters with a charge counter for each time it was kicked (Everflowing Chalice). */ charge?: boolean };
+  kicker?: {
+    cost: ManaCost; multi?: boolean; offspring?: boolean; effects: Effect[]; /** Enters with a charge counter for each time it was kicked (Everflowing Chalice). */ charge?: boolean;
+    /**
+     * Other optional costs that work like kicker (see classifyCasting.ts): entwine (702.42, all modes), buyback (702.27, back
+     * to hand), bargain (702.166, sacrifice an artifact, enchantment or token), gift (702.174, an opponent gets `gift`),
+     * cleave (702.148, `cost` replaces the mana cost), replicate (702.56, a copy per payment), casualty (702.153, sacrifice a
+     * creature with power `casualty` or more for a copy).
+     */
+    as?: 'entwine' | 'buyback' | 'bargain' | 'gift' | 'cleave' | 'replicate' | 'casualty';
+    gift?: 'card' | 'fish' | 'extraTurn' | 'food' | 'treasure' | 'octopus';
+    casualty?: number;
+  };
   /** Mutate (rule 702.140): cast for this cost onto a non-Human creature you own, merging with it. */
   mutate?: { cost: ManaCost; /** Brokkos: may also be cast this way from the graveyard. */ fromGraveyard?: boolean };
   /** Morph, megamorph or disguise (rules 702.37, 702.168): may be cast face down as a 2/2 for {3}, then turned face up for this cost. */

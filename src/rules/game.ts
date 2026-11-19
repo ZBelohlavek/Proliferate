@@ -14,10 +14,10 @@
 
 import { Rng } from '../engine/rng';
 import type {
-  CastFilter, Color, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
+  CastFilter, Color, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, FlashFilter, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
-  About, Action, Answer, AttackDeclaration, BlockDeclaration, ChoiceOption, ChooseReason, Decision, MayPlay, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
+  About, Action, Answer, AttackDeclaration, BlockDeclaration, CastFrom, ChoiceOption, ChooseReason, Decision, HeldCard, MayPlay, Perm, PlayerState, PriorityAnswer, StackItem, Step, Target,
 } from './types';
 import type { CardKind, Who } from '../engine/typesExile';
 import { assembledCombo, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
@@ -88,6 +88,13 @@ const NONE: Perm[] = [];
 const NO_COST: ManaCost = { generic: 0, pips: [], x: 0, life: 0 };
 /** Equip cost assumed when a deck was imported before equip costs were recorded. */
 const DEFAULT_EQUIP: ManaCost = { generic: 2, pips: [], x: 0, life: 0 };
+/** Foretelling costs {2} (rule 702.143a). */
+const FORETELL_COST: ManaCost = { generic: 2, pips: [], x: 0, life: 0 };
+const COMBAT_STEPS: Step[] = ['beginCombat', 'declareAttackers', 'declareBlockers', 'combatDamage', 'endCombat'];
+const BEFORE_BLOCKERS: Step[] = ['upkeep', 'draw', 'main1', 'beginCombat', 'declareAttackers'];
+const BLITZ_DRAW: Effect = { kind: 'draw', n: 1, when: 'creatureDies', scope: 'self' };
+/** How the log says where a spell was cast from. */
+const CAST_FROM_TEXT: Partial<Record<string, string>> = { foretell: ' from exile (foretold)', plot: ' from exile (plotted)', warp: ' from exile (warped)', madness: ' for its madness cost', miracle: ' for its miracle cost', free: ' without paying its mana cost' };
 /** How much a Curse hurts the player it enchants, for choosing which one to move (Lynde). */
 const CURSE_HARM: Record<CurseAct, number> = {
   cruel: 6, unbinding: 6, double: 5, torment: 5, thirst: 4, drain: 4, shrink: 4, burn: 3, hex: 3, misfortunes: 3, fraying: 3, surveil: 2, spite: 2, restless: 2,
@@ -238,6 +245,8 @@ export class Game {
 
   *run(): Flow<GameResult> {
     for (const p of this.inTurnOrder()) yield* this.openingHand(p);
+    // Leylines: may begin the game on the battlefield (rule 103.6a).
+    for (const p of this.inTurnOrder()) this.beginWithLeylines(p);
 
     while (!this.over && this.round < this.maxRounds) {
       this.round++;
@@ -368,7 +377,9 @@ export class Game {
     p.turnsTaken = (p.turnsTaken ?? 0) + 1;
     this.triggerBudget = 300;
     this.lifeLostThisTurn.fill(0);
-    this.say(`— Round ${this.round}, ${p.name} (life ${p.life}) —`);
+    p.turnsTaken = (p.turnsTaken ?? 0) + 1;
+    // "Until your next turn" flash (Teferi, Time Raveler) ends as this turn begins; "this turn" ones are long gone.
+    if (p.flashGrants) p.flashGrants = p.flashGrants.filter((f) => f.until === 'turn' && f.turn === this.turnNumber);
 
     // Untap step (502). No player gets priority.
     this.step = 'untap';
@@ -426,6 +437,8 @@ export class Game {
     // Upkeep step (503).
     this.step = 'upkeep';
     this.cumulativeUpkeep(p);
+    // Suspend (rule 702.62): a time counter comes off each suspended card; with the last, it is cast.
+    if (p.held?.some((h) => h.way === 'suspend')) this.suspendUpkeep(p);
     if (this.kindsInGame.has('upkeepCost')) this.upkeepCosts(p);
     this.fire(p, 'upkeep');
     this.graveyardMark = this.players.map((q) => q.graveyard.length);
@@ -487,6 +500,8 @@ export class Game {
       this.removePerm(perm, 'hand');
     }
     this.questCounters();
+    // Blitz, warp and impending (rules 702.152, 702.185, 702.176).
+    this.castingEndStep(p);
     this.endStepCleanup();
     if (this.anyCurse) {
       this.curseEvent(p, 'theirEnd');
@@ -510,7 +525,7 @@ export class Game {
       const cards = picks.map((i) => p.hand[i]);
       for (const c of cards) {
         p.hand.splice(p.hand.indexOf(c), 1);
-        p.graveyard.push(c);
+        this.discarded(p, c, true);
       }
       this.say(`${p.name} discards ${cards.map((c) => c.name).join(', ')}.`);
     }
@@ -568,6 +583,11 @@ export class Game {
       p.drawnNames.add(c.name);
       p.drawsThisTurn++;
       if (this.turnNumber === 0) continue;
+      // Miracle (rule 702.94): the first card drawn this turn may be cast for its miracle cost right away.
+      if (c.casting?.miracle && p.drawsThisTurn === 1) {
+        (p.windows ??= []).push({ card: c, how: 'miracle' });
+        this.say(`${p.name} reveals ${c.name} (miracle).`);
+      }
       if (this.kindsInGame.has('when:draw')) this.fire(p, 'draw');
       if (this.anyCurse) this.curseEvent(p, 'draws');
       if (quiet) continue;
@@ -675,6 +695,12 @@ export class Game {
         continue;
       }
 
+      // Suspended cards whose last time counter came off, hideaway, cipher copies: cast now, as their abilities resolve.
+      if (this.pendingCasts.length) {
+        yield* this.castPending();
+        continue;
+      }
+
       const actions = this.legalActions(p);
       if (actions.length > 1) {
         const answer = yield* ask<PriorityAnswer | null>({ kind: 'priority', seat, actions });
@@ -685,6 +711,8 @@ export class Game {
           continue;
         }
       }
+      // Madness and miracle: passing means the card wasn't cast that way.
+      if (p.windows?.length) this.closeWindows(p);
 
       passes++;
       if (passes >= this.alivePlayers().length) {
@@ -724,19 +752,22 @@ export class Game {
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
     const mutateHosts = this.mutateTargets(p).length > 0;
-    const consider = (card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'exile' | 'library', mutate = false, kick = 0): boolean => {
+    const consider = (card: SimCard, from: CastFrom, mutate = false, kick = 0, modes = 0): boolean => {
       if (card.isLand || !mayCast || (from === 'command' && locked)) return false;
-      if (!sorcery && !isInstantSpeed(card)) return false;
+      if (!this.castTimingOk(p, card, from, sorcery)) return false;
       if (mutate && !mutateHosts) return false;
+      // Spree and tiered spells are cast with their modes chosen (rule 702.172).
+      if (card.casting?.spree && !modes) return false;
+      if (kick && !this.optionalCostPayable(p, card)) return false;
       const fromCommand = from === 'command';
-      const priced = kick ? this.kickedCard(card, kick) : this.castCard(card, mutate ? 'mutate' : from, p.seat);
+      const priced = modes ? this.spreeCard(card, modes) : kick ? this.kickedCard(card, kick) : from === 'alt' && card.altCost?.emerge ? this.emergeCard(card, this.emergeDiscount(p, card)) : this.castCard(card, mutate ? 'mutate' : from, p.seat);
       if (mana < this.effectiveCost(p, priced, fromCommand)) return false;
       if (!this.canAfford(p, priced, fromCommand, 0)) return false;
-      if (from !== 'overload' && !this.hasTargets(p, kick ? priced : card)) return false;
+      if (from !== 'overload' && !this.hasTargets(p, kick || modes || from === 'alt' || from === 'foretell' ? priced : card)) return false;
       const maxX = this.maxX(p, priced, fromCommand);
       // Kicker {X}: "X can't be 0" (Thieving Skydiver).
       if (kick && card.kicker!.cost.x > 0 && maxX < 1) return false;
-      actions.push({ type: 'cast', card, from, maxX, ...(mutate ? { mutate } : {}), ...(kick ? { kick } : {}) });
+      actions.push({ type: 'cast', card, from, maxX, ...(mutate ? { mutate } : {}), ...(kick ? { kick } : {}), ...(modes ? { modes } : {}) });
       return true;
     };
     /** Kicker, multikicker and offspring: the same spell with the extra cost paid once (or, for multikicker, up to eight times). */
@@ -755,9 +786,21 @@ export class Game {
       if (card.overload) consider(card, 'overload');
       if (card.altCost && this.altCostAllowed(p, card)) consider(card, 'alt');
       if (card.mutate) consider(card, 'hand', true);
+      if (card.casting?.spree) for (const modes of spreeChoices(card)) consider(card, 'hand', false, 0, modes);
       // Morph and disguise: cast face down as a 2/2 for {3} (rule 702.37c).
       if (card.morph && sorcery && mayCast && this.canAfford(p, this.castCard(card, 'faceDown'), false, 0)) actions.push({ type: 'cast', card, from: 'hand', maxX: 0, faceDown: true });
     }
+    // Foretold, plotted and warped cards: from exile, on a later turn (rules 702.143, 702.170, 702.185).
+    const fromExile = new Set<string>();
+    for (const h of p.held ?? []) {
+      if (h.way === 'suspend' || h.turn >= this.turnNumber || fromExile.has(`${h.way}:${h.card.name}`)) continue;
+      fromExile.add(`${h.way}:${h.card.name}`);
+      consider(h.card, h.way);
+    }
+    // Madness and miracle: for that cost, right after the card was discarded or drawn.
+    for (const w of p.windows ?? []) consider(w.card, w.how);
+    // Foretell, plot, suspend, transmute and channel from hand.
+    for (const card of new Set(p.hand)) if (card.casting) for (const how of this.handUses(p, card, sorcery, mayCast)) actions.push({ type: 'hand', card, how });
     const seen = new Set<SimCard>();
     for (const card of p.graveyard) {
       if (seen.has(card)) continue;
@@ -829,6 +872,8 @@ export class Game {
     if (a.life && p.life <= a.life) return false;
     if (a.pitch && !p.hand.some((h) => h !== card && pitchable(h, a.pitch!))) return false;
     if (a.returnIslands && this.islands(p).length < a.returnIslands) return false;
+    if (a.prowl && p.rogueHit !== this.turnNumber) return false;
+    if (a.emerge && !this.emergeFodder(p, card).length) return false;
     return true;
   }
 
@@ -912,7 +957,9 @@ export class Game {
           if (done) p.freeSpellTurn = this.turnNumber;
           return done;
         }
-        return yield* this.cast(p, action.card, action.from === 'command', Math.max(action.kick && action.card.kicker?.cost.x ? 1 : 0, Math.min(action.maxX, Math.floor(x) || 0)), action.from, !!action.mutate, action.kick ?? 0);
+        return yield* this.cast(p, action.card, action.from === 'command', Math.max(action.kick && action.card.kicker?.cost.x ? 1 : 0, Math.min(action.maxX, Math.floor(x) || 0)), action.from, !!action.mutate, action.kick ?? 0, undefined, action.modes ?? 0);
+      case 'hand':
+        return yield* this.useFromHand(p, action.card, action.how);
       case 'crew': {
         const perm = this.findPerm(action.permId);
         const crew = perm ? this.crewFor(p, perm) : null;
@@ -943,7 +990,7 @@ export class Game {
         this.commitPayment(p, plan);
         p.life -= card.cycling!.cost.life;
         p.hand.splice(idx, 1);
-        this.toGraveyard(p, card, false);
+        this.discarded(p, card);
         const land = card.cycling!.land ? p.library.findIndex((c) => c.isLand) : -1;
         if (land !== -1) {
           const [found] = p.library.splice(land, 1);
@@ -954,6 +1001,8 @@ export class Game {
           this.say(`${p.name} cycles ${card.name}.`);
           this.draw(p, 1);
         }
+        // "When you cycle ~" (Fractured Sanity).
+        if (card.cycling!.effects?.length) this.trigger(p, card, null, card.cycling!.effects);
         return true;
       }
       case 'activate':
@@ -1001,6 +1050,429 @@ export class Game {
       }
       default:
         return false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Alternative casting: foretell, plot, suspend, warp, madness, miracle, spree, gift ... (see classifyCasting.ts)
+  // -------------------------------------------------------------------------
+
+  /** Cards to be cast as an ability resolves: a suspended card's last time counter, hideaway, cipher copies. */
+  private pendingCasts: { seat: number; card: SimCard; copy?: boolean; why: string }[] = [];
+  /** A suspended card loses time counters when opponents cast spells (Deep-Sea Kraken). */
+  private suspendWatch = false;
+
+  /** Is now a time `p` may cast this card from `from`? (rules 307.1, 601.3, 702.8) */
+  private castTimingOk(p: PlayerState, card: SimCard, from: CastFrom, sorcery: boolean): boolean {
+    const c = card.casting;
+    // A card with no mana cost can't be cast from hand the usual way (rule 202.1b, 118.6): suspend is its only way.
+    if (c?.noCost && (from === 'hand' || from === 'command')) return false;
+    if (c?.fromTurn && (p.turnsTaken ?? 0) < c.fromTurn) return false;
+    // Madness and miracle are cast as their trigger resolves, whatever the card type (rules 702.35, 702.94).
+    if (from === 'madness' || from === 'miracle') return true;
+    if (c?.timing) {
+      const theirs = this.activeSeat !== p.seat;
+      if (c.timing === 'opponentCombat' && !(theirs && COMBAT_STEPS.includes(this.step))) return false;
+      if (c.timing === 'opponentBlockers' && !(theirs && this.step === 'declareBlockers')) return false;
+      if (c.timing === 'beforeBlockers' && !BEFORE_BLOCKERS.includes(this.step)) return false;
+    }
+    // Plotted cards are cast as a sorcery (rule 702.170d).
+    if (from === 'plot') return sorcery;
+    return sorcery || isInstantSpeed(card) || this.hasFlashFor(p, card);
+  }
+
+  /**
+   * May `p` cast this card as though it had flash? Static grants (Vedalken Orrery), grants for a while (Borne Upon
+   * a Wind, Teferi), and Tegwyll's Scouring's own way (tapping flyers, unless `selfTap` is false).
+   */
+  hasFlashFor(p: PlayerState, card: SimCard, selfTap = true): boolean {
+    if (selfTap && card.casting?.flashByTapping && this.untappedFlyers(p).length >= card.casting.flashByTapping) return true;
+    const castCreature = p.creatureCastTurn === this.turnNumber;
+    if (this.kindsInGame.has('flashGrant')) {
+      for (const perm of p.battlefield) for (const e of perm.card.effects) if (e.kind === 'flashGrant' && e.when === 'static' && flashCovers(e.what, card, castCreature)) return true;
+    }
+    for (const f of p.flashGrants ?? []) if ((f.until === 'yourNextTurn' || f.turn === this.turnNumber) && flashCovers(f.what, card, castCreature)) return true;
+    return false;
+  }
+
+  private untappedFlyers(p: PlayerState): Perm[] {
+    return p.battlefield.filter((q) => q.card.isCreature && !q.tapped && this.hasKw(q, 'flying'));
+  }
+
+  /** Leylines (rule 103.6a): from the opening hand straight onto the battlefield. */
+  private beginWithLeylines(p: PlayerState) {
+    for (const card of p.hand.filter((c) => c.casting?.leyline)) {
+      p.hand.splice(p.hand.indexOf(card), 1);
+      this.put(p.seat, card);
+      p.castNames.add(card.name);
+      this.say(`${p.name} begins the game with ${card.name} on the battlefield.`);
+    }
+  }
+
+  /** The foretold, plotted or warped card `p` may cast now from exile (on a later turn than it was exiled). */
+  private heldEntry(p: PlayerState, card: SimCard, way: 'foretell' | 'plot' | 'warp'): HeldCard | undefined {
+    return p.held?.find((h) => h.card === card && h.way === way && h.turn < this.turnNumber);
+  }
+
+  /** What `p` may do with this card from hand without casting it (foretell, plot, suspend, transmute, channel). */
+  handUses(p: PlayerState, card: SimCard, sorcery: boolean, mayCast = true): Extract<Action, { type: 'hand' }>['how'][] {
+    const c = card.casting;
+    if (!c) return [];
+    const out: Extract<Action, { type: 'hand' }>['how'][] = [];
+    const can = (cost: ManaCost) => this.planPayment(p, cost, 0, 0) !== null && p.life > cost.life;
+    // Foretell: a special action any time you have priority during your turn (rule 702.143a, 116.2h).
+    if (c.foretell && this.activeSeat === p.seat && can(FORETELL_COST)) out.push('foretell');
+    // Plot: a special action as a sorcery (rule 702.170a).
+    if (c.plot && sorcery && can(c.plot)) out.push('plot');
+    // Suspend: any time you could cast the card (rule 702.62a).
+    if (c.suspend && mayCast && (sorcery || isInstantSpeed(card) || this.hasFlashFor(p, card)) && can(c.suspend.cost)) out.push('suspend');
+    // Transmute: as a sorcery, and only worth offering if there is something to find.
+    if (c.transmute && sorcery && can(c.transmute) && p.library.some((l) => l.cmc === card.cmc)) out.push('transmute');
+    if (c.channel && can(c.channel.cost) && c.channel.effects.every((e) => {
+      const t = this.targetCandidates(p, e, null);
+      return t === null || t.length > 0;
+    })) out.push('channel');
+    return out;
+  }
+
+  private *useFromHand(p: PlayerState, card: SimCard, how: Extract<Action, { type: 'hand' }>['how']): Flow<boolean> {
+    const c = card.casting;
+    const idx = p.hand.indexOf(card);
+    if (!c || idx === -1 || !this.handUses(p, card, this.sorcerySpeed(p)).includes(how)) return false;
+    const cost = how === 'foretell' ? FORETELL_COST : how === 'plot' ? c.plot! : how === 'suspend' ? c.suspend!.cost : how === 'transmute' ? c.transmute! : c.channel!.cost;
+    // Channel is an activated ability from hand: its targets are chosen before it is paid for (rule 602.2b).
+    const targets: (Target | null)[] = [];
+    if (how === 'channel') {
+      for (const e of c.channel!.effects) {
+        const all = this.targetCandidates(p, e, null);
+        if (all === null) {
+          targets.push(null);
+          continue;
+        }
+        if (!all.length) return false;
+        const t = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(card, e), card, effect: e, candidates: all, cancellable: true });
+        if (!t || !all.some((u) => sameTarget(u, t))) return false;
+        targets.push(t);
+      }
+    }
+    const plan = this.planPayment(p, cost, 0, 0);
+    if (!plan) return false;
+    this.commitPayment(p, plan);
+    p.life -= cost.life;
+    p.hand.splice(idx, 1);
+    switch (how) {
+      case 'foretell':
+      case 'plot':
+        (p.held ??= []).push({ card, way: how, turn: this.turnNumber });
+        this.say(how === 'foretell' ? `${p.name} foretells a card.` : `${p.name} plots ${card.name}.`);
+        break;
+      case 'suspend':
+        (p.held ??= []).push({ card, way: 'suspend', turn: this.turnNumber, time: c.suspend!.n });
+        if (c.suspend!.onOpponentCast) this.suspendWatch = true;
+        this.say(`${p.name} suspends ${card.name} with ${c.suspend!.n} time counters.`);
+        break;
+      case 'transmute': {
+        this.discarded(p, card);
+        const options = p.library.filter((l) => l.cmc === card.cmc);
+        if (options.length) {
+          const pick = options.length === 1 ? [0] : yield* this.choose(p, 'tutor', `Transmute ${card.name}: find a card with mana value ${card.cmc}.`, options.map((l) => ({ label: l.name, card: l })), 1, 1);
+          const found = options[pick[0] ?? 0];
+          p.library.splice(p.library.indexOf(found), 1);
+          p.hand.push(found);
+          this.say(`${p.name} transmutes ${card.name} for ${found.name}.`);
+        }
+        this.rng.shuffle(p.library);
+        break;
+      }
+      case 'channel': {
+        this.discarded(p, card);
+        this.stack.push({ id: this.nextId++, kind: 'ability', controller: p.seat, card, effects: c.channel!.effects, targets, x: 0, isCommander: false, sourceId: null, attachTo: null, label: `${card.name} (channel)` });
+        const aimed = targets.filter((t): t is Target => t !== null);
+        this.say(`${p.name} channels ${card.name}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+        for (const t of aimed) this.becameTarget(p, t, false);
+        break;
+      }
+    }
+    return true;
+  }
+
+  /** Upkeep: a time counter comes off each suspended card (rule 702.62b). */
+  private suspendUpkeep(p: PlayerState) {
+    for (const h of [...(p.held ?? [])]) if (h.way === 'suspend') this.tickSuspend(p, h);
+  }
+
+  /** Remove a time counter from a suspended card; with the last one it is cast without paying its mana cost (rule 702.62c). */
+  private tickSuspend(p: PlayerState, h: HeldCard) {
+    h.time = Math.max(0, (h.time ?? 1) - 1);
+    if (h.time > 0) return;
+    p.held!.splice(p.held!.indexOf(h), 1);
+    this.say(`The last time counter comes off ${h.card.name}.`);
+    this.pendingCasts.push({ seat: p.seat, card: h.card, why: 'suspend' });
+  }
+
+  /** Cast the next waiting card for free. One that can't be cast stays in exile (a copy just ceases to exist). */
+  private *castPending(): Flow<void> {
+    const next = this.pendingCasts.shift()!;
+    const p = this.players[next.seat];
+    if (!p.alive) return;
+    // Hideaway can find a land: it is played instead.
+    if (next.card.isLand) {
+      if (next.card.land) {
+        this.say(`${p.name} plays ${next.card.name} (${next.why}).`);
+        this.putLand(p, next.card, next.card.land);
+      }
+      return;
+    }
+    const ok = yield* this.cast(p, next.card, false, 0, 'free', false, 0, undefined, 0, !!next.copy);
+    if (!ok) {
+      this.say(`${p.name} doesn't cast ${next.card.name} (${next.why}).`);
+      if (!next.copy) p.exile.push(next.card);
+    }
+  }
+
+  /** Madness (rule 702.35): a discarded madness card goes to exile, castable for its madness cost until its owner next passes. */
+  private discarded(p: PlayerState, card: SimCard, quiet = false) {
+    if (card.casting?.madness) {
+      p.exile.push(card);
+      (p.windows ??= []).push({ card, how: 'madness' });
+      if (!quiet) this.say(`${p.name} discards ${card.name} into exile (madness).`);
+      return;
+    }
+    this.toGraveyard(p, card, false);
+  }
+
+  /** `p` passed with a madness or miracle card waiting: it wasn't cast that way. A madness card goes to the graveyard. */
+  private closeWindows(p: PlayerState) {
+    for (const w of p.windows ?? []) {
+      if (w.how !== 'madness' || !p.exile.includes(w.card)) continue;
+      p.exile.splice(p.exile.indexOf(w.card), 1);
+      this.toGraveyard(p, w.card, false);
+    }
+    p.windows = [];
+  }
+
+  /** Can the optional cost that works like kicker be paid at all (something to sacrifice, someone to give a gift to)? */
+  private optionalCostPayable(p: PlayerState, card: SimCard): boolean {
+    const k = card.kicker;
+    if (k?.as === 'bargain') return this.bargainFodder(p).length > 0;
+    if (k?.as === 'casualty') return this.casualtyFodder(p, k.casualty ?? 1).length > 0;
+    if (k?.as === 'gift') return this.opponents(p).length > 0;
+    return true;
+  }
+
+  private bargainFodder(p: PlayerState): Perm[] {
+    return p.battlefield.filter((q) => q.card.isArtifact || q.card.isEnchantment || q.token);
+  }
+
+  private casualtyFodder(p: PlayerState, power: number): Perm[] {
+    return p.battlefield.filter((q) => q.card.isCreature && this.power(q) >= power);
+  }
+
+  emergeFodder(p: PlayerState, card: SimCard): Perm[] {
+    const what = card.altCost?.emerge;
+    return p.battlefield.filter((q) => (what === 'artifact' ? q.card.isArtifact : q.card.isCreature));
+  }
+
+  /** The most an emerge cost can be reduced by right now: the highest mana value among what could be sacrificed. */
+  emergeDiscount(p: PlayerState, card: SimCard): number {
+    return Math.max(0, ...this.emergeFodder(p, card).map((q) => q.card.cmc));
+  }
+
+  private emergeCache = new WeakMap<SimCard, Map<number, SimCard>>();
+  /** The card priced at its emerge cost, less `mv` generic mana (rule 702.119a). */
+  emergeCard(card: SimCard, mv: number): SimCard {
+    let byMv = this.emergeCache.get(card);
+    if (!byMv) this.emergeCache.set(card, (byMv = new Map()));
+    let out = byMv.get(mv);
+    if (!out) {
+      const mana = card.altCost!.mana;
+      byMv.set(mv, (out = { ...card, cost: { ...mana, generic: Math.max(0, mana.generic - mv) } }));
+    }
+    return out;
+  }
+
+  private spreeCache = new WeakMap<SimCard, Map<number, SimCard>>();
+  /** A spree or tiered spell with the modes in `modes` (bits) chosen: their costs added, their effects in order (rule 702.172). */
+  spreeCard(card: SimCard, modes: number): SimCard {
+    const spree = card.casting?.spree;
+    if (!spree) return card;
+    let byModes = this.spreeCache.get(card);
+    if (!byModes) this.spreeCache.set(card, (byModes = new Map()));
+    let out = byModes.get(modes);
+    if (!out) {
+      const chosen = spree.modes.filter((_, i) => modes & (1 << i));
+      const cost: ManaCost = {
+        generic: card.cost.generic + chosen.reduce((n, m) => n + m.cost.generic, 0),
+        pips: [...card.cost.pips, ...chosen.flatMap((m) => m.cost.pips)],
+        x: card.cost.x + chosen.reduce((n, m) => n + m.cost.x, 0),
+        life: card.cost.life + chosen.reduce((n, m) => n + m.cost.life, 0),
+      };
+      byModes.set(modes, (out = { ...card, cost, effects: [...card.effects, ...chosen.flatMap((m) => m.effects)] }));
+    }
+    return out;
+  }
+
+  /**
+   * Costs paid as the spell is cast besides mana (rule 601.2h): bargain, casualty, emerge and Dread Return's flashback
+   * sacrifices, the gift's recipient, Tegwyll's Scouring's flyers. null if they can't be paid after all.
+   */
+  private *payCastingCosts(p: PlayerState, card: SimCard, from: CastFrom | 'free', kicks: number, emergeFodder: Perm | null): Flow<{ gift?: number; casualty?: boolean } | null> {
+    const out: { gift?: number; casualty?: boolean } = {};
+    const k = card.kicker;
+    const sacrifice = function* (this: Game, options: Perm[], n: number, why: string): Flow<boolean> {
+      if (options.length < n) return false;
+      const picks = options.length === n ? options.map((_, i) => i) : yield* this.choose(p, 'sacrifice', `Sacrifice ${n === 1 ? 'a permanent' : `${n} creatures`} to ${why} ${card.name}.`, options.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), n, n);
+      const gone = picks.map((i) => options[i]).filter(Boolean);
+      if (gone.length < n) return false;
+      this.say(`${p.name} sacrifices ${gone.map((q) => q.card.name).join(', ')} to ${why} ${card.name}.`);
+      this.removePerms(gone, 'graveyard');
+      for (let i = 0; i < gone.length; i++) this.sacrificed(p);
+      return true;
+    }.bind(this);
+    if (kicks && k?.as === 'bargain' && !(yield* sacrifice(this.bargainFodder(p), 1, 'bargain'))) return null;
+    if (kicks && k?.as === 'casualty') {
+      if (!(yield* sacrifice(this.casualtyFodder(p, k.casualty ?? 1), 1, 'pay casualty for'))) return null;
+      out.casualty = true;
+    }
+    if (kicks && k?.as === 'gift') {
+      const opps = this.opponents(p);
+      if (!opps.length) return null;
+      const pick = opps.length === 1 ? [0] : yield* this.choose(p, 'gift', `Promise the gift of ${card.name} to which opponent?`, opps.map((o) => ({ label: o.name })), 1, 1);
+      out.gift = opps[pick[0] ?? 0].seat;
+    }
+    if (from === 'graveyard' && card.casting?.flashbackSac) {
+      if (!(yield* sacrifice(p.battlefield.filter((q) => q.card.isCreature), card.casting.flashbackSac, 'flash back'))) return null;
+    }
+    if (emergeFodder) {
+      this.say(`${p.name} sacrifices ${emergeFodder.card.name} to emerge ${card.name}.`);
+      this.removePerm(emergeFodder, 'graveyard');
+      this.sacrificed(p);
+    }
+    const tap = card.casting?.flashByTapping;
+    if (tap && !this.sorcerySpeed(p) && !isInstantSpeed(card) && !this.hasFlashFor(p, card, false)) {
+      const flyers = this.untappedFlyers(p).sort((a, b) => threatOf(a) - threatOf(b)).slice(0, tap);
+      if (flyers.length < tap) return null;
+      for (const q of flyers) q.tapped = true;
+      this.say(`${p.name} taps ${flyers.map((q) => q.card.name).join(', ')} to cast ${card.name} at instant speed.`);
+    }
+    return out;
+  }
+
+  /** Gift (rule 702.174): the promised opponent gets the gift as the spell resolves, before its other effects. */
+  private giveGift(card: SimCard, seat: number) {
+    const o = this.players[seat];
+    if (!o.alive) return;
+    const what = card.kicker?.gift ?? 'card';
+    switch (what) {
+      case 'card':
+        this.draw(o, 1, true);
+        break;
+      case 'extraTurn':
+        this.extraTurns.push(o.seat);
+        break;
+      case 'treasure':
+        o.treasures++;
+        break;
+      case 'food':
+        this.gainLife(o, 3);
+        break;
+      case 'fish':
+      case 'octopus': {
+        const token = this.makePerm(o, what === 'fish' ? tokenCard(1, 1, []) : tokenCard(8, 8, []), true);
+        token.tapped = what === 'fish';
+        o.battlefield.push(token);
+        this.creatureEntered(o, token);
+        break;
+      }
+    }
+    this.say(`${o.name} gets the gift from ${card.name} (${{ card: 'a card', extraTurn: 'an extra turn', treasure: 'a Treasure', food: 'a Food', fish: 'a tapped 1/1 Fish', octopus: 'an 8/8 Octopus' }[what]}).`);
+  }
+
+  /** Where a resolved spell goes instead of the graveyard: buyback, suspending itself again, cipher. True if it went somewhere. */
+  private *spellAfterResolving(p: PlayerState, item: StackItem): Flow<boolean> {
+    if (item.copy || item.flashback) return false;
+    const card = item.card;
+    if (item.buyback) {
+      p.hand.push(card);
+      this.say(`${card.name} returns to ${p.name}'s hand (buyback).`);
+      return true;
+    }
+    const again = card.casting?.suspend?.again;
+    if (again) {
+      (p.held ??= []).push({ card, way: 'suspend', turn: this.turnNumber, time: again });
+      this.say(`${card.name} is exiled with ${again} time counters.`);
+      return true;
+    }
+    if (card.casting?.cipher) {
+      const creatures = p.battlefield.filter((q) => q.card.isCreature);
+      if (!creatures.length) return false;
+      const pick = creatures.length === 1 ? [0] : yield* this.choose(p, 'cipher', `Encode ${card.name} on which creature?`, creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
+      const host = creatures[pick[0] ?? 0];
+      (host.encoded ??= []).push(card);
+      this.say(`${p.name} encodes ${card.name} on ${host.card.name}.`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Hideaway N (rule 702.75a): look at the top N cards, exile one face down with the permanent, the rest go to the bottom. */
+  private *hideaway(p: PlayerState, perm: Perm, n: number): Flow<void> {
+    const top = p.library.splice(0, Math.min(n, p.library.length));
+    if (!top.length) return;
+    const pick = top.length === 1 ? [0] : yield* this.choose(p, 'hideaway', `${perm.card.name}: exile which card face down?`, top.map((c) => ({ label: c.name, card: c })), 1, 1);
+    const at = pick[0] ?? 0;
+    perm.hidden = top[at];
+    top.splice(at, 1);
+    p.library.push(...this.rng.shuffle(top));
+    this.say(`${p.name} hides a card under ${perm.card.name}.`);
+  }
+
+  /** Does the hideaway condition hold (rule 702.75)? */
+  hiddenPlayable(p: PlayerState, e: Extract<Effect, { kind: 'playHidden' }>): boolean {
+    if (e.graveyard && p.graveyard.length < e.graveyard) return false;
+    if (e.cond === 'power10') return p.battlefield.filter((q) => q.card.isCreature).reduce((n, q) => n + Math.max(0, this.power(q)), 0) >= 10;
+    if (e.cond === 'attacked3') return p.battlefield.filter((q) => q.card.isCreature && q.attackedTurn === this.turnNumber).length >= 3;
+    if (e.cond === 'damage7') return this.opponents(p).some((o) => (this.lifeLostThisTurn[o.seat] ?? 0) >= 7);
+    return true;
+  }
+
+  /** End step: blitzed creatures are sacrificed, warped ones exiled (any player's end step); impending counters come off yours. */
+  private castingEndStep(active: PlayerState) {
+    for (const q of this.players) {
+      for (const perm of [...q.battlefield]) {
+        if (perm.blitzed) {
+          this.say(`${perm.card.name} is sacrificed (blitz).`);
+          this.removePerm(perm, 'graveyard');
+          this.sacrificed(q);
+        } else if (perm.warped) {
+          const owner = this.players[perm.owner ?? perm.seat];
+          const card = perm.card;
+          this.say(`${card.name} is exiled (warp).`);
+          this.removePerm(perm, 'exile');
+          // Castable from exile on a later turn (rule 702.185a).
+          const at = owner.exile.lastIndexOf(card);
+          if (at !== -1 && !perm.token) {
+            owner.exile.splice(at, 1);
+            (owner.held ??= []).push({ card, way: 'warp', turn: this.turnNumber });
+          }
+        } else if (q === active && perm.impending) {
+          perm.impending--;
+          if (perm.impending <= 0) {
+            perm.card = perm.impendingCard ?? perm.card;
+            perm.impending = undefined;
+            perm.impendingCard = undefined;
+            this.say(`The last time counter comes off ${perm.card.name}: it is a creature now.`);
+          }
+        }
+      }
+    }
+  }
+
+  /** Combat damage to a player: Rogues enable prowl, and encoded cards are cast again (rules 702.76, 702.99). */
+  private castingCombatHits(p: PlayerState, hit: Set<Perm>) {
+    for (const a of hit) {
+      if (/\bRogue\b/.test(a.card.typeLine)) p.rogueHit = this.turnNumber;
+      for (const card of a.encoded ?? []) this.pendingCasts.push({ seat: p.seat, card, copy: true, why: 'cipher' });
     }
   }
 
@@ -1502,6 +1974,8 @@ export class Game {
   /** May `p` cast this card from their graveyard now (flashback, escape, retrace, disturb, or a static permission)? */
   graveyardCastable(p: PlayerState, card: SimCard): boolean {
     if (card.isLand || !p.graveyard.includes(card) || this.graveyardLocked()) return false;
+    // Dread Return: flashback by sacrificing three creatures.
+    if (card.casting?.flashbackSac) return p.battlefield.filter((q) => q.card.isCreature).length >= card.casting.flashbackSac;
     if (card.flashback) return true;
     const use = card.graveyard;
     if (use?.how === 'cast') {
@@ -2465,7 +2939,8 @@ export class Game {
     if (!byCard) this.kickCache.set(card, (byCard = new Map()));
     let out = byCard.get(kicks);
     if (!out) {
-      const cost: ManaCost = {
+      // Cleave: its cost is paid instead of the mana cost (rule 702.148).
+      const cost: ManaCost = k.as === 'cleave' ? { ...k.cost } : {
         generic: card.cost.generic + k.cost.generic * kicks,
         pips: [...card.cost.pips, ...Array.from({ length: kicks }, () => k.cost.pips).flat()],
         x: card.cost.x + k.cost.x,
@@ -2479,7 +2954,7 @@ export class Game {
 
   /** The card as it is cast: priced at its flashback or mutate cost, or with its overload cost and effects. */
   /** `seat`: who casts it, for cards cast from exile or the top of a library (their permission sets the price). */
-  castCard(card: SimCard, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'crewed' | 'mutate' | 'faceDown' | 'alt' | 'exile' | 'library', seat?: number): SimCard {
+  castCard(card: SimCard, from: CastFrom | 'crewed' | 'mutate' | 'faceDown' | 'free' | 'impending', seat?: number): SimCard {
     if (from === 'hand' || from === 'command') return card;
     if (from === 'exile' || from === 'library') {
       const p = this.players[seat ?? this.activeSeat];
@@ -2495,7 +2970,17 @@ export class Game {
         : from === 'crewed'
         ? { ...card, isCreature: true }
         : from === 'alt'
-        ? { ...card, cost: { ...card.altCost!.mana, life: card.altCost!.mana.life + (card.altCost!.life ?? 0) } }
+        ? { ...card, cost: { ...card.altCost!.mana, life: card.altCost!.mana.life + (card.altCost!.life ?? 0) }, effects: card.altCost!.effects ?? card.effects }
+        : from === 'foretell'
+        ? { ...card, cost: card.casting?.foretell?.cost ?? card.cost, effects: card.casting?.foretell?.effects ?? card.effects }
+        : from === 'plot' || from === 'free'
+        ? { ...card, cost: NO_COST }
+        : from === 'madness' || from === 'miracle'
+        ? { ...card, cost: card.casting?.[from] ?? card.cost }
+        : from === 'warp'
+        ? card
+        : from === 'impending'
+        ? { ...card, isCreature: false }
         : from === 'mutate'
         ? { ...card, cost: card.mutate?.cost ?? card.cost }
         : from === 'graveyard'
@@ -2506,7 +2991,11 @@ export class Game {
     return alt;
   }
 
-  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: 'hand' | 'command' | 'graveyard' | 'overload' | 'alt' | 'exile' | 'library' = 'hand', mutate = false, kicks = 0, via?: CastVia): Flow<boolean> {
+  /**
+   * Cast a spell (rule 601). `from` 'free' casts a card already taken from wherever it was without paying its
+   * mana cost (suspend, hideaway), or a copy of it with `copy` (cipher).
+   */
+  private *cast(p: PlayerState, card: SimCard, fromCommand: boolean, x: number, from: CastFrom | 'free' = 'hand', mutate = false, kicks = 0, via?: CastVia, modes = 0, copy = false): Flow<boolean> {
     if (from === 'exile' || from === 'library') {
       const v = this.viaFor(p, card, from);
       if (!v) return false;
@@ -2515,15 +3004,30 @@ export class Game {
     if (via && (kicks || mutate || fromCommand)) return false;
     if (via?.mode === 'free') x = 0;
     if (kicks && (!card.kicker || (from !== 'hand' && from !== 'command') || mutate || (!card.kicker.multi && kicks > 1))) return false;
+    if (kicks && !this.optionalCostPayable(p, card)) return false;
+    if (modes && !card.casting?.spree) return false;
     const flashback = from === 'graveyard' && !mutate;
-    const zone = via ? via.zone : fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : p.hand;
-    if (!zone.includes(card) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
+    // Foretold, plotted and warped cards are cast from exile; madness and miracle while their window is open.
+    const held = from === 'foretell' || from === 'plot' || from === 'warp' ? this.heldEntry(p, card, from) : undefined;
+    const window = from === 'madness' || from === 'miracle' ? p.windows?.find((w) => w.card === card && w.how === from) : undefined;
+    const zone: SimCard[] | null = via ? via.zone : from === 'free' || held ? null : fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : from === 'madness' ? p.exile : p.hand;
+    if ((zone && !zone.includes(card)) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
+    if ((from === 'foretell' || from === 'plot' || from === 'warp') && !held) return false;
+    if ((from === 'madness' || from === 'miracle') && !window) return false;
     if (mutate && (!card.mutate || (from === 'graveyard' && !card.mutate.fromGraveyard))) return false;
     if (from === 'alt' && !(card.altCost && this.altCostAllowed(p, card))) return false;
     /** How it is cast from the graveyard: flashback, the card's own keyword (escape, retrace, disturb), or a permission (Muldrotha). */
     const graveyardWay = !flashback ? null : card.flashback ? 'flashback' : card.graveyard?.how === 'cast' ? card.graveyard.label : 'permission';
     let finality = false;
-    const priced = via ? this.pricedAs(card, via.mode) : kicks ? this.kickedCard(card, kicks) : this.castCard(card, mutate ? 'mutate' : from);
+    // Emerge: the sacrificed creature (or artifact) is chosen first, since it sets the price (rule 702.119).
+    let emergeFodder: Perm | null = null;
+    if (from === 'alt' && card.altCost?.emerge) {
+      const fodder = this.emergeFodder(p, card).filter((q) => this.canAfford(p, this.emergeCard(card, q.card.cmc), false, x));
+      if (!fodder.length) return false;
+      const pick = fodder.length === 1 ? [0] : yield* this.choose(p, 'sacrifice', `Sacrifice which permanent to emerge ${card.name}?`, fodder.map((q) => ({ label: `${q.card.name} (mana value ${q.card.cmc})`, card: q.card, permId: q.id })), 1, 1);
+      emergeFodder = fodder[pick[0] ?? 0];
+    }
+    const priced = via ? this.pricedAs(card, via.mode) : modes ? this.spreeCard(card, modes) : kicks ? this.kickedCard(card, kicks) : emergeFodder ? this.emergeCard(card, emergeFodder.card.cmc) : this.castCard(card, mutate ? 'mutate' : from);
     const permanent = !card.isInstant && !card.isSorcery;
     const effects = permanent ? [] : priced.effects.filter((e) => e.when === 'resolve');
 
@@ -2572,6 +3076,9 @@ export class Game {
 
     const plan = this.spellPlan(p, priced, fromCommand, x, ward);
     if (!plan) return false;
+    // Bargain, casualty, gift, flashback by sacrifice, emerge, flash by tapping flyers (classifyCasting.ts).
+    const extras = yield* this.payCastingCosts(p, card, from, kicks, emergeFodder);
+    if (extras === null) return false;
     if (card.extraCost) {
       // Additional costs are paid as the spell is cast (rule 601.2h): sacrifice if possible, else discard.
       const c = card.extraCost;
@@ -2587,7 +3094,7 @@ export class Game {
         const picks = yield* this.choose(p, 'discard', `Discard ${c.discard} card${c.discard > 1 ? 's' : ''} to cast ${card.name}.`, options.map((h) => ({ label: h.name, card: h })), c.discard, c.discard);
         for (const h of picks.map((i) => options[i])) {
           p.hand.splice(p.hand.indexOf(h), 1);
-          this.toGraveyard(p, h, false);
+          this.discarded(p, h);
         }
       }
     }
@@ -2637,8 +3144,11 @@ export class Game {
     this.commitPayment(p, plan);
     p.life -= priced.cost.life + (card.xFromLife ? x : 0);
 
-    if (!via?.copy) zone.splice(zone.indexOf(card), 1);
+    if (zone && !via?.copy) zone.splice(zone.indexOf(card), 1);
     if (via?.entry) this.usePermission(p, via.entry);
+    if (held) p.held!.splice(p.held!.indexOf(held), 1);
+    if (window) p.windows!.splice(p.windows!.indexOf(window), 1);
+    if (card.isCreature) p.creatureCastTurn = this.turnNumber;
     if (fromCommand) {
       p.commanderCasts.set(card.name, (p.commanderCasts.get(card.name) ?? 0) + 1);
       if (p.commanderRound === null) p.commanderRound = this.round;
@@ -2660,12 +3170,25 @@ export class Game {
     if (graveyardWay === 'flashback' || (graveyardWay !== 'permission' && card.graveyard?.exiled && flashback)) item.flashback = true;
     if (finality) item.finality = true;
     if (mutateOnto !== undefined) item.mutateOnto = mutateOnto;
-    if (from === 'alt' && (card.altCost?.evoke || card.altCost?.dash)) item.alt = card.altCost.evoke ? 'evoke' : 'dash';
-    if (kicks) item.kicked = kicks;
+    if (from === 'alt' && card.altCost) {
+      const a = card.altCost;
+      const how = a.evoke ? 'evoke' : a.dash ? 'dash' : a.blitz ? 'blitz' : a.warp ? 'warp' : a.impending ? 'impending' : undefined;
+      if (how) item.alt = how;
+    }
+    if (kicks && card.kicker?.as !== 'replicate' && card.kicker?.as !== 'casualty') item.kicked = kicks;
+    if (kicks && card.kicker?.as === 'buyback') item.buyback = true;
+    if (extras.gift !== undefined) item.gift = extras.gift;
+    if (from === 'free' && card.casting?.suspend) item.suspended = true;
+    if (copy) item.copy = true;
     this.stack.push(item);
     const aimed = [attachTo, ...targets].filter((t): t is Target => t !== null);
     const kickText = !kicks ? '' : card.kicker!.offspring ? ' paying offspring' : card.kicker!.multi ? ` kicked ${kicks} time${kicks > 1 ? 's' : ''}` : ' kicked';
-    this.say(`${p.name} casts ${card.name}${kickText}${priced.cost.x ? ` (X=${x})` : ''}${mutate ? ` for its mutate cost onto ${this.findPerm(mutateOnto ?? null)?.card.name ?? 'a creature'}` : ''}${via ? `${via.label}${via.mode === 'free' ? ' without paying its mana cost' : via.mode === 'life' ? ` for ${card.cmc} life` : ''}` : fromCommand ? ' from the command zone' : graveyardWay === 'permission' ? ' from their graveyard' : graveyardWay ? ` with ${graveyardWay}` : from === 'graveyard' ? ' from the graveyard' : from === 'overload' ? ' with overload' : item.alt ? ` with ${item.alt}` : from === 'alt' ? ' without paying its mana cost' : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    this.say(`${p.name} casts ${copy ? 'a copy of ' : ''}${card.name}${kickText}${priced.cost.x ? ` (X=${x})` : ''}${mutate ? ` for its mutate cost onto ${this.findPerm(mutateOnto ?? null)?.card.name ?? 'a creature'}` : ''}${via ? `${via.label}${via.mode === 'free' ? ' without paying its mana cost' : via.mode === 'life' ? ` for ${card.cmc} life` : ''}` : fromCommand ? ' from the command zone' : graveyardWay === 'permission' ? ' from their graveyard' : graveyardWay ? ` with ${graveyardWay}` : from === 'graveyard' ? ' from the graveyard' : from === 'overload' ? ' with overload' : item.alt ? ` with ${item.alt}` : from === 'alt' ? (card.altCost?.prowl ? ' with prowl' : card.altCost?.emerge ? ' with emerge' : ' without paying its mana cost') : CAST_FROM_TEXT[from] ?? ''}${modes ? ` (${spreeLabel(card, modes)})` : ''}${aimed.length ? ` targeting ${aimed.map((t) => this.describeTarget(t)).join(', ')}` : ''}.`);
+    // Replicate and casualty: copies of the spell, which may choose new targets (rules 702.56, 702.153).
+    const copies = kicks && card.kicker?.as === 'replicate' ? kicks : extras.casualty ? 1 : 0;
+    for (let i = 0; i < copies; i++) yield* this.copyItem(p, item);
+    // Deep-Sea Kraken: an opponent's spell takes a time counter off it.
+    if (this.suspendWatch) for (const o of this.opponents(p)) for (const h of o.held ?? []) if (h.way === 'suspend' && h.card.casting?.suspend?.onOpponentCast && (h.time ?? 0) > 0) this.tickSuspend(o, h);
 
     // "Becomes the target of a spell" triggers (rule 603.2): the spell is on the stack with its targets chosen.
     for (const t of aimed) this.becameTarget(p, t, true);
@@ -2786,7 +3309,7 @@ export class Game {
       const gone = picks.map((i) => p.hand[i]).filter(Boolean);
       for (const c of gone) {
         p.hand.splice(p.hand.indexOf(c), 1);
-        p.graveyard.push(c);
+        this.discarded(p, c);
       }
       if (gone.length) this.say(`${p.name} discards ${gone.map((c) => c.name).join(', ')}.`);
       if (this.kindsInGame.has('when:opponentDiscard')) for (let i = 0; i < gone.length; i++) this.fireOpponents(p, 'opponentDiscard', 1);
@@ -3016,6 +3539,8 @@ export class Game {
       // A copy of a permanent spell becomes a token (rule 707.10f).
       const perm = yield* this.enter(p, item.card, item.isCommander, item.x, item.attachTo, item.owner !== undefined ? this.players[item.owner] : undefined, item.copy ? 'token' : item.alt, item.kicked);
       if (perm && item.finality) this.finality.add(perm.id);
+      // Suspend: a creature cast as its last time counter came off has haste (rule 702.62a).
+      if (perm && item.suspended && perm.card.isCreature) perm.tempKw.push('haste');
       return;
     }
 
@@ -3027,6 +3552,8 @@ export class Game {
         this.anyAttached = true;
       }
     }
+    // Gift (rule 702.174): the promised gift comes first.
+    if (item.gift !== undefined) this.giveGift(item.card, item.gift);
     this.resolving = item;
     this.aimedSeat = null;
     this.lastAffected = null;
@@ -3046,7 +3573,7 @@ export class Game {
         this.rng.shuffle(p.library);
         this.say(`${item.card.name} is shuffled into ${p.name}'s library.`);
       }
-      else this.leaveStack(p, item);
+      else if (!(yield* this.spellAfterResolving(p, item))) this.leaveStack(p, item);
       this.tuckSpell = false;
       this.shuffleSpell = false;
     }
@@ -3347,7 +3874,7 @@ export class Game {
   }
 
   /** Put a permanent card onto the battlefield and note its enters triggers. */
-  private *enter(p: PlayerState, card: SimCard, isCommander: boolean, x: number, attachTo: Target | null, owner?: PlayerState, how?: 'token' | 'evoke' | 'dash', kicks = 0): Flow<Perm | null> {
+  private *enter(p: PlayerState, card: SimCard, isCommander: boolean, x: number, attachTo: Target | null, owner?: PlayerState, how?: 'token' | 'evoke' | 'dash' | 'blitz' | 'warp' | 'impending', kicks = 0): Flow<Perm | null> {
     const perm = this.makePerm(p, kicks ? this.kickedCard(card, kicks) : card, how === 'token');
     perm.card = card;
     if (kicks) perm.kicked = kicks;
@@ -3423,7 +3950,15 @@ export class Game {
       }
     }
     if (card.entersTapped || (clone?.kind === 'clone' && clone.tapped)) perm.tapped = true;
+    // Impending: time counters, and not a creature until the last is gone (rule 702.176a).
+    if (how === 'impending' && card.altCost?.impending) {
+      perm.impending = card.altCost.impending * doubled;
+      perm.impendingCard = card;
+      perm.card = this.castCard(card, 'impending');
+    }
     p.battlefield.push(perm);
+    // Hideaway: look at the top cards and exile one face down (rule 702.75a).
+    if (card.casting?.hideaway) yield* this.hideaway(p, perm, card.casting.hideaway);
     // Brainstealer Dragon: a nonland permanent an opponent owns enters under your control.
     if (owner && owner !== p && !card.isLand && card.cmc > 0 && this.statics(p, 'stolenDrain') > 0) {
       for (let i = this.statics(p, 'stolenDrain'); i > 0; i--) {
@@ -3445,6 +3980,11 @@ export class Game {
       perm.dashed = true;
       perm.tempKw.push('haste');
     }
+    if (how === 'blitz') {
+      perm.blitzed = true;
+      perm.tempKw.push('haste');
+    }
+    if (how === 'warp') perm.warped = true;
     // Evoke: sacrificed as it enters; its enters abilities still happen (rule 702.74a).
     if (how === 'evoke') {
       this.say(`${card.name} is sacrificed (evoke).`);
@@ -4183,7 +4723,7 @@ export class Game {
           const gone = picks.map((i) => v.hand[i]);
           for (const card of gone) {
             v.hand.splice(v.hand.indexOf(card), 1);
-            this.toGraveyard(v, card, false);
+            this.discarded(v, card);
           }
           this.say(`${v.name} discards ${gone.map((c) => c.name).join(', ')}.`);
           // Megrim, Waste Not: once for each card discarded.
@@ -4212,6 +4752,31 @@ export class Game {
         this.extraTurns.push(p.seat);
         this.say(`${p.name} will take an extra turn.`);
         break;
+      case 'flashGrant':
+        // Static grants are checked where spells are cast; from a spell or loyalty ability, it lasts a while.
+        if (e.when === 'static') break;
+        (p.flashGrants ??= []).push({ what: e.what, until: e.until ?? 'turn', turn: this.turnNumber });
+        this.say(`${p.name} may cast ${e.what === 'all' ? 'spells' : `${e.what} spells`} as though they had flash ${e.until === 'yourNextTurn' ? 'until their next turn' : 'this turn'}.`);
+        break;
+      case 'playHidden': {
+        // Hideaway: play the card exiled with the source for free, if the condition holds (rule 702.75).
+        if (!src?.hidden || !this.hiddenPlayable(p, e)) break;
+        const hidden = src.hidden;
+        src.hidden = undefined;
+        this.pendingCasts.push({ seat: p.seat, card: hidden, why: 'hideaway' });
+        break;
+      }
+      case 'plotFromHand': {
+        // Jace Reawakened: exile a cheap nonland card from hand; it becomes plotted (rule 702.170).
+        const options = p.hand.filter((c) => !c.isLand && c.cmc <= e.maxCmc);
+        if (!options.length) break;
+        const pick = options.length === 1 ? [0] : yield* this.choose(p, 'exileCard', `Plot which card from your hand?`, options.map((c) => ({ label: c.name, card: c })), 1, 1);
+        const plotted = options[pick[0] ?? 0];
+        p.hand.splice(p.hand.indexOf(plotted), 1);
+        (p.held ??= []).push({ card: plotted, way: 'plot', turn: this.turnNumber });
+        this.say(`${p.name} plots ${plotted.name}.`);
+        break;
+      }
       case 'approach': {
         const times = (this.approachCasts.get(p.seat) ?? 0) + 1;
         this.approachCasts.set(p.seat, times);
@@ -5269,7 +5834,7 @@ export class Game {
       if (owner.alive) {
         const cards = perm.parts
           ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-          : perm.token ? [] : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+          : perm.token ? [] : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.impendingCard ?? perm.card, commander: perm.isCommander }];
         for (const { card, commander } of cards) {
           if (dest === 'library') {
             // Shuffled into the library. A commander may go to the command zone instead (rule 903.9b); it always does here.
@@ -5330,6 +5895,8 @@ export class Game {
         if (hits.length) for (let i = this.triggerTimes(q, 'dies'); i > 0; i--) this.trigger(q, w.card, w.id, hits, 0, w, undefined, aboutDead(perm));
       }
       if (perm.bounty) this.bountyPaid(perm, controller);
+      // Blitz: "when this creature dies, draw a card".
+      if (perm.blitzed) this.trigger(controller, perm.card, null, [BLITZ_DRAW], 0, perm);
       // Skullclamp: "whenever equipped creature dies".
       for (const eq of worn) {
         const hits = eq.card.effects.filter((e) => e.when === 'creatureDies' && e.scope === 'attached');
@@ -5680,7 +6247,7 @@ export class Game {
     const [pick] = yield* this.choose(p, 'discard', `${why}: discard a card.`, p.hand.map((card) => ({ label: card.name, card })), 1, 1);
     const card = p.hand[pick ?? 0];
     p.hand.splice(p.hand.indexOf(card), 1);
-    this.toGraveyard(p, card, false);
+    this.discarded(p, card);
     this.say(`${p.name} loots (${why}), discarding ${card.name}.`);
   }
 
@@ -6416,6 +6983,8 @@ export class Game {
         if (hits.length) this.trigger(p, eq.card, eq.id, hits, toPlayer.filter((d) => d.from === a).reduce((n, d) => n + d.amount, 0), null, a.attacking ?? undefined);
       }
     }
+    // Prowl and cipher (rules 702.76, 702.99).
+    if (hitPlayer.size) this.castingCombatHits(p, hitPlayer);
     if (hitPlayer.size) {
       for (const perm of p.battlefield) {
         const once = perm.card.effects.filter((e) => e.when === 'combatDamage' && e.scope === 'oneOrMore');
@@ -6775,6 +7344,39 @@ export function chargeUse(card: SimCard): number {
 
 function sameActivation(a: Effect, b: Effect): boolean {
   return !!a.activation && !!b.activation && a.activation.tap === b.activation.tap && JSON.stringify(a.activation.cost) === JSON.stringify(b.activation.cost);
+}
+
+/** Does a flash grant cover this card? `castCreature`: a creature spell was already cast this turn (The Blue Spirit). */
+export function flashCovers(what: FlashFilter, card: SimCard, castCreature: boolean): boolean {
+  const colorless = card.cost.pips.every((pip) => pip.every((m) => m === 'C')) && card.cost.life === 0;
+  switch (what) {
+    case 'all': return true;
+    case 'sorcery': return card.isSorcery;
+    case 'artifact': return card.isArtifact;
+    case 'colorless': return colorless;
+    case 'artifactOrColorless': return card.isArtifact || colorless;
+    case 'noncreature': return !card.isCreature;
+    case 'auraEquipment': return /\b(Aura|Equipment)\b/.test(card.typeLine);
+    case 'creatureFirst': return card.isCreature && !castCreature;
+  }
+}
+
+/** Every choice of spree modes (any nonempty set), or of one tier (rule 702.172). Bits index the modes. */
+export function spreeChoices(card: SimCard): number[] {
+  const spree = card.casting?.spree;
+  if (!spree) return [];
+  const n = spree.modes.length;
+  if (spree.one) return spree.modes.map((_, i) => 1 << i);
+  return Array.from({ length: (1 << n) - 1 }, (_, i) => i + 1);
+}
+
+export function spreeLabel(card: SimCard, modes: number): string {
+  return (card.casting?.spree?.modes ?? []).filter((_, i) => modes & (1 << i)).map((m) => m.label).join(', ');
+}
+
+/** A rough measure of how much a permanent matters, for picking the least useful one. */
+function threatOf(perm: Perm): number {
+  return perm.card.value + perm.counters + (perm.isCommander ? 10 : 0) - (perm.token ? 1 : 0);
 }
 
 /** Does a card match a CardKind (see typesExile.ts)? */
