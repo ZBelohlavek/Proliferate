@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
+import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -305,8 +305,14 @@ export class Bot implements Agent {
       const level = actions.find((a) => a.type === 'level');
       if (level) return pick(level);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      // Before combat: haste and evasion abilities, and tapping a blocker.
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))));
+      // Before combat: haste and evasion abilities, tapping a blocker, and keeping a blocker out of the way (Zirda).
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))) ?? this.chooseCombatShaping(g, p, actions));
+    }
+
+    // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
+    if (!myTurn && g.step === 'beginCombat') {
+      const shape = this.chooseCombatShaping(g, p, actions);
+      if (shape) return pick(shape);
     }
 
     // An opponent's beginning of combat: tap their biggest attacker (Mind Games, Thassa, Ring of the Lucii).
@@ -326,7 +332,7 @@ export class Bot implements Agent {
       const fog = this.chooseFog(g, p, actions);
       if (fog) return pick(fog);
     }
-    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
+    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)) ?? this.combatProtect(g, p, actions));
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
@@ -533,6 +539,13 @@ export class Bot implements Agent {
   /** Regenerate-style "~ gains indestructible" in answer to destroy or damage removal aimed at it. */
   private selfSave(p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
     if (top.controller === p.seat) return undefined;
+    // Mother of Runes: protection from the color of a spell or ability aimed at one of our creatures.
+    const aimed = top.targets.some((t) => t?.kind === 'perm' && p.battlefield.some((q) => q.id === t.id && q.card.isCreature)) && cardColors(top.card).length > 0
+      && top.effects.some((e) => e.kind === 'removal' || e.kind === 'steal' || e.kind === 'stun' || e.kind === 'equip');
+    if (aimed) {
+      const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+      if (shield) return shield;
+    }
     return actions.find((a) => {
       if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !a.effect.grant?.includes('indestructible')) return false;
       return top.effects.some((e, i) => e.kind === 'removal' && (e.mode === 'destroy' || e.mode === 'damage') && top.targets[i]?.kind === 'perm' && (top.targets[i] as { id: number }).id === a.permId);
@@ -963,6 +976,50 @@ export class Bot implements Agent {
   }
 
   /**
+   * Abilities that shape a combat (rules 508.1c-d, 509.1b): on an opponent's turn, "creatures your opponents control attack
+   * this turn if able" when they'd mostly be sent into each other or into our blockers, or "target creature can't attack"
+   * on their biggest attacker; on our turn, "can't block" on the blocker in our way.
+   */
+  private chooseCombatShaping(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const myTurn = g.activeSeat === p.seat;
+    const active = g.players[g.activeSeat];
+    for (const a of actions) {
+      if (a.type !== 'activate') continue;
+      const e = a.effect;
+      if (e.kind === 'forceAttack' && !myTurn) {
+        const ready = g.attackCandidates(active).filter((q) => !g.mustAttack(q));
+        if (!ready.length) continue;
+        // More opponents than just us to hit, or nothing that threatens our life.
+        const power = ready.reduce((n, q) => n + hitDamage(g, q), 0);
+        if (g.opponents(active).length >= 2 || power * 2 < p.life) return a;
+      }
+      if (e.kind === 'pacify') {
+        if (!myTurn && e.attack) {
+          const big = active.battlefield.filter((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 4);
+          if (big.length) return a;
+        }
+        if (myTurn && e.block && g.step === 'main1') {
+          const mine = g.attackCandidates(p).filter((q) => g.power(q) >= 2);
+          const walls = g.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isCreature && !q.tapped && g.toughness(q) >= 3);
+          if (mine.length && walls.length) return a;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** Mother of Runes in a fight: protection from the color of what would kill one of our creatures (it then deals no damage to it). */
+  private combatProtect(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+    if (!shield) return undefined;
+    const doomed = p.battlefield.some((q) => {
+      const foes = q.attacking !== null ? g.blockersOf(q) : q.blocking !== null ? [g.findPerm(q.blocking)].filter((f): f is Perm => !!f) : [];
+      return foes.length > 0 && foes.some((f) => cardColors(f.card).length > 0) && foes.reduce((n, f) => n + g.power(f), 0) >= g.toughness(q) - q.damage && threat(g, q) >= 3;
+    });
+    return doomed ? shield : undefined;
+  }
+
+  /**
    * Is tapping an opponent's creature useful right now? Before our attack (main phase or beginning of combat) when it
    * would remove a blocker, or at an opponent's beginning of combat when they have a creature worth stopping.
    */
@@ -1093,7 +1150,17 @@ export class Bot implements Agent {
       case 'pump':
         return asTarget(this.trickTarget(g, p, d.card)) ?? asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'protect':
-        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'protectColor':
+        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q) + (q.attacking !== null || q.blocking !== null ? 3 : 0))) ?? d.candidates[0];
+      case 'suspect':
+        // An opponent's best blocker: it can't block any more, and gets goaded with Nelly Borca.
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + g.toughness(q) + (q.tapped ? -3 : 0))) ?? d.candidates[0];
+      case 'pacify': {
+        // On our turn, the blocker that stands in our way; on theirs, the attacker that would hit us hardest.
+        const theirs = perms.filter((q) => q.seat !== p.seat);
+        if (g.activeSeat === p.seat) return asTarget(bestOf(theirs.filter((q) => !q.tapped), (q) => g.toughness(q) + g.power(q))) ?? d.candidates[0];
+        return asTarget(bestOf(theirs.filter((q) => q.seat === g.activeSeat), (q) => g.power(q) + (q.tapped ? -10 : 0))) ?? d.candidates[0];
+      }
       case 'goad': {
         // The opponent's biggest creature, best of all one whose controller has plenty of other opponents to hit.
         return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0))) ?? d.candidates[0];
@@ -1480,13 +1547,14 @@ export class Bot implements Agent {
       if (!perm) continue;
       const allowed = gd.defenders.map((s) => g.players[s]).filter((o) => o.alive);
       if (!allowed.length) continue;
-      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, hitDamage(g, perm));
+      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, g.playerProtectedFrom(o, p.seat) ? 0 : hitDamage(g, perm));
       forced.push({ attacker: perm.id, defender: allowed.reduce((a, b) => (score(b) > score(a) ? b : a)).seat });
     }
     candidateIds = candidateIds.filter((id) => !forced.some((f) => f.attacker === id));
     if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats)];
     let candidates = candidateIds.map((id) => g.findPerm(id)).filter((q): q is Perm => q !== null && g.power(q) > 0);
-    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive);
+    // Absolute Virtue: nothing gets through to a player with protection from us, so they aren't worth attacking.
+    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive && !g.playerProtectedFrom(o, p.seat));
     if (!candidates.length || !opps.length) return [];
 
     // Main target: who is most worth hitting, and can be hit.
@@ -1497,6 +1565,7 @@ export class Bot implements Agent {
       let unblockable = 0;
       let total = 0;
       for (const a of candidates) {
+        if (!g.canAttack(a, o.seat)) continue;
         total += hitDamage(g, a);
         if (!blockers.some((b) => g.canBlock(b, a))) unblockable += hitDamage(g, a);
       }
@@ -1528,9 +1597,12 @@ export class Bot implements Agent {
     const out: AttackDeclaration[] = [];
     // Attack taxes (Propaganda, Ghostly Prison) are paid per creature; one we can't pay for stays home, so send it elsewhere.
     let budget = g.availableMana(p);
+    // Crawlspace: only so many creatures can attack each player.
+    const sent = new Map<number, number>();
     for (const a of candidates) {
       for (const o of order) {
-        const tax = g.attackTax(o);
+        if (!g.canAttack(a, o.seat) || (sent.get(o.seat) ?? 0) >= g.attackLimit(o.seat)) continue;
+        const tax = g.attackTax(o, a);
         if (tax > budget) continue;
         const isMain = o === main;
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
@@ -1544,6 +1616,7 @@ export class Bot implements Agent {
         if (!go && isMain && this.rng.chance(0.1 * this.aggression)) go = true;
         if (go) {
           out.push({ attacker: a.id, defender: o.seat });
+          sent.set(o.seat, (sent.get(o.seat) ?? 0) + 1);
           budget -= tax;
           break;
         }
