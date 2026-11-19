@@ -274,9 +274,9 @@ function Table({ session, speed, onSpeed, fx, onFx, fxUntil, redraw, onRestart, 
   };
 
   const badge = (perm: Perm): string | null => {
-    if (attacks.has(perm.id)) return `⚔ ${shortName(g.players[attacks.get(perm.id)!])}`;
+    if (attacks.has(perm.id)) return `⚔ ${attackTarget(g, attacks.get(perm.id)!).label}`;
     if (blocks.has(perm.id)) return `🛡 ${g.findPerm(blocks.get(perm.id)!)?.card.name ?? ''}`;
-    if (perm.attacking !== null) return `⚔ ${shortName(g.players[perm.attacking])}${perm.blocked ? ' (blocked)' : ''}`;
+    if (perm.attacking !== null) return `⚔ ${perm.attackingPw !== undefined ? g.findPerm(perm.attackingPw)?.card.name ?? 'planeswalker' : shortName(g.players[perm.attacking])}${perm.blocked ? ' (blocked)' : ''}`;
     if (perm.blocking !== null) return `🛡 ${g.findPerm(perm.blocking)?.card.name ?? ''}`;
     return null;
   };
@@ -501,18 +501,23 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
         </div>
       );
     case 'attackers': {
-      const list = [...attacks].map(([attacker, to]) => ({ attacker, defender: to }));
+      const list = [...attacks].map(([attacker, to]) => {
+        const t = attackTarget(g, to);
+        return { attacker, defender: t.defender, ...(t.planeswalker !== undefined ? { planeswalker: t.planeswalker } : {}) };
+      });
+      // Players, then the planeswalkers they control (a planeswalker is chosen as -(id + 1)).
+      const choices = [...d.defenders, ...(d.planeswalkers ?? []).map((id) => -(id + 1))];
       return (
         <div className="prompt-row">
           <span>
             <strong>Declare attackers.</strong> Click your creatures to attack with them.
             {d.goaded?.length ? ` Goaded (must attack, and not the player who goaded them): ${d.goaded.map((x) => g.findPerm(x.attacker)?.card.name).join(', ')}.` : ''}
           </span>
-          {d.defenders.length > 1 && (
+          {choices.length > 1 && (
             <label className="small">
               Attacking{' '}
               <select value={defender ?? d.defenders[0]} onChange={(e) => setDefender(+e.target.value)}>
-                {d.defenders.map((s) => <option key={s} value={s}>{shortName(g.players[s])} ({g.players[s].life} life)</option>)}
+                {choices.map((v) => <option key={v} value={v}>{attackTarget(g, v).label}{v >= 0 ? ` (${g.players[v].life} life)` : ''}</option>)}
               </select>
             </label>
           )}
@@ -543,6 +548,15 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
             <span><strong>{d.prompt}</strong> <span className="muted">The first mulligan is free; after that you put one card on the bottom for each.</span></span>
             <button className="primary" onClick={() => answer(false)}>Keep</button>
             <button onClick={() => answer(true)}>Mulligan</button>
+          </div>
+        );
+      }
+      if (d.reason !== 'commandZone') {
+        return (
+          <div className="prompt-row">
+            <span><strong>{d.prompt}</strong></span>
+            <button className="primary" onClick={() => answer(true)}>Yes</button>
+            <button onClick={() => answer(false)}>No</button>
           </div>
         );
       }
@@ -594,6 +608,14 @@ function GameOver({ g, onRestart, onQuit }: { g: Game; onRestart: () => void; on
       <button onClick={onQuit}>Change decks</button>
     </div>
   );
+}
+
+/** What an attack choice in the attackers prompt means: a player's seat, or a planeswalker stored as -(id + 1). */
+function attackTarget(g: Game, v: number): { defender: number; planeswalker?: number; label: string } {
+  if (v >= 0) return { defender: v, label: shortName(g.players[v]) };
+  const pw = g.findPerm(-v - 1);
+  if (!pw) return { defender: 0, label: 'planeswalker' };
+  return { defender: pw.seat, planeswalker: pw.id, label: `${pw.card.name} (${pw.loyalty ?? 0} loyalty, ${shortName(g.players[pw.seat])})` };
 }
 
 function ordinal(n: number): string {
@@ -736,7 +758,12 @@ function Mat({ g, p, me, bind, permState, cardState, badge, target }: MatProps) 
     const key = `${name}|${l.tapped}`;
     landGroups.set(key, { name, tapped: l.tapped, n: (landGroups.get(key)?.n ?? 0) + 1 });
   }
-  const damage = [...p.commanderDamage].map(([key, n]) => `${n} from ${shortName(g.players[+key.split(':')[0]])}`);
+  // Commander damage is counted per commander (rule 903.10a): name the commander when a player has two.
+  const damage = [...p.commanderDamage].map(([key, n]) => {
+    const [seat, ...name] = key.split(':');
+    const from = g.players[+seat];
+    return `${n} from ${shortName(from)}${from.deck.commanders.length > 1 ? ` (${name.join(':')})` : ''}`;
+  });
   const active = g.activeSeat === p.seat && !g.over;
 
   return (

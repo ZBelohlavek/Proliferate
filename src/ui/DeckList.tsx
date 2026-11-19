@@ -84,6 +84,9 @@ export function DeckList({ decks, selected, forgeCheck, onToggle, onSetSelected,
                 <div className="deck-sub">{commanderNames(deck)}{why && <span className="muted small"> · {why}</span>}</div>
                 <div className="deck-meta">
                   <span className={size === 100 ? '' : 'warn'}>{size} cards</span>
+                  {deck.issues && deck.issues.length > 0 && (
+                    <span className="warn" title={deck.issues.join('\n')}>Not Commander-legal: {deck.issues.length} issue{deck.issues.length === 1 ? '' : 's'}</span>
+                  )}
                   {check && (check.missing.length === 0
                     ? <span className="forge-ok" title="Forge has scripts for every card in this deck">Forge ✓</span>
                     : <span className="forge-bad" title={`Forge doesn't recognise: ${check.missing.join(', ')}`}>Forge: {check.missing.length} unknown card{check.missing.length === 1 ? '' : 's'}</span>)}

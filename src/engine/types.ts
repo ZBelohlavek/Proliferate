@@ -194,7 +194,7 @@ export type EffectBody =
    * anywhere but your hand ('notHand', which includes the command zone). first: only the first such spell you cast each turn.
    * minCmc: only spells with at least this mana value. affinity: {1} less for each artifact you control instead (Tezzeret).
    */
-  | { kind: 'costReduction'; amount: number; filter: CastFilter; from?: 'graveyard' | 'graveyardOrExile' | 'notHand'; first?: boolean; minCmc?: number; affinity?: boolean }
+  | { kind: 'costReduction'; amount: number; filter: CastFilter; from?: 'graveyard' | 'graveyardOrExile' | 'notHand' | 'hand'; first?: boolean; minCmc?: number; affinity?: boolean }
   /**
    * Static: activated abilities cost {amount} less, but not below one mana (rule 601.2f): only abilities of creatures
    * you control ('yours', Training Grounds), of any creatures ('creatures', Heartstone) or every non-mana ability you activate ('all', Zirda).
@@ -1117,6 +1117,12 @@ export interface SimCard {
   /** The card has its own rule (src/engine/cardRules.ts): why it is played the way it is. */
   ruled?: string;
   imageUrl?: string;
+  /** "A deck can have any number of (up to N) cards named ~" (rule 903.5b): 999 for any number. */
+  copyLimit?: number;
+  /** May be a commander (rule 903.3): a legendary creature, Vehicle or Spacecraft with P/T, a Background, or "~ can be your commander". */
+  canCommand?: boolean;
+  /** How this commander can share the command zone with another (rule 702.124): partner, partner with, friends forever, Backgrounds, the Doctor. */
+  pairing?: 'partner' | 'friendsForever' | 'chooseBackground' | 'background' | 'doctorsCompanion' | 'doctor' | { with: string } | { group: string };
 }
 
 export interface DeckEntry {
@@ -1137,6 +1143,8 @@ export interface SimDeck {
   archidektBracket?: number | null;
   /** When the deck was last changed on Archidekt (ms), for syncing. */
   archidektUpdatedAt?: number;
+  /** Where the deck breaks the Commander deck rules (100 cards, singleton, color identity, commanders), found at import. */
+  issues?: string[];
 }
 
 export type LossReason = 'combat' | 'commander' | 'noncombat' | 'decked' | 'timeout';

@@ -170,6 +170,8 @@ export interface Perm {
   landInfo?: LandInfo;
   /** Combat: seat of the player this creature is attacking, or null. */
   attacking: number | null;
+  /** Combat: id of the planeswalker this creature is attacking (`attacking` is then its controller), or undefined when it attacks the player. */
+  attackingPw?: number;
   /** Combat: true once a blocker was declared for this attacker (it stays blocked even if the blocker leaves, rule 509.1h). */
   blocked: boolean;
   /** Combat: id of the attacker this creature is blocking, or null. */
@@ -445,7 +447,8 @@ export type Decision =
   | { kind: 'target'; seat: number; prompt: string; card: SimCard; effect: Effect | null; candidates: Target[]; cancellable: boolean }
   /** Declare attackers: which creatures attack which players (rule 508.1). */
   /** `goaded`: creatures that must attack, and the players each may attack (rule 701.15b). The engine adds them if left out. */
-  | { kind: 'attackers'; seat: number; candidates: number[]; defenders: number[]; goaded?: { attacker: number; defenders: number[] }[] }
+  /** `planeswalkers`: ids of planeswalkers opponents control, which may be attacked instead of their controller (rule 508.1b). */
+  | { kind: 'attackers'; seat: number; candidates: number[]; defenders: number[]; goaded?: { attacker: number; defenders: number[] }[]; planeswalkers?: number[] }
   /** Declare blockers for the creatures attacking this player (rule 509.1). */
   | { kind: 'blockers'; seat: number; attackers: number[]; candidates: number[] }
   /** Pick between `min` and `max` of the options. */
@@ -462,6 +465,8 @@ export interface PriorityAnswer {
 export interface AttackDeclaration {
   attacker: number;
   defender: number;
+  /** Attack this planeswalker (one of the decision's `planeswalkers`) instead of the player; `defender` is then ignored. */
+  planeswalker?: number;
 }
 export interface BlockDeclaration {
   blocker: number;

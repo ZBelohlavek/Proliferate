@@ -1559,7 +1559,7 @@ export class Game {
     if (item.copy || item.flashback) return false;
     const card = item.card;
     if (item.buyback) {
-      p.hand.push(card);
+      this.players[item.owner ?? p.seat].hand.push(card);
       this.say(`${card.name} returns to ${p.name}'s hand (buyback).`);
       return true;
     }
@@ -1575,6 +1575,8 @@ export class Game {
       const pick = creatures.length === 1 ? [0] : yield* this.choose(p, 'cipher', `Encode ${card.name} on which creature?`, creatures.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), 1, 1);
       const host = creatures[pick[0] ?? 0];
       (host.encoded ??= []).push(card);
+      // The card itself stays in its owner's exile (rule 702.99a), where it remains if the creature leaves.
+      this.players[item.owner ?? p.seat].exile.push(card);
       this.say(`${p.name} encodes ${card.name} on ${host.card.name}.`);
       return true;
     }
@@ -1752,6 +1754,7 @@ export class Game {
 
   /** Play a land from exile or the top of the library. */
   private playLandFrom(p: PlayerState, card: SimCard, from: 'exile' | 'library'): boolean {
+    let owner = p;
     if (from === 'library') {
       if (p.library[0] !== card || !this.topPermission(p)) return false;
       p.library.shift();
@@ -1759,12 +1762,14 @@ export class Game {
     } else {
       const m = this.exilePlayable(p).find((e) => e.card === card && !e.castOnly);
       if (!m) return false;
-      const owner = this.players[m.owner];
+      owner = this.players[m.owner];
       owner.exile.splice(owner.exile.indexOf(card), 1);
       this.usePermission(p, m);
       this.say(`${p.name} plays ${card.name} from ${owner === p ? 'exile' : `${owner.name}'s exile`}.`);
     }
-    this.putLand(p, card, card.land!);
+    // A land played from an opponent's exile is still theirs (rule 108.3): it goes back to their graveyard.
+    const perm = this.putLand(p, card, card.land!);
+    if (owner !== p) perm.owner = owner.seat;
     p.landsPlayed++;
     p.castNames.add(card.name);
     return true;
@@ -2577,6 +2582,7 @@ export class Game {
       if (e.from === 'graveyard' && zone !== 'graveyard') return false;
       if (e.from === 'graveyardOrExile' && zone !== 'graveyard' && zone !== 'exile') return false;
       if (e.from === 'notHand' && zone === 'hand') return false;
+      if (e.from === 'hand' && zone !== 'hand') return false;
     }
     if (e.first) {
       const cast = e.filter === 'creature' ? p.creatureSpellsThisTurn : e.filter === 'instantSorcery' ? p.instantSorceryThisTurn : p.spellsThisTurn;
@@ -3956,11 +3962,14 @@ export class Game {
     }
     this.resolving = null;
     if (item.kind === 'spell') {
-      if (this.tuckSpell) p.library.splice(Math.min(6, p.library.length), 0, item.card);
+      // A copy of a spell ceases to exist instead of going anywhere (rule 707.10a).
+      // A spell cast from someone else's library or graveyard goes back to its owner's (rule 400.3).
+      const owner = this.players[item.owner ?? p.seat];
+      if (this.tuckSpell && !item.copy) owner.library.splice(Math.min(6, owner.library.length), 0, item.card);
       else if (this.shuffleSpell && !item.copy) {
-        p.library.push(item.card);
-        this.rng.shuffle(p.library);
-        this.say(`${item.card.name} is shuffled into ${p.name}'s library.`);
+        owner.library.push(item.card);
+        this.rng.shuffle(owner.library);
+        this.say(`${item.card.name} is shuffled into ${owner.name}'s library.`);
       }
       else if (!(yield* this.spellAfterResolving(p, item))) this.leaveStack(p, item);
       this.tuckSpell = false;
@@ -4015,6 +4024,7 @@ export class Game {
     if (perm.owner === p.seat) perm.owner = undefined;
     perm.sick = true;
     perm.attacking = null;
+    perm.attackingPw = undefined;
     perm.blocking = null;
     perm.blocked = false;
     p.battlefield.push(perm);
@@ -4186,6 +4196,11 @@ export class Game {
       controller.battlefield.splice(controller.battlefield.indexOf(src), 1);
       const owner = this.players[src.owner ?? src.seat];
       const toBack = !src.front;
+      // A token (a copy of the Saga, say) that is exiled ceases to exist and can't come back (rules 111.7, 704.5d).
+      if (src.token) {
+        this.say(`${src.card.name} is exiled (a token can't return).`);
+        return;
+      }
       this.say(`${src.card.name} is exiled and returns ${toBack ? `transformed into ${front.back.name}` : `as ${front.name}`}.`);
       if (toBack) yield* this.enterTransformed(owner, front, false, src.isCommander);
       else yield* this.enter(owner, front, src.isCommander, 0, null);
@@ -4589,7 +4604,7 @@ export class Game {
     // A merged permanent returns as its separate cards (rule 721.3); a face-down or transformed one returns face up, front face first.
     const cards = perm.parts
       ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-      : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.card, commander: perm.isCommander }];
+      : [{ card: realCard(perm), commander: perm.isCommander }];
     for (const { card, commander } of cards) {
       this.say(`${card.name} is exiled and returns to the battlefield under ${owner.name}'s control.`);
       yield* this.enter(owner, card, commander, 0, null);
@@ -4643,7 +4658,7 @@ export class Game {
     if (extra && this.kindsInGame.has('copyDoubler')) for (let i = this.statics(p, 'copyDoubler'); i > 0; i--) yield* this.copyItem(p, orig, false, nonlegendary);
   }
 
-  private putLand(p: PlayerState, card: SimCard, info: LandInfo, forceTapped = false) {
+  private putLand(p: PlayerState, card: SimCard, info: LandInfo, forceTapped = false): Perm {
     const perm = this.makePerm(p, card, false);
     perm.landInfo = info;
     perm.tapped = forceTapped || info.tapped;
@@ -4665,6 +4680,7 @@ export class Game {
     }
     for (let i = 0; i < times; i++) this.fire(p, 'landfall');
     if (this.anyCurse) this.curseEvent(p, 'landEnters');
+    return perm;
   }
 
   /** The last rules-bending cards (cardRulesFinal.ts): Kill Switch, Despotic Scepter, Reconnaissance, Berserker's Frenzy, The Ozolith, Knowledge Pool, Alter Reality ... */
@@ -4712,6 +4728,7 @@ export class Game {
         // Reconnaissance (rule 506.4): it stops being an attacking creature, and untaps.
         if (!aimed || aimed.seat !== p.seat || aimed.attacking === null) break;
         aimed.attacking = null;
+        aimed.attackingPw = undefined;
         for (const b of this.allPerms()) if (b.blocking === aimed.id) b.blocking = null;
         aimed.tapped = false;
         this.say(`${aimed.card.name} is removed from combat and untaps.`);
@@ -4864,10 +4881,12 @@ export class Game {
     const idx = this.stack.indexOf(item);
     if (!pool || idx === -1) return;
     this.stack.splice(idx, 1);
-    p.exile.push(item.card);
+    // The spell goes to its owner's exile: it may have come from someone else's (rule 400.3).
+    const spellOwner = item.owner ?? p.seat;
+    this.players[spellOwner].exile.push(item.card);
     const pile = (this.exiledWith.get(pool.id) ?? []).filter((r) => this.players[r.owner].exile.includes(r.card));
     const options = pile.filter((r) => !r.card.isLand && r.card !== item.card);
-    pile.push({ card: item.card, owner: p.seat });
+    pile.push({ card: item.card, owner: spellOwner });
     this.exiledWith.set(pool.id, pile);
     this.say(`${item.card.name} is exiled into ${pool.card.name}.`);
     if (!options.length) return;
@@ -5740,6 +5759,12 @@ export class Game {
         break;
       }
       case 'approach': {
+        // A copy wasn't cast, so it neither wins nor counts as the first cast (rule 707.10).
+        if (this.resolving?.copy) {
+          p.life += 7;
+          this.say(`${p.name} gains 7 life (a copy of Approach of the Second Sun).`);
+          break;
+        }
         const times = (this.approachCasts.get(p.seat) ?? 0) + 1;
         this.approachCasts.set(p.seat, times);
         if (times >= 2) {
@@ -6053,7 +6078,7 @@ export class Game {
         // ≈ The permanent stays on the battlefield as a Treasure: here it leaves without dying and its controller gets a Treasure.
         const holder = this.players[q.seat];
         const owner = this.players[q.owner ?? q.seat];
-        const card = q.unlocked ?? q.printed ?? q.uncrewed ?? q.card;
+        const card = realCard(q);
         this.removePerms([q], 'exile');
         const i = owner.exile.lastIndexOf(card);
         if (i !== -1 && !q.isCommander) owner.graveyard.push(...owner.exile.splice(i, 1));
@@ -6952,6 +6977,11 @@ export class Game {
       const flying = perm.card.isCreature && this.hasKw(perm, 'flying');
       controller.battlefield.splice(idx, 1);
       controller.revoltTurn = this.turnNumber;
+      // Hideaway: the face-down card stays in exile when its permanent leaves (rule 702.75a).
+      if (perm.hidden) {
+        owner.exile.push(perm.hidden);
+        perm.hidden = undefined;
+      }
       // Rest in Peace, Dauthi Voidwalker: exiled instead, so nothing "dies". An unearthed creature is exiled if it would leave.
       let dest = to;
       if (dest === 'graveyard' && this.exiledInstead(owner)) dest = 'exile';
@@ -6974,7 +7004,7 @@ export class Game {
       if (owner.alive) {
         const cards = perm.parts
           ? perm.parts.flatMap((x) => (x.real ? [{ card: x.real, commander: x.commander }] : []))
-          : perm.token ? [] : [{ card: perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.uncrewed ?? perm.impendingCard ?? perm.card, commander: perm.isCommander }];
+          : perm.token ? [] : [{ card: realCard(perm), commander: perm.isCommander }];
         for (const { card, commander } of cards) {
           if (dest === 'library') {
             // Shuffled into the library. A commander may go to the command zone instead (rule 903.9b); it always does here.
@@ -7549,6 +7579,7 @@ export class Game {
           perm.lockedBy = -2;
           perm.card = this.dormantCard(real);
           perm.attacking = null;
+          perm.attackingPw = undefined;
           perm.blocking = null;
           this.anyLocked = true;
         } else if (creature && perm.lockedBy === -2) {
@@ -8055,14 +8086,26 @@ export class Game {
         perm.seat = owner.seat;
         perm.owner = undefined;
         perm.attacking = null;
+        perm.attackingPw = undefined;
         perm.blocking = null;
         owner.battlefield.push(perm);
       }
       p.battlefield = [];
       for (const q of this.players) if (q !== p) q.battlefield = q.battlefield.filter((perm) => perm.owner !== p.seat);
-      for (let i = this.stack.length - 1; i >= 0; i--) if (this.stack[i].controller === p.seat) this.stack.splice(i, 1);
+      for (let i = this.stack.length - 1; i >= 0; i--) if (this.stack[i].controller === p.seat || this.stack[i].owner === p.seat) this.stack.splice(i, 1);
+      // Their cards in every other zone leave the game too, so nobody can play them from exile or bring them back (rule 800.4a).
+      p.hand = [];
+      p.library = [];
+      p.graveyard = [];
+      p.exile = [];
+      p.held = undefined;
+      p.mayPlay = undefined;
+      for (const q of this.players) if (q.mayPlay?.length) q.mayPlay = q.mayPlay.filter((m) => m.owner !== p.seat);
       this.pending = this.pending.filter((t) => t.controller !== p.seat);
-      for (const perm of this.allPerms()) if (perm.attacking === p.seat) perm.attacking = null;
+      for (const perm of this.allPerms()) if (perm.attacking === p.seat) {
+        perm.attacking = null;
+        perm.attackingPw = undefined;
+      }
     }
     if (this.monarch !== null && !this.players[this.monarch].alive) this.monarch = this.alivePlayers()[0]?.seat ?? null;
     if (this.alivePlayers().length <= 1) this.over = true;
@@ -8231,21 +8274,26 @@ export class Game {
       const allowed = others.length ? others : free;
       if (allowed.length) goaded.push({ attacker: c.id, defenders: allowed });
     }
-    const declared = yield* ask<AttackDeclaration[] | null>({ kind: 'attackers', seat: p.seat, candidates: candidates.map((c) => c.id), defenders, ...(goaded.length ? { goaded } : {}) });
+    // Planeswalkers opponents control can be attacked too (rule 508.1b); their controller is the defending player.
+    const planeswalkers = this.opponents(p).flatMap((o) => o.battlefield.filter((q) => q.card.isPlaneswalker && !q.emblem && q.loyalty !== undefined)).map((q) => q.id);
+    const declared = yield* ask<AttackDeclaration[] | null>({ kind: 'attackers', seat: p.seat, candidates: candidates.map((c) => c.id), defenders, ...(goaded.length ? { goaded } : {}), ...(planeswalkers.length ? { planeswalkers } : {}) });
     const attacking: Perm[] = [];
     // Crawlspace: no more than so many creatures can attack a player each combat (rule 508.1c).
     const room = (seat: number) => this.attackLimit(seat) - attacking.filter((a) => a.attacking === seat).length;
-    const declare = (perm: Perm, seat: number) => {
+    const declare = (perm: Perm, seat: number, pw?: number) => {
       perm.attacking = seat;
+      perm.attackingPw = pw;
       perm.attackedTurn = this.turnNumber;
       if (!this.hasKw(perm, 'vigilance')) perm.tapped = true;
       attacking.push(perm);
     };
     for (const d of Array.isArray(declared) ? declared : []) {
       const perm = candidates.find((c) => c.id === d?.attacker);
-      if (!perm || perm.attacking !== null || !defenders.includes(d.defender)) continue;
+      const pw = d?.planeswalker !== undefined && planeswalkers.includes(d.planeswalker) ? this.findPerm(d.planeswalker) : null;
+      const chosen = pw ? pw.seat : d?.defender;
+      if (!perm || perm.attacking !== null || chosen === undefined || !defenders.includes(chosen)) continue;
       const must = goaded.find((gd) => gd.attacker === perm.id);
-      const seat = must && !must.defenders.includes(d.defender) ? must.defenders[0] : d.defender;
+      const seat = must && !must.defenders.includes(chosen) ? must.defenders[0] : chosen;
       if (!this.canAttack(perm, seat) || room(seat) <= 0) continue;
       // Propaganda: pay for each creature attacking that player, or it stays home (rule 508.1h).
       const tax = this.attackTax(this.players[seat], perm);
@@ -8255,7 +8303,7 @@ export class Game {
         this.commitPayment(p, plan);
         this.say(`${p.name} pays ${tax} for ${perm.card.name} to attack ${this.players[seat].name}.`);
       }
-      declare(perm, seat);
+      declare(perm, seat, pw && pw.seat === seat ? pw.id : undefined);
     }
     for (const must of goaded) {
       const perm = candidates.find((c) => c.id === must.attacker);
@@ -8278,8 +8326,11 @@ export class Game {
     // No attackers: skip straight to the end of combat (rule 508.8).
     if (!attacking.length) return;
     for (const seat of defenders) {
-      const group = attacking.filter((a) => a.attacking === seat);
-      if (group.length) this.say(`${p.name} attacks ${this.players[seat].name} with ${group.map((a) => `${a.card.name} ${this.power(a)}/${this.toughness(a)}`).join(', ')}.`);
+      for (const pw of [undefined, ...planeswalkers]) {
+        const group = attacking.filter((a) => a.attacking === seat && a.attackingPw === pw);
+        const what = pw === undefined ? this.players[seat].name : `${this.findPerm(pw)?.card.name} (${this.players[seat].name})`;
+        if (group.length) this.say(`${p.name} attacks ${what} with ${group.map((a) => `${a.card.name} ${this.power(a)}/${this.toughness(a)}`).join(', ')}.`);
+      }
     }
     // Vengeful Ancestor: each goaded creature that attacks deals damage to its controller.
     if (this.kindsInGame.has('goadPunish')) {
@@ -8440,6 +8491,7 @@ export class Game {
     for (const q of this.players) {
       for (const perm of q.battlefield) {
         perm.attacking = null;
+        perm.attackingPw = undefined;
         perm.blocked = false;
         perm.blocking = null;
       }
@@ -8619,6 +8671,7 @@ export class Game {
     perm.damage = 0;
     perm.deathtouched = false;
     perm.attacking = null;
+    perm.attackingPw = undefined;
     perm.blocking = null;
     this.say(`${perm.card.name} regenerates.`);
     return true;
@@ -8762,8 +8815,15 @@ export class Game {
       const power = this.power(a);
       if (power <= 0) continue;
       const defender = this.players[a.attacking!];
+      // Attacking a planeswalker: its damage goes to the planeswalker, or nowhere if it has left (rule 506.4).
+      const pw = a.attackingPw !== undefined ? this.findPerm(a.attackingPw) : undefined;
+      const hit = (amount: number) => {
+        if (a.attackingPw === undefined) {
+          if (defender.alive) toPlayer.push({ from: a, to: defender, amount });
+        } else if (pw && pw.seat === defender.seat) toPerm.push({ from: a, to: pw, amount });
+      };
       if (!a.blocked) {
-        if (defender.alive) toPlayer.push({ from: a, to: defender, amount: power });
+        hit(power);
         continue;
       }
       const blockers = this.blockersOf(a);
@@ -8771,7 +8831,7 @@ export class Game {
       const trample = this.hasKw(a, 'trample') || this.cursedBy(defender, 'hospitality').length > 0;
       if (!blockers.length) {
         // Blocked, but the blockers are gone: no damage unless it has trample (rule 702.19e).
-        if (trample && defender.alive) toPlayer.push({ from: a, to: defender, amount: power });
+        if (trample) hit(power);
         continue;
       }
       // Lethal damage to each blocker in turn; trample sends the rest to the player (702.19b).
@@ -8784,7 +8844,7 @@ export class Game {
         left -= dealt;
       }
       if (left > 0) {
-        if (trample && defender.alive) toPlayer.push({ from: a, to: defender, amount: left });
+        if (trample) hit(left);
         else toPerm.push({ from: a, to: blockers[0], amount: left });
       }
     }
@@ -8840,6 +8900,15 @@ export class Game {
     for (const d of [...toPerm, ...toPlayer]) if (this.hasKw(d.from, 'lifelink')) linked.set(d.from, (linked.get(d.from) ?? 0) + d.amount);
     for (const d of toPerm) {
       // Wither and infect: damage to creatures as -1/-1 counters (rules 702.80, 702.90).
+      // Damage to a planeswalker removes that many loyalty counters (rule 120.3c).
+      if (d.to.card.isPlaneswalker && d.to.loyalty !== undefined) {
+        d.to.loyalty = Math.max(0, d.to.loyalty - d.amount);
+        this.say(`${d.from.card.name} deals ${d.amount} damage to ${d.to.card.name} (loyalty ${d.to.loyalty}).`);
+        if (!d.to.card.isCreature) {
+          this.noteDamaged(d.from.seat, d.to, d.amount);
+          continue;
+        }
+      }
       if (this.hasKw(d.from, 'wither') || this.hasKw(d.from, 'infect')) this.minusCounters(d.to, d.amount, this.players[d.from.seat]);
       else d.to.damage += d.amount;
       if (this.hasKw(d.from, 'deathtouch')) d.to.deathtouched = true;
@@ -8873,12 +8942,12 @@ export class Game {
       }
       hitPlayer.add(d.from);
       if (this.monarch === d.to.seat && p.alive) this.setMonarch(p);
-      // Curse of Hospitality: the top card of their library, for the attacker to play this turn (kept when it is a land or cheap enough to cast).
+      // Curse of Hospitality: the top card of their library is exiled, and the attacker may play it this turn. It stays its owner's card (rule 108.3).
       for (let i = this.cursedBy(d.to, 'hospitality').length; i > 0 && d.to.library.length; i--) {
         const card = d.to.library.shift()!;
-        const usable = card.isLand ? p.landsPlayed === 0 : card.cmc <= this.availableMana(p) + 1;
-        (usable ? p.hand : d.to.exile).push(card);
-        this.say(`${d.to.name} exiles ${card.name} (Curse of Hospitality)${usable ? `; ${p.name} takes it` : ''}.`);
+        d.to.exile.push(card);
+        this.grantPlay(p, card, d.to, { until: 'turn', source: 'Curse of Hospitality' });
+        this.say(`${d.to.name} exiles ${card.name} (Curse of Hospitality); ${p.name} may play it this turn.`);
       }
     }
     for (const [d, life] of before) this.say(`${d.name} takes ${life - d.life} (life ${d.life}).`);
@@ -9206,6 +9275,11 @@ const LOCKED = new Map<string, WeakMap<SimCard, SimCard>>();
 /** Cards with types added (Enchanted Evening, Encroaching Mycosynth): the version for each set of added types, and back to the card. */
 const TYPED = new WeakMap<SimCard, Map<string, SimCard>>();
 const TYPED_BASE = new WeakMap<SimCard, SimCard>();
+
+/** The card as printed, without types an Enchanted Evening-style effect added on the battlefield (those end as it leaves, rule 611.3a). */
+function printedCard(card: SimCard): SimCard {
+  return TYPED_BASE.get(card) ?? card;
+}
 function typedCard(base: SimCard, types: ('artifact' | 'enchantment')[]): SimCard {
   const add = types.filter((t) => !(t === 'artifact' ? base.isArtifact : base.isEnchantment)).sort();
   if (!add.length) return base;
@@ -9551,9 +9625,12 @@ function tokenCard(power: number, toughness: number, keywords: string[], subtype
   return card;
 }
 
-/** The card a permanent really is, whatever it is copying or wearing (what goes to the graveyard). */
+/**
+ * The card a permanent really is, whatever it is copying or wearing (what goes to the graveyard). The physical card
+ * comes first (face-down, front face, a Clone's own card), then what an effect has turned it into (a lockdown Aura).
+ */
 function realCard(perm: Perm): SimCard {
-  return perm.unlocked ?? perm.faceDown ?? perm.front ?? perm.printed ?? perm.copiedUntilEot ?? perm.uncrewed ?? perm.card;
+  return printedCard(perm.faceDown ?? perm.front ?? perm.printed ?? perm.unlocked ?? perm.copiedUntilEot ?? perm.uncrewed ?? perm.impendingCard ?? perm.card);
 }
 
 /** A trigger about a permanent on the battlefield (the creature that entered). */
