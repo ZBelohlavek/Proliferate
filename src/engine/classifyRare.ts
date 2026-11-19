@@ -132,10 +132,9 @@ export function recogniseRare(line: string, out: Found[], card: { isPermanent: b
   if (/you draw a card for each opponent who drew a card this way/.test(line)) return push({ kind: 'draw', n: 3 }, 'Draw a card for each opponent (they draw one each)');
   if ((m = line.match(/^discover (\d+)/))) return push({ kind: 'draw', n: 1 }, `Discover ${m[1]} (≈ a free spell)`);
   if (/^put any number of permanent cards from among them onto the battlefield and the rest into your hand/.test(line)) {
-    push({ kind: 'digPermanent' }, 'Permanents from the top five onto the battlefield (≈ one)');
-    return push({ kind: 'draw', n: 2 }, 'The rest into your hand (≈ draw 2)');
+    return push({ kind: 'digPermanent', among: 5, permanents: { xLimit: false, rest: 'hand' } }, 'Every permanent card among the top five onto the battlefield, the rest into your hand');
   }
-  if (/^you may put any number of permanent cards with mana value x or less from among them onto the battlefield/.test(line)) return push({ kind: 'digPermanent' }, 'Permanents from the top X onto the battlefield (≈ one)');
+  if (/^you may put any number of permanent cards with mana value x or less from among them onto the battlefield/.test(line)) return push({ kind: 'digPermanent', among: -1, permanents: { xLimit: true, rest: 'graveyard' } }, 'Every permanent card with mana value X or less among the top X onto the battlefield, the rest into your graveyard');
   if (/^you may put a land card from among them onto the battlefield tapped/.test(line)) return push({ kind: 'ramp', lands: 1, toHand: 0, tapped: true }, 'A land from the top four onto the battlefield tapped', 0.7);
   if (/^if it's a land card, you may put it onto the battlefield tapped/.test(line)) return push({ kind: 'ramp', lands: 1, toHand: 0, tapped: true }, 'Top card onto the battlefield if it is a land', 0.4);
   if (/^each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20/.test(line)) return push({ kind: 'mill', n: 7, who: 'opponents' }, 'Each opponent exiles about 7 cards from the top (≈ mill 7)');

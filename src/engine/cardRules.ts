@@ -21,6 +21,8 @@
 // plays it, approximations included (said in `why`).
 
 import type { Effect, SimCard } from './types';
+import { LAND_RULES } from './cardRulesLands';
+import { LATE_RULES } from './cardRulesLate';
 
 export interface CardRule {
   text?: string;
@@ -173,6 +175,9 @@ export const CARD_RULES: Record<string, CardRule> = {
     notes: ['Return all creatures attacking you to their owners\' hands'],
     why: 'Only creatures attacking you: in multiplayer the bot casts it when it is attacked.',
   },
+  // Lands, and the leftovers of the mechanic groups (cardRulesLands.ts, cardRulesLate.ts).
+  ...LAND_RULES,
+  ...LATE_RULES,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */

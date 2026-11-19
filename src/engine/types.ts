@@ -168,7 +168,9 @@ export type EffectBody =
    */
   | { kind: 'mana'; amount: number; colors: Mana[] | 'any'; energy?: number; charge?: 'tap' | 'grow' | 'spend'; /** A land that taps for one mana for each artifact you control, less one it costs (Uthros, Titanic Godcore). */ perArtifact?: boolean
       /** The amount is a count instead (see classifyCounting.ts): enchantments you control (Sanctum Weaver) or the source's power (Vivi Ornitier). */
-      count?: 'enchantments' | 'power' | 'colors';
+      count?: 'enchantments' | 'power' | 'colors' | /** Creatures you control of the source's chosen type (Three Tree City). */ 'chosenType' | /** Your devotion to your best color (Nykthos). */ 'devotion';
+      /** "{2}, {T}: Add ...": generic mana paid from your other sources first. Kept as the net gain, used only when it beats the source's plain mana (Three Tree City, Nykthos). */
+      net?: number;
       /** Corrupted: this ability works only while an opponent has three or more poison counters (Glistening Sphere). */
       corrupted?: boolean;
       /** "{0}: Add ...", usable once each turn during your own turn, without tapping (Vivi Ornitier). */
@@ -205,9 +207,16 @@ export type EffectBody =
   /** Myr Battlesphere: tap X untapped creatures of this type you control; the source gets +X/+0 and deals X damage to the player it attacks. */
   | { kind: 'tapAllies'; subtype: string }
   /** ritual: mana from a spell or a sacrificed creature, not Treasure tokens, so token doublers don't touch it. */
-  | { kind: 'treasure'; n: number; ritual?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean; /** One mana for each creature you control that shares a creature type with the one that entered (Mana Echoes). */ shareType?: boolean }
+  | { kind: 'treasure'; n: number; ritual?: boolean; /** One more {U} for each untapped Island you control (High Tide). */ islands?: boolean; /** One mana for each charge counter on the source (Black Market). */ byCharge?: boolean; /** One mana for each creature you control that shares a creature type with the one that entered (Mana Echoes). */ shareType?: boolean }
   | { kind: 'extraLand' }
-  | { kind: 'draw'; n: number }
+  /**
+   * count: the number drawn is counted as it resolves, and `n` is only the reader's estimate: the greatest power or
+   * toughness among your creatures (Rishkar's Expertise, Last March of the Ents), your hand size plus one (Sea Gate
+   * Restoration) or your devotion to red (Clive). discardHand: you discard your hand first (Clive).
+   */
+  | { kind: 'draw'; n: number; count?: 'greatestPower' | 'greatestToughness' | 'handPlusOne' | 'redDevotion'; discardHand?: boolean }
+  /** Each player discards their hand, then draws `n` cards, or as many as the most anyone discarded ('max': Windfall, Jace's Archivist). */
+  | { kind: 'wheelAll'; n: number | 'max' }
   /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
   | { kind: 'exchangeLife' }
   /** anyTarget: damage that can also be aimed at a player ("any target"). */
@@ -300,7 +309,9 @@ export type EffectBody =
   /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
   | { kind: 'toughnessMatters'; defenders: boolean; /** Only your creatures. */ yours?: boolean }
   /** Reveal from the top of your library until a nonland permanent card, and put it onto the battlefield. */
-  | { kind: 'digPermanent'; /** Every artifact card among the top `among` cards instead (Tezzeret, Master of the Bridge). */ artifacts?: boolean; among?: number }
+  | { kind: 'digPermanent'; /** Every artifact card among the top `among` cards instead (Tezzeret, Master of the Bridge). */ artifacts?: boolean; among?: number;
+      /** Every permanent card among the top `among` cards (-1: X) onto the battlefield, with mana value X or less if `xLimit`; the rest go to `rest` (Genesis Ultimatum, Genesis Wave). */
+      permanents?: { xLimit: boolean; rest: 'hand' | 'graveyard' } }
   /** Target player separates their permanents into two piles and sacrifices one (Liliana of the Veil): about half of them. */
   | { kind: 'sacrificeHalf' }
   /** Cast a card from your graveyard without paying its mana cost (Vadrok). */
@@ -458,7 +469,7 @@ export type EffectBody =
   /** Destroy all lands, or all nonbasic lands; with `replace` each player may fetch a basic land for each (From the Ashes). */
   | { kind: 'landWipe'; nonbasic: boolean; replace?: boolean }
   /** Each player (or each opponent) sacrifices `n` lands, or all but `keep` of them (Keldon Firebombers). */
-  | { kind: 'landSac'; n: number; who: 'each' | 'opponents'; keep?: number }
+  | { kind: 'landSac'; n: number; /** 'you': you sacrifice them (Lotus Field). */ who: 'each' | 'opponents' | 'you'; keep?: number }
   /** Damage to each player for each nonbasic land they control (Price of Progress: 2, Sunspine Lynx: 1). */
   | { kind: 'nonbasicBurn'; per: number }
   /** Dingus Egg: whenever a land goes to a graveyard from the battlefield, its controller takes this much damage. */

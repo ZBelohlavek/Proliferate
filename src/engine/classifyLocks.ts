@@ -188,7 +188,7 @@ function becomes(what: Extract<EffectBody, { kind: 'becomeCreature' }>['what'], 
   return { body: { kind: 'becomeCreature', what, ...(size !== undefined ? { size } : {}), ...(keywords.length ? { keywords } : {}), until }, note: `${label[what]} ${body}${after}${kw} ${end}` };
 }
 
-const KEYWORDS = ['flying', 'haste', 'trample', 'menace', 'deathtouch', 'vigilance', 'lifelink'];
+const KEYWORDS = ['flying', 'haste', 'trample', 'menace', 'deathtouch', 'vigilance', 'lifelink', 'infect'];
 function keywordsIn(text: string): string[] {
   return KEYWORDS.filter((k) => new RegExp(`\\b${k}\\b`).test(text));
 }
