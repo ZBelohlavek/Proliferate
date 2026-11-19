@@ -21,6 +21,7 @@
 // plays it, approximations included (said in `why`).
 
 import type { Effect, SimCard } from './types';
+import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
 
 export interface CardRule {
   text?: string;
@@ -173,6 +174,9 @@ export const CARD_RULES: Record<string, CardRule> = {
     notes: ['Return all creatures attacking you to their owners\' hands'],
     why: 'Only creatures attacking you: in multiplayer the bot casts it when it is attacked.',
   },
+
+  // --- One-off cards, G to O (cardRulesGtoO.ts) ----------------------------------------------
+  ...CARD_RULES_G_TO_O,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */
