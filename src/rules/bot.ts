@@ -2147,27 +2147,31 @@ export class Bot implements Agent {
         }
       }
     }
-    return this.atPlaneswalkers(g, out, planeswalkers);
+    return this.atPlaneswalkers(g, p, out, planeswalkers);
   }
 
   /**
    * Send attackers at opponents' planeswalkers (rule 508.1b) when that is worth more than the damage to the player:
    * creatures nothing can block, enough of them to finish the planeswalker, unless the attack on its controller is lethal.
+   * Our own battles too: defeating a Siege casts its back face (rule 310.11b). Other players' battles are left alone.
    */
-  private atPlaneswalkers(g: Game, out: AttackDeclaration[], planeswalkers: number[]): AttackDeclaration[] {
-    const pws = planeswalkers.map((id) => g.findPerm(id)).filter((q): q is Perm => !!q && (q.loyalty ?? 0) > 0)
-      .sort((a, b) => b.card.value - a.card.value || b.loyalty! - a.loyalty!);
+  private atPlaneswalkers(g: Game, p: PlayerState, out: AttackDeclaration[], planeswalkers: number[]): AttackDeclaration[] {
+    const left = (q: Perm) => (q.card.isBattle ? q.defense ?? 0 : q.loyalty ?? 0);
+    const pws = planeswalkers.map((id) => g.findPerm(id)).filter((q): q is Perm => !!q && left(q) > 0 && (!q.card.isBattle || q.seat === p.seat))
+      .sort((a, b) => b.card.value - a.card.value || left(b) - left(a));
     for (const pw of pws) {
-      const o = g.players[pw.seat];
+      const seat = g.defenderOf(pw);
+      if (seat === undefined) continue;
+      const o = g.players[seat];
       const toPlayer = out.filter((d) => d.defender === o.seat && d.planeswalker === undefined);
       const damage = toPlayer.reduce((n, d) => n + hitDamage(g, g.findPerm(d.attacker)!), 0);
       if (damage >= o.life) continue;
       const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped);
       const free = toPlayer.map((d) => g.findPerm(d.attacker)!).filter((a) => !blockers.some((b) => g.canBlock(b, a))).sort((a, b) => g.power(a) - g.power(b));
-      let need = pw.loyalty!;
+      let need = left(pw);
       const picked: Perm[] = [];
       // The smallest creatures that together finish it.
-      const one = free.find((a) => g.power(a) >= pw.loyalty!);
+      const one = free.find((a) => g.power(a) >= left(pw));
       if (one) {
         picked.push(one);
         need = 0;
@@ -2256,6 +2260,31 @@ export class Bot implements Agent {
       chumps.forEach(take);
     }
 
+    // 5. Protect our planeswalkers, and battles we protect: chump the biggest attackers on one that would fall,
+    // with creatures worth less than it. A battle we protect is worth less to us than our own planeswalker.
+    const guarded = new Map<number, Perm[]>();
+    for (const a of attackers) if (a.attackingPw !== undefined) guarded.set(a.attackingPw, [...(guarded.get(a.attackingPw) ?? []), a]);
+    for (const [id, on] of guarded) {
+      const target = g.findPerm(id);
+      if (!target) continue;
+      const left = target.card.isBattle ? target.defense ?? 0 : target.loyalty ?? 0;
+      const worth = target.card.isBattle ? 2 : Math.max(3, target.card.value);
+      const damage = () => on.reduce((s, a) => {
+        const bs = blocks.get(a);
+        if (!bs) return s + g.power(a);
+        return s + (g.hasKw(a, 'trample') ? Math.max(0, g.power(a) - bs.reduce((t, b) => t + g.toughness(b), 0)) : 0);
+      }, 0);
+      for (const a of [...on].sort((x, y) => g.power(y) - g.power(x))) {
+        if (damage() < left) break;
+        if (blocks.has(a)) continue;
+        const need = g.hasKw(a, 'menace') ? 2 : 1;
+        const chumps = available.filter((b) => canBlock(b, a) && threat(g, b) < worth).sort((x, y) => threat(g, x) - threat(g, y)).slice(0, need);
+        if (chumps.length < need) continue;
+        blocks.set(a, chumps);
+        chumps.forEach(take);
+      }
+    }
+
     const out: BlockDeclaration[] = [];
     for (const [a, bs] of blocks) for (const b of bs) out.push({ blocker: b.id, attacker: a.id });
     return out;
@@ -2281,6 +2310,24 @@ export class Bot implements Agent {
     const perm = (i: number) => g.findPerm(d.options[i].permId ?? null);
 
     switch (d.reason) {
+      case 'protector': {
+        // The opponent least able to block for it: our creatures defeat it sooner.
+        const opps = g.opponents(p);
+        const defense = (i: number) => {
+          const o = opps[i];
+          return o ? o.battlefield.filter((b) => b.card.isCreature).reduce((s, b) => s + g.power(b) + g.toughness(b), 0) : 0;
+        };
+        return top((i) => -defense(i), 1);
+      }
+      case 'legend': {
+        // Keep the one that matters most: the commander, a real card over a token, counters, untapped and ready.
+        const score = (i: number) => {
+          const q = perm(i);
+          if (!q) return -Infinity;
+          return (q.isCommander ? 100 : 0) + (q.token ? -20 : 0) + q.counters * 2 + (q.loyalty ?? 0) * 2 + (q.tapped ? -3 : 0) + (q.sick ? -1 : 0) - q.damage + threat(g, q);
+        };
+        return top(score, 1);
+      }
       case 'station': {
         // The choice doesn't name the Spacecraft; any of ours with room left picks the same driver.
         const host = p.battlefield.find((q) => g.stationRoom(q));

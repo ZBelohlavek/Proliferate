@@ -961,6 +961,9 @@ export interface SimCard {
   entersWithX?: boolean;
   /** Planeswalkers: loyalty counters it enters with. */
   loyalty?: number;
+  /** Battles (rule 310): the defense counters it enters with. */
+  isBattle?: boolean;
+  defense?: number;
   /** Doesn't untap during its controller's untap step (Basalt Monolith, Mana Vault). */
   noUntap?: boolean;
   /** Free to cast while you control a commander (Fierce Guardianship, Deadly Rollick). */

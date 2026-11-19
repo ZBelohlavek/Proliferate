@@ -53,6 +53,8 @@ export interface RawCard {
   layout?: string;
   /** Printed loyalty of a planeswalker. */
   loyalty?: string | number | null;
+  /** Printed defense of a battle. */
+  defense?: string | number | null;
   back?: { name: string; types: string[]; subTypes: string[]; text: string; superTypes?: string[]; power?: string | null; toughness?: string | null; loyalty?: string | number | null; /** Rooms: the other door's mana cost. */ manaCost?: string } | null;
   imageUrl?: string;
 }
@@ -1510,6 +1512,14 @@ export function classifyCard(raw: RawCard): SimCard {
     // Importers that don't report loyalty: it is usually close to the mana value.
     card.loyalty = Number.isNaN(printed) ? Math.max(3, Math.min(raw.cmc, 6)) : printed;
     card.notes.unshift(`Planeswalker, loyalty ${card.loyalty}`);
+  }
+  if (types.includes('battle')) {
+    card.isBattle = true;
+    const printed = parseInt(String(raw.defense ?? ''), 10);
+    // Importers that don't report defense: Sieges' defense is close to their mana value.
+    card.defense = Number.isNaN(printed) ? Math.max(3, Math.min(raw.cmc, 7)) : printed;
+    card.notes.unshift(`Battle, defense ${card.defense}${card.back ? `: defeat it to cast ${card.back.name}` : ''}`);
+    card.modeled = true;
   }
   if (!isLand && isPermanent && /^~ enters tapped\.?$/m.test(text)) {
     card.entersTapped = true;

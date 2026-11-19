@@ -505,7 +505,7 @@ function Prompt({ g, d, menu, x, setX, setMenu, answer, bind, attacks, setAttack
         const t = attackTarget(g, to);
         return { attacker, defender: t.defender, ...(t.planeswalker !== undefined ? { planeswalker: t.planeswalker } : {}) };
       });
-      // Players, then the planeswalkers they control (a planeswalker is chosen as -(id + 1)).
+      // Players, then planeswalkers and battles (chosen as -(id + 1)).
       const choices = [...d.defenders, ...(d.planeswalkers ?? []).map((id) => -(id + 1))];
       return (
         <div className="prompt-row">
@@ -610,11 +610,16 @@ function GameOver({ g, onRestart, onQuit }: { g: Game; onRestart: () => void; on
   );
 }
 
-/** What an attack choice in the attackers prompt means: a player's seat, or a planeswalker stored as -(id + 1). */
+/** What an attack choice in the attackers prompt means: a player's seat, or a planeswalker or battle stored as -(id + 1). */
 function attackTarget(g: Game, v: number): { defender: number; planeswalker?: number; label: string } {
   if (v >= 0) return { defender: v, label: shortName(g.players[v]) };
   const pw = g.findPerm(-v - 1);
   if (!pw) return { defender: 0, label: 'planeswalker' };
+  // A battle is defended by its protector (rule 506.2).
+  if (pw.card.isBattle) {
+    const by = pw.protector ?? pw.seat;
+    return { defender: by, planeswalker: pw.id, label: `${pw.card.name} (battle, ${pw.defense ?? 0} defense, protected by ${shortName(g.players[by])})` };
+  }
   return { defender: pw.seat, planeswalker: pw.id, label: `${pw.card.name} (${pw.loyalty ?? 0} loyalty, ${shortName(g.players[pw.seat])})` };
 }
 
@@ -841,6 +846,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
     perm.suspected && "Suspected: menace, can't block",
     perm.counters > 0 && `${perm.counters} +1/+1 counter${perm.counters > 1 ? 's' : ''}`,
     perm.charge && `${perm.charge} ${(perm.printed ?? card).counterName ?? 'charge'} counter${perm.charge > 1 ? 's' : ''}`,
+    perm.loyalty !== undefined && card.isPlaneswalker && `Loyalty ${perm.loyalty}`,
+    perm.defense !== undefined && `Battle: defense ${perm.defense}${perm.protector !== undefined ? `, protected by ${shortName(g.players[perm.protector])}` : ''}`,
     perm.fogged && 'Combat damage to and from it is prevented this turn',
     perm.lore && `Lore ${perm.lore} of ${card.saga}`,
     perm.hours && `${perm.hours} hour counter${perm.hours > 1 ? 's' : ''}`,
@@ -862,6 +869,8 @@ function PermCard({ g, perm, bind, state, badge }: { g: Game; perm: Perm; bind: 
       {perm.counters > 0 && <span className="count-badge">+{perm.counters}</span>}
       {!!perm.charge && <span className="count-badge" title={`${(perm.printed ?? card).counterName ?? 'Charge'} counters`}>⚙{perm.charge}</span>}
       {!!perm.hours && <span className="count-badge" title="Hour counters">🕛{perm.hours}</span>}
+      {perm.loyalty !== undefined && card.isPlaneswalker && <span className="count-badge" title="Loyalty">◆{perm.loyalty}</span>}
+      {perm.defense !== undefined && <span className="count-badge" title={`Defense${perm.protector !== undefined ? `, protected by ${shortName(g.players[perm.protector])}` : ''}`}>⛨{perm.defense}</span>}
       {!card.modeled && <span className="nofx-badge" title="The engine can't interpret this card's text yet, so it has no effect in this game.">no effect</span>}
       {(badge || host || attached.length > 0) && <span className="zone-badge">{badge ?? (host ? `on ${host.card.name}` : `⚙ ${attached.join(', ')}`)}</span>}
     </div>
