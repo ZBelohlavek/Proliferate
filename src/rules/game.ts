@@ -725,6 +725,15 @@ export class Game {
    * `p` sacrificed a permanent: "whenever you sacrifice" abilities trigger, and so do their opponents'
    * "whenever an opponent sacrifices a nontoken permanent" (Tergrid, It That Betrays), about that card.
    */
+  /** "Whenever an artifact (enchantment) is put into a graveyard from the battlefield": `card` null is a Treasure token. */
+  private permDied(card: SimCard | null, seat: number) {
+    for (const q of this.alivePlayers()) for (const w of q.battlefield) {
+      const hits = w.card.effects.filter((e) => e.when === 'permDies' && (e.scope === 'all' || q.seat === seat)
+        && (e.castFilter === 'enchantment' ? !!card?.isEnchantment : !card || card.isArtifact));
+      if (hits.length) this.trigger(q, w.card, w.id, hits);
+    }
+  }
+
   private sacrificed(p: PlayerState, gone?: Perm) {
     this.fire(p, 'sacrifice');
     // Trail of Crumbs, Camellia: "whenever you sacrifice a Food".
@@ -2500,6 +2509,8 @@ export class Game {
       case 'poisoned': return this.opponents(p).some((o) => o.poison >= 3) ? 1 : 0;
       case 'legendaryTarget': return this.opponents(p).some((o) => o.battlefield.some((q) => q.card.isCreature && q.card.isLegendary && this.canTarget(p, q))) ? 1 : 0;
       case 'attackingTarget': return this.attackers().some((q) => q.seat !== p.seat) ? 1 : 0;
+      case 'opponentArtifacts': return Math.max(0, ...this.opponents(p).map((o) => o.battlefield.filter((q) => q.card.isArtifact).length + o.treasures));
+      case 'historicValue': return p.battlefield.filter((q) => q.card.isArtifact || q.card.isLegendary || !!q.card.saga).reduce((n, q) => n + q.card.cmc, 0);
       default: return 0;
     }
   }
@@ -2692,6 +2703,7 @@ export class Game {
         // Each Treasure is its own source (two mana with Goldspan Dragon) and is sacrificed on its own: Korvold and Juri trigger once for each.
         p.treasures -= 1;
         this.sacrificed(p);
+        if (this.kindsInGame.has('when:permDies')) this.permDied(null, p.seat);
       }
     }
     if (lands.length && this.kindsInGame.has('tapPunish')) this.landsTapped(p, lands);
@@ -3616,6 +3628,11 @@ export class Game {
     for (const o of this.opponents(p)) this.fire(o, when, x, p.seat);
   }
 
+  /** An opponent of `p` controls a static effect of this kind ("artifacts your opponents control enter tapped": `artifacts`). */
+  private opponentStatic(p: PlayerState, kind: 'oppEnterTapped', artifacts = false): boolean {
+    return this.opponents(p).some((o) => o.battlefield.some((q) => q.card.effects.some((e) => e.kind === kind && e.when === 'static' && (!artifacts || e.artifacts))));
+  }
+
   private flushDepth = 0;
 
   /**
@@ -3684,6 +3701,9 @@ export class Game {
   /** "Whenever a creature enters under your control" (Panharmonicon makes these trigger twice, tokens included). */
   private creatureEntered(p: PlayerState, entering: Perm) {
     if (this.anyCurse) this.curseEvent(p, 'creatureEnters');
+    // Authority of the Consuls: an opponent's creature enters tapped, and its "whenever a creature an opponent controls enters".
+    if (this.kindsInGame.has('oppEnterTapped') && this.opponentStatic(p, 'oppEnterTapped')) entering.tapped = true;
+    if (this.kindsInGame.has('when:opponentCreatureEnters')) this.fireOpponents(p, 'opponentCreatureEnters');
     if (!this.kindsInGame.has('when:creatureEnters')) return;
     const times = this.triggerTimes(p, 'permanentEnters', entering.card);
     for (const perm of p.battlefield) {
@@ -4316,6 +4336,8 @@ export class Game {
       }
     }
     if (card.entersTapped || (clone?.kind === 'clone' && clone.tapped)) perm.tapped = true;
+    // Blind Obedience: an opponent's artifacts enter tapped too (creatures are tapped as they enter, tokens included).
+    if (card.isArtifact && !card.isCreature && this.kindsInGame.has('oppEnterTapped') && this.opponentStatic(p, 'oppEnterTapped', true)) perm.tapped = true;
     // Impending: time counters, and not a creature until the last is gone (rule 702.176a).
     if (how === 'impending' && card.altCost?.impending) {
       perm.impending = card.altCost.impending * doubled;
@@ -5856,7 +5878,10 @@ export class Game {
           this.sacrificed(p, perm);
         }
         this.say(`${p.name} sacrifices ${chosen.label}.`);
-        if (chosen.permId === undefined) this.sacrificed(p);
+        if (chosen.permId === undefined) {
+          this.sacrificed(p);
+          if (this.kindsInGame.has('when:permDies')) this.permDied(null, p.seat);
+        }
         break;
       }
       case 'rollDice': {
@@ -6336,6 +6361,13 @@ export class Game {
         }
       }
     }
+    // Elesh Norn, Grand Cenobite: "creatures your opponents control get -2/-2".
+    if (this.kindsInGame.has('oppAnthem')) for (const o of this.opponents(this.players[target.seat])) for (const q of o.battlefield) for (const e of q.card.effects) {
+      if (e.kind === 'oppAnthem' && e.when === 'static') {
+        p += e.p;
+        t += e.t;
+      }
+    }
     // Curse of Death's Hold: creatures the enchanted player controls get -1/-1.
     if (this.anyCurse) for (const c of this.cursedBy(this.players[target.seat], 'shrink')) {
       p -= c.n;
@@ -6555,6 +6587,8 @@ export class Game {
       leaving.push({ perm, seat: controller.seat, dest, power });
       if (perm.landInfo && dest === 'graveyard' && controller.alive && this.kindsInGame.has('landDiesPunish')) landsDied.push(controller);
     }
+    // Disciple of the Vault, Ashiok's Reaper: an artifact or enchantment put into a graveyard from the battlefield (tokens too, rule 111.7).
+    if (this.kindsInGame.has('when:permDies')) for (const { perm, seat, dest } of leaving) if (dest === 'graveyard') this.permDied(perm.card, seat);
     // Dingus Egg: each land that went to a graveyard hurts its controller.
     for (const victim of landsDied) {
       for (const q of this.alivePlayers()) for (const egg of q.battlefield) for (const e of egg.card.effects) {

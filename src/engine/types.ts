@@ -72,6 +72,8 @@ export type Trigger =
   | 'opponentSacrifice' // an opponent sacrifices a nontoken permanent, the trigger is about that card (scope 'all': or discards a permanent card, Tergrid)
   | 'blocked' // this creature (scope 'self') or a creature you control ('any') becomes blocked (rule 509.1h)
   | 'unblocked' // this creature attacks and isn't blocked (rule 509.1h)
+  | 'opponentCreatureEnters' // a creature enters under an opponent's control (Authority of the Consuls)
+  | 'permDies' // an artifact or enchantment (castFilter) is put into a graveyard from the battlefield: yours (scope 'any') or anyone's ('all')
   | 'proliferate' // you proliferate (rule 701.34)
   | 'discard' // you discard a card (once for each card)
   | 'static'; // always on while the permanent is on the battlefield
@@ -626,6 +628,10 @@ export type EffectBody =
   | { kind: 'punishDefender'; what: 'graveyard' | 'discard'; n: number }
   /** Static: you have protection from each of your opponents (rule 702.16j, Absolute Virtue). */
   | { kind: 'playerProtection' }
+  /** "Creatures your opponents control get -2/-2" (Elesh Norn, Grand Cenobite). */
+  | { kind: 'oppAnthem'; p: number; t: number }
+  /** "Creatures your opponents control enter tapped" (Authority of the Consuls); artifacts too (Blind Obedience). */
+  | { kind: 'oppEnterTapped'; artifacts?: boolean }
   /** Static: commanders you control have these keywords (Vexilus Praetor: protection from everything). */
   | { kind: 'commanderKeywords'; keywords: string[] }
   /** Target creature you control gains protection from the color of your choice until end of turn (Mother of Runes). */
@@ -1001,7 +1007,9 @@ export interface SimCard {
   discount?: {
     per: 'artifacts' | 'creatures' | 'allCreatures' | 'graveyardCreatures' | 'graveyard'
       // See classifyCounting.ts.
-      | 'tokens' | 'subtype' | 'party' | 'graveyardTypes' | 'spellsInGraveyard' | 'diedThisTurn' | 'energyPaid' | 'bigCreature' | 'poisoned' | 'legendaryTarget' | 'attackingTarget';
+      | 'tokens' | 'subtype' | 'party' | 'graveyardTypes' | 'spellsInGraveyard' | 'diedThisTurn' | 'energyPaid' | 'bigCreature' | 'poisoned' | 'legendaryTarget' | 'attackingTarget'
+      // "Where X is the greatest number of artifacts an opponent controls" (Cavern-Hoard Dragon), "the total mana value of historic permanents you control" (Excalibur).
+      | 'opponentArtifacts' | 'historicValue';
     amount: number;
     /** per 'subtype': the creature type ("affinity for Humans", "if you control a Wizard"). */
     subtype?: string;

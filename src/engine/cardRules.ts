@@ -14,12 +14,15 @@
 // - `effects`: say exactly what the card does, replacing whatever the reader found.
 // - `add`: add effects to what the reader found.
 // - `notes`: deck-page notes for the effects given by `effects` or `add`.
+// - `keywords`: the card's keywords, replacing the card data's list (which can name abilities
+//   it only sometimes has, like Celebr-8000's dice results).
 // - `why`: always. What the rule does differently from the oracle text and why, citing the
 //   Comprehensive Rules or Scryfall rulings where they decide it. Shown on the deck page.
 //
 // A card with an entry counts as fully read: the entry is the statement of how this engine
 // plays it, approximations included (said in `why`).
 
+import { CARD_RULES_A_TO_F } from './cardRulesAtoF';
 import { RULES_P_TO_Z } from './cardRulesPZ';
 import type { Effect, SimCard } from './types';
 import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
@@ -29,6 +32,7 @@ export interface CardRule {
   effects?: Effect[];
   add?: Effect[];
   notes?: string[];
+  keywords?: string[];
   why: string;
 }
 
@@ -178,6 +182,8 @@ export const CARD_RULES: Record<string, CardRule> = {
 
   // --- One-off cards, G to O (cardRulesGtoO.ts) ----------------------------------------------
   ...CARD_RULES_G_TO_O,
+  // --- One-off cards, A to F (cardRulesAtoF.ts) ----------------------------------------------
+  ...CARD_RULES_A_TO_F,
 
   // --- One-off cards named P to Z (cardRulesPZ.ts) --------------------------------------
   ...RULES_P_TO_Z,

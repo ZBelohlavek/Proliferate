@@ -22,6 +22,7 @@ import type {
   TriggerScope,
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
+import { recogniseBoard } from './classifyBoard';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { LOCK_STATIC_KINDS, lockLineHandled, lockTrigger, lockValue, recogniseLocks } from './classifyLocks';
 import { EMBLEM_COST, EMBLEM_STATIC_KINDS, emblemCost, emblemTrigger, recogniseEmblems, rewriteEmblems } from './classifyEmblems';
@@ -299,6 +300,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount, oneSided: true }, note: `One-sided sweeper ${amount}` });
   } else if (/return all (nonland permanents|creatures)( [^.]*)? to their owners'? hands/.test(line)) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'bounce', amount: 0, oneSided: /you don't control|opponents control/.test(line) }, note: 'Mass bounce' });
+  } else if (/^creatures your opponents control get -\d+\/-\d+\.?$/.test(line)) {
+    // Elesh Norn: a lasting -2/-2, not a one-time sweeper (classifyBoard.ts).
+    recogniseBoard(line, out);
   } else if ((m = line.match(/(all creatures|each other creature|each creature|creatures your opponents control|creatures you don't control) gets? -(\d+|x)\/-(\d+|x)/))) {
     out.push({ body: { kind: 'wipe', target: 'creatures', mode: 'damage', amount: num(m[3], 2), oneSided: /opponents|don't/.test(m[1]), shrink: 'temp' }, note: 'Shrink sweeper' });
   } else if ((m = line.match(new RegExp(`put ${NUM} -1\\/-1 counters? on each creature( target player controls| your opponents control| you don't control)?`)))) {
@@ -1134,6 +1138,7 @@ export function classifyCard(raw: RawCard): SimCard {
   // Cards with their own rule may be read from rewritten text (see cardRules.ts).
   const rule = CARD_RULES[raw.name.split(' // ')[0]];
   if (rule?.text !== undefined) raw = { ...raw, text: rule.text };
+  if (rule?.keywords) raw = { ...raw, keywords: rule.keywords };
   const types = raw.types.map((t) => t.toLowerCase());
   const supers = raw.superTypes.map((t) => t.toLowerCase());
   const isLand = types.includes('land');
@@ -1804,7 +1809,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'handSize', 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'damageMod', 'noPrevent', 'lifeRule', 'deathExile', 'shuffleInstead', 'triggerDoubler', 'copyOpponentEtb', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'handSize', 'combatRule', 'goadPunish', 'playerProtection', 'oppAnthem', 'oppEnterTapped', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS, ...LOCK_STATIC_KINDS, 'playerHexproof', 'damagedPunish', 'bountyDestroy', 'proliferateTwice'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1881,6 +1886,8 @@ function describeTrigger(ctx: LineContext): string {
     case 'fullyUnlock': return 'When you fully unlock a Room: ';
     case 'sacrificeFood': return 'When you sacrifice a Food: ';
     case 'postcombatMain': return 'Each postcombat main phase: ';
+    case 'opponentCreatureEnters': return "When an opponent's creature enters: ";
+    case 'permDies': return `When ${ctx.scope === 'all' ? 'an' : 'your'} ${ctx.castFilter ?? 'artifact'} goes to a graveyard: `;
     default: return '';
   }
 }
@@ -1910,6 +1917,8 @@ export function cardValue(card: SimCard): number {
       case 'ramp': v += 2.5 * Math.max(e.lands, 1) + e.toHand; break;
       case 'mana': v += 2.5 * (e.count || e.fromCounters ? 2 : e.corrupted || e.sacArtifact ? 1 : e.amount); break;
       case 'costReduction': v += 2 * e.amount; break;
+      case 'oppAnthem': v -= 4 * (e.p + e.t); break;
+      case 'oppEnterTapped': v += 2; break;
       case 'draw': v += 1.5 * Math.max(e.n, 2) * mult; break;
       case 'removal': v += 3 * mult; break;
       case 'wipe': v += 4; break;
