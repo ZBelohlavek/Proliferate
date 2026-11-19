@@ -23,6 +23,7 @@ import type {
 } from './types';
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
+import { combatLineHandled, combatTrigger, describeProtection, protectionKeywords, recogniseCombat, tribeOf } from './classifyCombat';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
@@ -108,6 +109,9 @@ export function normaliseText(name: string, text: string): string {
     t = t.split(full).join('~');
     const short = full.split(',')[0];
     if (short.length > 3 && short !== full) t = t.split(short).join('~');
+    // "Medomai the Ageless", "Oketra the True": the text calls it by its first name.
+    const first = full.match(/^([a-z]{4,}) the [a-z]/)?.[1];
+    if (first) t = t.replace(new RegExp(`\\b${first}\\b(?!')`, 'g'), '~');
   }
   t = t.replace(
     /\bthis (creature|artifact|enchantment|land|permanent|planeswalker|spell|card|vehicle|equipment|aura|token|saga|class)\b/g,
@@ -146,10 +150,17 @@ function parseKeywords(raw: RawCard, text: string): string[] {
   // Keyword lines at the start of the oracle text, e.g. "flying, vigilance".
   for (const line of text.split('\n')) {
     const parts = line.split(/,\s*/).map((p) => p.trim().replace(/ \{.*$/, ''));
-    if (parts.every((p) => KNOWN_KEYWORDS.includes(p) || p.startsWith('ward'))) {
-      for (const p of parts) kws.add(p.startsWith('ward') ? 'ward' : p);
+    // Protection and "hexproof from" (rule 702.16, 702.11d) can sit in a keyword line: see classifyCombat.ts.
+    if (parts.every((p) => KNOWN_KEYWORDS.includes(p) || p.startsWith('ward') || protectionKeywords(p))) {
+      for (const p of parts) {
+        const pro = protectionKeywords(p);
+        if (pro) for (const k of pro) kws.add(k);
+        else kws.add(p.startsWith('ward') ? 'ward' : p);
+      }
     }
   }
+  // "Hexproof from each color" isn't hexproof (rule 702.11d), though card data lists the keyword.
+  if (kws.has('hexproof') && /hexproof from/.test(text) && !/(^|, )hexproof(,|$)/m.test(text)) kws.delete('hexproof');
   if (/~ can't be blocked(\.|$)/m.test(text)) kws.add('unblockable');
   if (/^~ can't block\.?$/m.test(text)) kws.add("can't block");
   if (/^~ can't be countered/m.test(text)) kws.add('uncounterable');
@@ -332,9 +343,11 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const p = num(m[3], 1);
     const t = num(m[4], 1);
     const kws = KNOWN_KEYWORDS.filter((k) => (m![6] ?? '').includes(k));
+    // "1/1 white Soldier", "2/2 black Zombie Knight": the creature types, for tribal anthems and triggers.
+    const subtypes = m[5].trim().split(/\s+/).filter((w) => w && !/^(white|blue|black|red|green|colorless|and|artifact|enchantment|legendary|snow|tapped|attacking|\w+-colored)$/.test(w));
     // Jace's Illusions: "when this token becomes the target of a spell, sacrifice it".
     const fragile = /~ becomes the target of a spell( or ability)?, sacrifice it/.test(fullLine) ? (/target of a spell or ability/.test(fullLine) ? 'any' as const : 'spell' as const) : undefined;
-    out.push({ body: { kind: 'tokens', n, power: p === -1 ? 3 : p, toughness: t === -1 ? 3 : t, keywords: kws, ...(fragile ? { fragile } : {}) }, note: `Make ${n === -1 ? 'X' : n}× ${p === -1 ? 'X' : p}/${t === -1 ? 'X' : t} token${n === 1 ? '' : 's'}${fragile ? ' (sacrificed when targeted)' : ''}` });
+    out.push({ body: { kind: 'tokens', n, power: p === -1 ? 3 : p, toughness: t === -1 ? 3 : t, keywords: kws, ...(fragile ? { fragile } : {}), ...(subtypes.length ? { subtypes } : {}) }, note: `Make ${n === -1 ? 'X' : n}× ${p === -1 ? 'X' : p}/${t === -1 ? 'X' : t} token${n === 1 ? '' : 's'}${fragile ? ' (sacrificed when targeted)' : ''}` });
   } else if ((m = line.match(new RegExp(`create ${NUM} (tapped )?tokens? (?:that'?s a copy|that are copies) of ~`)))) {
     // Skyclave Relic, Jace, Mirror Mage, Jace, Cunning Castaway: token copies of the permanent itself.
     const n = num(m[1], 1);
@@ -360,7 +373,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
 
   if ((m = line.match(/\bincubate (\d+|x)/))) {
     const n = m[1] === 'x' ? 3 : parseInt(m[1], 10);
-    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [] }, note: `Incubate ${n} (≈ a ${n}/${n} Phyrexian token)` });
+    out.push({ body: { kind: 'tokens', n: 1, power: n, toughness: n, keywords: [], subtypes: ['phyrexian'] }, note: `Incubate ${n} (≈ a ${n}/${n} Phyrexian token)` });
   }
   if ((m = line.match(/\bamass (?:\w+ )?(\d+)/))) {
     const n = parseInt(m[1], 10);
@@ -369,17 +382,20 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   if (/create (a|an|one|two) food tokens?/.test(line) && !/treasure/.test(line)) out.push({ body: { kind: 'gainLife', n: 3 }, note: 'Food (≈ gain 3 life)' });
 
   // --- Anthems / overruns / pumps -------------------------------------------
-  m = /^if x is/.test(line) ? null : line.match(/(other )?(creatures|creature tokens|\w+ creatures|\w+s) you control (?:of the chosen type )?(?:gain [a-z, ]+ and )?get \+(\d+|x)\/\+(\d+|x)/);
+  m = /^if x is/.test(line) ? null : line.match(/(other )?(creatures|creature tokens|\w+ creatures|\w+s) you control (of the chosen type )?(?:gain [a-z, ]+ and )?get \+(\d+|x)\/\+(\d+|x)/);
   if (m) {
-    const p = num(m[3], 1);
-    const t = num(m[4], 1);
+    const p = num(m[4], 1);
+    const t = num(m[5], 1);
+    // "Other Elves you control", "creatures you control of the chosen type": one creature type only (see classifyCombat.ts).
+    const plural = m[2].replace(/^other /, '');
+    const subtype = m[3] ? 'chosen' : /^\w+s$/.test(plural) && plural !== 'creatures' ? tribeOf(plural) ?? undefined : undefined;
     if (/until end of turn/.test(line)) {
       const scale = p !== -1 ? undefined : /x is the number of creatures/.test(line) ? 'creatures' as const : /greatest power/.test(line) ? 'power' as const : undefined;
       const size = scale === 'creatures' ? 'your creature count' : scale === 'power' ? 'your greatest power' : p === -1 ? 'X' : String(p);
       out.push({ body: { kind: 'overrun', p, t, trample: /trample/.test(line), ...(scale ? { scale } : {}) }, note: scale || p === -1 ? `Team pump +X/+X this turn (X = ${size})` : `Team pump +${p}/+${t} this turn` });
     } else if (card.isPermanent) {
       const other = !!m[1] || /^other /.test(m[2]);
-      out.push({ body: { kind: 'anthem', p, t, ...(other ? { other } : {}) }, note: `Anthem +${p}/+${t}${other ? ' (other creatures)' : ''}` });
+      out.push({ body: { kind: 'anthem', p, t, ...(other ? { other } : {}), ...(subtype ? { subtype } : {}) }, note: `Anthem +${p}/+${t}${other ? ' (other creatures)' : ''}${subtype ? ` (${subtype === 'chosen' ? 'the chosen creature type' : `${subtype}s`} only)` : ''}` });
     }
   } else if (card.isPermanent && (m = line.match(/^(other )?(?:(enchantment|artifact) creatures|(artifact|enchantment)s|creatures|(?!spells|lands|permanents|planeswalkers|tokens|nontoken)[a-z]+s) you control have ([a-z, ]+)\.?$/)) && KNOWN_KEYWORDS.some((k) => m![4].includes(k))) {
     // Tribal wording ("Horrors you control have menace") is treated as all your creatures, as elsewhere.
@@ -387,7 +403,9 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     const kws = KNOWN_KEYWORDS.filter((k) => m![4].includes(k));
     const only = (m[2] ?? m[3]) as 'enchantment' | 'artifact' | undefined;
     const other = !!m[1];
-    out.push({ body: { kind: 'anthem', p: 0, t: 0, keywords: kws, ...(only ? { only } : {}), ...(other ? { other } : {}) }, note: `Your ${other ? 'other ' : ''}${only ? `${only} ` : ''}creatures have ${kws.join(', ')}` });
+    const word = line.match(/^(?:other )?([a-z]+) you control have/)?.[1];
+    const subtype = !only && word && word !== 'creatures' ? tribeOf(word) ?? undefined : undefined;
+    out.push({ body: { kind: 'anthem', p: 0, t: 0, keywords: kws, ...(only ? { only } : {}), ...(other ? { other } : {}), ...(subtype ? { subtype } : {}) }, note: `Your ${other ? 'other ' : ''}${only ? `${only} ` : ''}${subtype ? `${subtype}s` : 'creatures'} have ${kws.join(', ')}` });
   } else if (card.isPermanent && (m = line.match(/^creatures you control but don't own get \+(\d+)\/\+(\d+)/))) {
     out.push({ body: { kind: 'anthem', p: num(m[1], 1), t: num(m[2], 1), only: 'stolen' }, note: `Creatures you took get +${m[1]}/+${m[2]}` });
   } else if ((m = line.match(/^(?:creatures you control|all creatures) gain ([a-z, ]+) until end of turn/)) && KNOWN_KEYWORDS.some((k) => m![1].includes(k)) && !/hexproof|indestructible/.test(m[1])) {
@@ -656,11 +674,17 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   if ((m = line.match(/^other creatures have base power and toughness (\d+)\/(\d+)/))) {
     out.push({ body: { kind: 'baseSize', p: num(m[1], 2), t: num(m[2], 2) }, note: `Other creatures are ${m[1]}/${m[2]} before bonuses` });
   }
+  // Creature types (rule 205.3): Metallic Mimic, Maskwood Nexus, Leyline of Transformation.
+  if (/^each other creature you control of the chosen type enters with an additional \+1\/\+1 counter on it/.test(line)) out.push({ body: { kind: 'enterCounters', n: 1, chosen: true }, note: 'Your other creatures of the chosen type enter with an extra +1/+1 counter' });
+  if (/^creatures you control are every creature type/.test(line)) out.push({ body: { kind: 'creatureTypes', every: true }, note: 'Your creatures are every creature type' });
+  if (/^creatures you control are the chosen type in addition to their other types/.test(line)) out.push({ body: { kind: 'creatureTypes', every: false }, note: 'Your creatures are also the chosen type' });
   if (/you get an experience counter/.test(line)) out.push({ body: { kind: 'experience' }, note: 'You get an experience counter' });
   // --- Land hate, Fogs, energy, charge counters (see classifyMechanics.ts) ------------
   recogniseMechanics(line, out, fullLine);
   // --- Counters, station and additional combats (see classifyCounters.ts) ---------
   recogniseCounters(line, out, fullLine);
+  // --- Attack and block rules, goad, suspect, protection (see classifyCombat.ts) ---
+  recogniseCombat(line, out, fullLine);
   if ((m = line.match(/(tap up to one target creature and )?put a stun counter on (?:up to one )?(?:target (nonland permanent|creature|permanent|tapped creature)|it\b)/)) && (m[2] || m[1])) {
     const tap = !!m[1];
     const tapped = m[2] === 'tapped creature';
@@ -782,6 +806,8 @@ interface LineContext {
   targetedBy?: 'you' | 'opponents';
   spellOnly?: boolean;
   perTurn?: number;
+  /** Tribal triggers: only this creature type ('chosen': the type chosen as it entered). */
+  ofType?: string;
 }
 
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
@@ -804,6 +830,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if (mech) return mech;
   const counted = counterTrigger(l);
   if (counted) return counted;
+  const fought = combatTrigger(l);
+  if (fought) return fought;
   const milled = graveyardTrigger(l);
   if (milled) return { when: milled.when, scope: milled.scope, body: milled.body, ...(milled.creature ? { castFilter: 'creature' as const } : {}) };
   if (/^whenever a land enters[^,]*, [^.]* damage to that land's controller/.test(l)) return { when: 'static', body: l };
@@ -852,7 +880,10 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^whenever a food is put into a graveyard from the battlefield,\s*(.*)$/))) return { when: 'creatureDies', scope: 'all', body: m[1] };
   if ((m = l.match(/^whenever a creature an opponent controls dies,\s*(.*)$/))) return { when: 'creatureDies', scope: 'opponents', body: m[1] };
   // Tribal deaths ("whenever a God dies"): only some creatures count.
-  if ((m = l.match(/^whenever (?:a|another) (?!creature|nontoken|token|land|permanent|player|opponent|artifact|enchantment|food)(\w+)( you control)? dies,\s*(.*)$/))) return { when: 'creatureDies', scope: m[2] ? undefined : 'all', chance: 0.4, body: m[3] };
+  if ((m = l.match(/^whenever (?:a|another) (?!creature|nontoken|token|land|permanent|player|opponent|artifact|enchantment|food)(\w+)( you control)? dies,\s*(.*)$/))) {
+    const ofType = tribeOf(m[1]);
+    return { when: 'creatureDies', scope: m[2] ? undefined : 'all', ...(ofType ? { ofType } : { chance: 0.4 }), body: m[3] };
+  }
   if ((m = l.match(/^whenever a land( you control)? enters[^,]*,\s*(.*)$/))) return { when: 'landfall', body: m[2] };
   if ((m = l.match(/^(?:when|whenever) ~ is turned face up[^,]*,\s*(.*)$/))) return { when: 'turnedFaceUp', body: m[1] };
   if ((m = l.match(/^(when|whenever) ~ (enters|is turned face up)[^,]*,\s*(.*)$/))) return { when: 'resolve', body: m[3] };
@@ -899,7 +930,14 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   }
   if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?(creatures?|tokens?)( you control)?( with \w+)? (enters?|enter)[^,]*,\s*(.*)$/))) return { when: 'creatureEnters', body: m[8], nontoken: !!m[2] || undefined, chance: m[6] ? 0.7 : undefined };
   // Tribal wording: "whenever another nontoken Dragon you control enters". Treated as any creature.
-  if ((m = l.match(/^whenever (a|another|one or more)( other)?( nontoken)? (?!artifact|enchantment|permanent|planeswalker|player|opponent|land|spell)(\w+) you control( of the chosen type)? (enters?)[^,]*,\s*(.*)$/))) return { when: 'creatureEnters', body: m[7], nontoken: !!m[3] || undefined };
+  // Tribal wording: "whenever another nontoken Dragon you control enters" only counts that creature type.
+  if ((m = l.match(/^whenever (a|another|one or more)( other)?( nontoken)? (?!artifact|enchantment|permanent|planeswalker|player|opponent|land|spell)(\w+) you control( of the chosen type)? (enters?)[^,]*,\s*(.*)$/))) {
+    const ofType = m[5] ? 'chosen' : tribeOf(m[4]) ?? undefined;
+    return { when: 'creatureEnters', body: m[7], nontoken: !!m[3] || undefined, ...(ofType ? { ofType } : {}) };
+  }
+  if ((m = l.match(/^whenever (?:a|another)( nontoken)? creature( you control)? of the chosen type (enters|dies)[^,]*,\s*(.*)$/))) {
+    return m[3] === 'dies' ? { when: 'creatureDies', scope: m[2] ? undefined : 'all', body: m[4], ofType: 'chosen', nontoken: !!m[1] || undefined } : { when: 'creatureEnters', body: m[4], ofType: 'chosen', nontoken: !!m[1] || undefined };
+  }
   if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?creatures?( you control)? (dies|die|is put into a graveyard)[^,]*,\s*(.*)$/))) {
     // "A creature you control dies" on a creature sees its own death too; "another" and "other" don't.
     const selfToo = m[1] !== 'another' && m[3] !== 'other ' || undefined;
@@ -1074,6 +1112,7 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   if (named.name) card.counterName = named.name;
+  if (/as ~ enters, choose a creature type/.test(text)) card.choosesType = true;
   if (isLand) {
     card.land = landInfo(raw, raw.producedMana, raw.colorIdentity);
     card.notes.push(`Land: ${card.land.produces === 'any' ? 'any color' : card.land.produces.join('')}${card.land.tapped ? ' (enters tapped)' : ''}`);
@@ -1411,7 +1450,7 @@ export function classifyCard(raw: RawCard): SimCard {
   const crew = !isCreature && isPermanent && text.match(/^crew (\d+)/m);
   if (crew) {
     card.crew = parseInt(crew[1], 10);
-    card.notes.unshift(`Vehicle ${card.power}/${card.toughness}${card.keywords.length ? ` — ${card.keywords.join(', ')}` : ''}, crew ${card.crew}`);
+    card.notes.unshift(`Vehicle ${card.power}/${card.toughness}${card.keywords.length ? ` — ${card.keywords.map((k) => (/^(pro|hexfrom):/.test(k) ? describeProtection(k) : k)).join(', ')}` : ''}, crew ${card.crew}`);
   }
   const stun = isPermanent && text.match(/^~ enters tapped with (\w+) stun counters? on it/m);
   if (stun) {
@@ -1510,7 +1549,9 @@ export function classifyCard(raw: RawCard): SimCard {
   }
 
   if (card.curse?.length) card.notes.unshift(`Curse (enchants a player): ${card.curse.map(describeCurse).join('; ')}`);
-  if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + keywords.join(', ') : ''}`);
+  const kwWords = keywords.map((k) => (/^(pro|hexfrom):/.test(k) ? describeProtection(k) : k));
+  if (isCreature) card.notes.unshift(`Creature ${card.power}/${card.toughness}${keywords.length ? ' — ' + kwWords.join(', ') : ''}`);
+  else if (keywords.some((k) => /^(pro|hexfrom):/.test(k)) && card.crew === undefined) card.notes.unshift(`Has ${kwWords.join(', ')}`);
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
   if (kickLine) readKicker(raw, card, kickLine, fullText);
@@ -1579,7 +1620,8 @@ function describeCurse(c: CurseAbility): string {
 /** Lines that need no effect of their own: keyword lines, attachment boilerplate, things read from the whole text. */
 function handledElsewhere(line: string, keywords: string[], isLand: boolean): boolean {
   const parts = line.split(/,\s*/).map((p) => p.trim().replace(/ \{.*$/, '').replace(/[.]$/, ''));
-  if (parts.every((p) => keywords.includes(p) || (p.startsWith('ward') && keywords.includes('ward')))) return true;
+  if (parts.every((p) => keywords.includes(p) || (p.startsWith('ward') && keywords.includes('ward')) || protectionKeywords(p)?.every((k) => keywords.includes(k)))) return true;
+  if (combatLineHandled(line)) return true;
   if (/^(enchant |equip\b|choose (one|two|one or both|one or more|up to \w+)\b)/.test(line) || /choose (one|two|one or both|one or more|up to one|up to two) —$/.test(line)) return true;
   if (/^~ can't be blocked\.?$/.test(line) && keywords.includes('unblockable')) return true;
   if (/^~ can't block\.?$/.test(line)) return true;
@@ -1626,6 +1668,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.targetedBy) effect.targetedBy = ctx.targetedBy;
   if (ctx.spellOnly) effect.spellOnly = true;
   if (ctx.perTurn) effect.perTurn = ctx.perTurn;
+  if (ctx.ofType) effect.ofType = ctx.ofType;
   if (ctx.loyalty !== undefined) effect.loyalty = ctx.loyalty;
   if (ctx.chapters) effect.chapters = ctx.chapters;
   // "You win the game" only with a counter condition the engine checks (Simic Ascendancy); the rest are in wincons.ts.
@@ -1652,7 +1695,7 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost'];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes'];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
@@ -1663,10 +1706,13 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (staticKinds.includes(effect.kind) && ctx.when !== 'static' && ctx.when !== 'resolve') return;
   if (staticKinds.includes(effect.kind)) effect.when = 'static';
   card.effects.push(effect);
+  // A second effect read from the same sentence ("can't attack or block") shares the first one's note.
+  if (!f.note) return;
   let note = describeTrigger(ctx) + f.note;
   if (effect.minRoll) note += ` (on a ${effect.minRoll}+)`;
   else if (chance) note += ` (conditional, ~${Math.round(chance * 100)}%)`;
   if (ctx.oncePerTurn) note += ' (once per turn)';
+  if (ctx.ofType) note += ` (${ctx.ofType === 'chosen' ? 'the chosen creature type' : `${ctx.ofType}s`} only)`;
   if (ctx.nth) note += ` (${['first', 'second', 'third'][ctx.nth - 1]} ${ctx.when === 'opponentDraw' ? 'card' : 'spell'} ${ctx.turn === 'own' ? 'during their own turn' : ctx.turn === 'others' ? "during an opponent's turn" : 'each turn'})`;
   card.notes.push(note);
 }
@@ -1703,6 +1749,8 @@ function describeTrigger(ctx: LineContext): string {
     case 'targeted': return `When ${ctx.scope === 'self' ? 'it' : ctx.castFilter === 'creature' ? 'a creature you control' : 'a permanent you control'} becomes the target of ${ctx.targetedBy === 'you' ? 'your' : ctx.targetedBy === 'opponents' ? "an opponent's" : 'a'} spell${ctx.spellOnly ? '' : ' or ability'}: `;
     case 'eachUpkeep': return 'Each upkeep: ';
     case 'hourTwelve': return 'At the twelfth hour counter: ';
+    case 'blocked': return ctx.scope === 'self' ? 'When it becomes blocked: ' : 'When a creature you control becomes blocked: ';
+    case 'unblocked': return 'When it attacks and isn\'t blocked: ';
     case 'countersPut': return ctx.scope === 'self' ? 'When it gets +1/+1 counters: ' : 'When your creatures get +1/+1 counters: ';
     default: return '';
   }

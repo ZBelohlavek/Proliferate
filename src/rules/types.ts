@@ -62,6 +62,10 @@ export interface Perm {
   stun?: number;
   /** Goaded by these seats, until each one's next turn (rule 701.15). */
   goadedBy?: number[];
+  /** Suspected (rule 701.60): it has menace and can't block for as long as it stays suspected. */
+  suspected?: boolean;
+  /** "As ~ enters, choose a creature type": the type chosen (Metallic Mimic, Leyline of Transformation). */
+  chosenType?: string;
   /** Sagas: lore counters (rule 714). */
   lore?: number;
   /** Classes: the level it has reached (rule 716). Its card then carries the abilities of every level so far. */
