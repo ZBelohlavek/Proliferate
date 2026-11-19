@@ -62,6 +62,10 @@ export interface Perm {
   stun?: number;
   /** Goaded by these seats, until each one's next turn (rule 701.15). */
   goadedBy?: number[];
+  /** Suspected (rule 701.60): it has menace and can't block for as long as it stays suspected. */
+  suspected?: boolean;
+  /** "As ~ enters, choose a creature type": the type chosen (Metallic Mimic, Leyline of Transformation). */
+  chosenType?: string;
   /** Sagas: lore counters (rule 714). */
   lore?: number;
   /** Classes: the level it has reached (rule 716). Its card then carries the abilities of every level so far. */
@@ -87,6 +91,19 @@ export interface Perm {
   faceDown?: SimCard;
   /** Id of the permanent whose effect gives its controller this one (Control Magic, Sower of Temptation); control ends when that permanent leaves. */
   heldBy?: number;
+  /**
+   * Taken only for a while (Act of Treason, Treasure Nabber): control goes back at the cleanup step of turn `turn` ('eot'),
+   * or at the end of seat `by`'s next turn after turn `turn` ('nextTurn').
+   */
+  borrowed?: { until: 'eot' | 'nextTurn'; by: number; turn: number };
+  /** Sacrificed or exiled at the beginning of the next end step (Kiki-Jiki's tokens, Treacherous Urge). */
+  atEnd?: 'sacrifice' | 'exile';
+  /** A copy "until end of turn" (Gogo, Mirage Mirror): what it goes back to at cleanup. */
+  copiedUntilEot?: SimCard;
+  /** Xantcha: attacks each combat if able, but never this seat (its owner). */
+  neverAttacks?: number;
+  /** Goaded by this seat for the rest of the game (Life of the Party's tokens). */
+  goadForever?: number;
   /** Taken "for as long as that player is the monarch" (Garland, Royal Kidnapper): control ends when that seat stops being the monarch. */
   heldWhileMonarch?: number;
   /** Under a lockdown Aura (Amphibian Downpour, Imprisoned in the Moon): its real card. `card` is then the vanilla version. */
@@ -200,6 +217,8 @@ export interface PlayerState {
   creatureCastTurn?: number;
   /** Madness and miracle (rules 702.35, 702.94): cards that may be cast now for that cost, until this player next passes priority. */
   windows?: { card: SimCard; how: 'madness' | 'miracle' }[];
+  /** Teach by Example, Jace Reawakened: copy the next instant or sorcery spell cast this turn, or every spell cast this turn. */
+  copyNext?: 'next' | 'turn';
   /** Cards in exile this player may play (impulse draw, theft; rule 611.2). The card sits in its owner's exile. */
   mayPlay?: MayPlay[];
   /** Turns this player has begun, to tell when "until the end of your next turn" runs out. */
@@ -305,6 +324,17 @@ export interface StackItem {
   owner?: number;
   /** Exiled instead of going anywhere else when it leaves the stack (Wrexial, Mizzix's Mastery's copies are copies). */
   exileAfter?: boolean;
+  /** Triggered abilities: the card or permanent the trigger is about (the creature that died, entered or attacked; the card an opponent sacrificed). */
+  about?: About;
+}
+
+/** What a triggered ability is about: a card that left (with the seat that owned it), or a permanent still on the battlefield. */
+export interface About {
+  card: SimCard;
+  owner: number;
+  permId?: number;
+  /** It had a -1/-1 counter on it when it died (Necroskitter). */
+  shrunk?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +380,7 @@ export interface ChoiceOption {
   permId?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost';
 export type ConfirmReason = 'mulligan' | 'commandZone';
 
 export type Decision =

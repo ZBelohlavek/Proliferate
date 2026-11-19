@@ -128,7 +128,7 @@ describe('coverage of widely played Commander cards', () => {
     expect(byName('Kaalia of the Vast').effects).toContainEqual(expect.objectContaining({ kind: 'cheat', when: 'attack' }));
     expect(byName("Yuriko, the Tiger's Shadow").effects.filter((e) => e.when === 'combatDamage').map((e) => e.kind).sort()).toEqual(['drain', 'draw']);
     expect(byName('Meren of Clan Nel Toth').effects).toContainEqual(expect.objectContaining({ kind: 'recursion', when: 'upkeep' }));
-    expect(byName('Miirym, Sentinel Wyrm').effects).toContainEqual(expect.objectContaining({ kind: 'tokens', when: 'creatureEnters', nontoken: true }));
+    expect(byName('Miirym, Sentinel Wyrm').effects).toContainEqual(expect.objectContaining({ kind: 'tokenCopy', of: 'subject', nonlegendary: true, when: 'creatureEnters', nontoken: true }));
     expect(byName("Atraxa, Praetors' Voice").effects).toContainEqual(expect.objectContaining({ kind: 'counters', proliferate: true }));
   });
 
@@ -174,7 +174,7 @@ describe('commander abilities from real decks', () => {
 
   it('keeps "it" pumps off other creatures, and makes energy steals cost energy', () => {
     const treason = card({ name: 'Act of Treason', types: ['Sorcery'], text: 'Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.' });
-    expect(treason.effects).toEqual([]);
+    expect(treason.effects).toEqual([expect.objectContaining({ kind: 'steal', until: 'eot', untap: true, haste: true })]);
     const courage = card({ name: 'Brave Herald', types: ['Enchantment'], text: 'Whenever another creature you control enters, it gains haste until end of turn.' });
     expect(courage.unread).toHaveLength(1);
     const coup = card({ name: 'Confiscation Coup', types: ['Sorcery'], text: 'Choose target artifact or creature. You get {E}{E}{E}{E}, then you may pay an amount of {E} equal to that permanent\'s mana value. If you do, gain control of it.' });

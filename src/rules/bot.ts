@@ -7,7 +7,7 @@
 
 import { Rng } from '../engine/rng';
 import type { Effect, Mana, SimCard } from '../engine/types';
-import { chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
+import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -16,7 +16,9 @@ import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect']);
+/** What a copy aimed at our own creature can carry and still help it (Ivy). */
+const KIND_TO_US = new Set(['pump', 'protect', 'counters', 'kwCounter', 'untap', 'gainLife', 'draw']);
 
 export interface BotOptions {
   /** How eagerly it attacks: about 0.6 (careful) to 1.5 (reckless). Default: random 0.8–1.3. */
@@ -158,7 +160,9 @@ function stackWorth(item: StackItem): number {
       case 'recursion': v += 2 * e.n; break;
       case 'counters': v += e.all ? 2 : 1; break;
       case 'damagePlayer': v += 0.5 * (e.n === -1 ? Math.max(item.x, 1) : e.n); break;
-      case 'wipe': case 'counter': case 'copySpell': break;
+      case 'tokenCopy': v += 3 * Math.max(e.n, 1); break;
+      case 'takeCard': case 'copyNext': v += 2; break;
+      case 'wipe': case 'counter': case 'copySpell': case 'redirect': break;
       default: v += 0.5;
     }
   }
@@ -174,6 +178,7 @@ export function etbWorth(perm: Perm): number {
     switch (e.kind) {
       case 'removal': v += 4; break;
       case 'steal': v += 6; break;
+      case 'tokenCopy': v += 3 * Math.max(e.n, 1); break;
       case 'draw': v += 1.5 * Math.max(e.n, 1); break;
       case 'tokens': v += Math.max(e.n, 1) * (e.power + e.toughness) * 0.4; break;
       case 'treasure': v += e.n; break;
@@ -274,7 +279,7 @@ export class Bot implements Agent {
       if (this.considered.has(top.id)) return pick(undefined);
       this.considered.add(top.id);
       if (top.controller === p.seat) return pick(this.copyOwn(top, actions));
-      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions));
+      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions) ?? this.redirect(g, p, top, actions));
     }
 
     const myTurn = g.activeSeat === p.seat;
@@ -322,8 +327,14 @@ export class Bot implements Agent {
       const level = actions.find((a) => a.type === 'level');
       if (level) return pick(level);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      // Before combat: haste and evasion abilities, and tapping a blocker.
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))));
+      // Before combat: haste and evasion abilities, tapping a blocker, hasty copies (Kiki-Jiki), borrowed attackers, and keeping a blocker out of the way (Zirda).
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext'))) ?? this.chooseCombatShaping(g, p, actions));
+    }
+
+    // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
+    if (!myTurn && g.step === 'beginCombat') {
+      const shape = this.chooseCombatShaping(g, p, actions);
+      if (shape) return pick(shape);
     }
 
     // An opponent's beginning of combat: tap their biggest attacker (Mind Games, Thassa, Ring of the Lucii).
@@ -343,7 +354,7 @@ export class Bot implements Agent {
       const fog = this.chooseFog(g, p, actions);
       if (fog) return pick(fog);
     }
-    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)));
+    if (g.step === 'declareBlockers') return pick(this.chooseTrick(g, p, casts) ?? this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && a.effect.kind === 'pump' && a.effect.self)) ?? this.combatProtect(g, p, actions));
 
     // The end step before our own turn: use instants and abilities with mana that would otherwise be wasted.
     if (!myTurn && g.step === 'end' && g.nextAliveSeat(g.activeSeat) === p.seat) {
@@ -547,9 +558,50 @@ export class Bot implements Agent {
     });
   }
 
+  /** How much an opponent's spell or ability on the stack hurts us through its targets: our permanents, us, or our spells. */
+  private harm(g: Game, p: PlayerState, item: StackItem): number {
+    if (item.controller === p.seat) return 0;
+    let v = 0;
+    item.effects.forEach((e, i) => {
+      const t = item.targets[i];
+      if (!t) return;
+      if (t.kind === 'perm') {
+        const q = g.findPerm(t.id);
+        if (q?.seat === p.seat && !KIND_TO_US.has(e.kind)) v += Math.max(threat(g, q), 1);
+      } else if (t.kind === 'player') {
+        if (t.seat === p.seat && !KIND_TO_US.has(e.kind)) v += e.kind === 'damagePlayer' || e.kind === 'drain' ? 0.5 * Math.max(e.n === -1 ? item.x : e.n, 1) : 1.5;
+      } else {
+        const s = g.stack.find((o) => o.id === t.id);
+        if (s?.controller === p.seat && e.kind === 'counter') v += s.card.value + stackWorth(s);
+      }
+    });
+    return v;
+  }
+
+  /** Change the target of an opponent's spell that hurts us (Deflecting Swat, Bolt Bend), or pull it onto Spellskite. */
+  private redirect(g: Game, p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
+    const hurt = this.harm(g, p, top);
+    if (hurt < 3) return undefined;
+    return actions.find((a) => {
+      const e = a.type === 'activate' ? a.effect : a.type === 'cast' && a.from !== 'alt' ? a.card.effects.find((f) => f.kind === 'redirect') : undefined;
+      if (!e || e.kind !== 'redirect' || (a.type === 'cast' && !isInstantSpeed(a.card))) return false;
+      const src = a.type === 'activate' ? g.findPerm(a.permId) : null;
+      // Spellskite only helps when what it saves is worth more than Spellskite.
+      if (e.to === 'self' && src && hurt <= threat(g, src) + 1) return false;
+      return (g.targetCandidates(p, e, src) ?? []).some((t) => t.kind === 'stack' && t.id === top.id);
+    });
+  }
+
   /** Regenerate-style "~ gains indestructible" in answer to destroy or damage removal aimed at it. */
   private selfSave(p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
     if (top.controller === p.seat) return undefined;
+    // Mother of Runes: protection from the color of a spell or ability aimed at one of our creatures.
+    const aimed = top.targets.some((t) => t?.kind === 'perm' && p.battlefield.some((q) => q.id === t.id && q.card.isCreature)) && cardColors(top.card).length > 0
+      && top.effects.some((e) => e.kind === 'removal' || e.kind === 'steal' || e.kind === 'stun' || e.kind === 'equip');
+    if (aimed) {
+      const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+      if (shield) return shield;
+    }
     return actions.find((a) => {
       if (a.type !== 'activate' || a.effect.kind !== 'pump' || !a.effect.self || !a.effect.grant?.includes('indestructible')) return false;
       return top.effects.some((e, i) => e.kind === 'removal' && (e.mode === 'destroy' || e.mode === 'damage') && top.targets[i]?.kind === 'perm' && (top.targets[i] as { id: number }).id === a.permId);
@@ -1095,9 +1147,68 @@ export class Bot implements Agent {
         case 'flashGrant': return e.when === 'loyalty';
         // Jace Reawakened: plot a cheap card to cast free later.
         case 'plotFromHand': return p.hand.some((c) => !c.isLand && c.cmc <= e.maxCmc && c.cmc >= 2);
+        // Kiki-Jiki and friends: a copy before combat (it has haste) or at the end of an opponent's turn.
+        case 'tokenCopy': {
+          if (e.of !== 'target') return true;
+          const pool = (g.targetCandidates(p, e, perm) ?? []).flatMap((t) => (t.kind === 'perm' ? [g.findPerm(t.id)] : [])).filter((q): q is Perm => !!q && !(q.card.isLegendary && q.seat === p.seat && !e.nonlegendary));
+          const worth = Math.max(0, ...pool.map((q) => threat(g, q) + etbWorth(q)));
+          return worth >= 3 && (e.haste || e.end ? g.step === 'main1' && g.activeSeat === p.seat : true);
+        }
+        // Becoming a copy of something clearly better than what it is now.
+        case 'becomeCopy':
+          return (g.targetCandidates(p, e, perm) ?? []).some((t) => t.kind === 'perm' && t.id !== perm.id && threat(g, g.findPerm(t.id)!) >= threat(g, perm) + 2);
+        // Taking something: worth it when there's something to take, and a temporary steal only before combat.
+        case 'steal':
+          if (e.until && !(g.step === 'main1' && g.activeSeat === p.seat)) return false;
+          return e.from !== 'battlefield' || (g.targetCandidates(p, e, perm) ?? []).length > 0;
+        case 'copyNext': return g.activeSeat === p.seat && g.step === 'main1' && p.hand.some((c) => c.isInstant || c.isSorcery);
         default: return false;
       }
     });
+  }
+
+  /**
+   * Abilities that shape a combat (rules 508.1c-d, 509.1b): on an opponent's turn, "creatures your opponents control attack
+   * this turn if able" when they'd mostly be sent into each other or into our blockers, or "target creature can't attack"
+   * on their biggest attacker; on our turn, "can't block" on the blocker in our way.
+   */
+  private chooseCombatShaping(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const myTurn = g.activeSeat === p.seat;
+    const active = g.players[g.activeSeat];
+    for (const a of actions) {
+      if (a.type !== 'activate') continue;
+      const e = a.effect;
+      if (e.kind === 'forceAttack' && !myTurn) {
+        const ready = g.attackCandidates(active).filter((q) => !g.mustAttack(q));
+        if (!ready.length) continue;
+        // More opponents than just us to hit, or nothing that threatens our life.
+        const power = ready.reduce((n, q) => n + hitDamage(g, q), 0);
+        if (g.opponents(active).length >= 2 || power * 2 < p.life) return a;
+      }
+      if (e.kind === 'pacify') {
+        if (!myTurn && e.attack) {
+          const big = active.battlefield.filter((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 4);
+          if (big.length) return a;
+        }
+        if (myTurn && e.block && g.step === 'main1') {
+          const mine = g.attackCandidates(p).filter((q) => g.power(q) >= 2);
+          const walls = g.opponents(p).flatMap((o) => o.battlefield).filter((q) => q.card.isCreature && !q.tapped && g.toughness(q) >= 3);
+          if (mine.length && walls.length) return a;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** Mother of Runes in a fight: protection from the color of what would kill one of our creatures (it then deals no damage to it). */
+  private combatProtect(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const shield = actions.find((a) => a.type === 'activate' && a.effect.kind === 'protectColor');
+    if (!shield) return undefined;
+    const doomed = p.battlefield.some((q) => {
+      const foes = q.attacking !== null ? g.blockersOf(q) : q.blocking !== null ? [g.findPerm(q.blocking)].filter((f): f is Perm => !!f) : [];
+      return foes.length > 0 && foes.some((f) => cardColors(f.card).length > 0) && foes.reduce((n, f) => n + g.power(f), 0) >= g.toughness(q) - q.damage && threat(g, q) >= 3;
+    });
+    return doomed ? shield : undefined;
   }
 
   /**
@@ -1231,7 +1342,17 @@ export class Bot implements Agent {
       case 'pump':
         return asTarget(this.trickTarget(g, p, d.card)) ?? asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
       case 'protect':
-        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'protectColor':
+        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q) + (q.attacking !== null || q.blocking !== null ? 3 : 0))) ?? d.candidates[0];
+      case 'suspect':
+        // An opponent's best blocker: it can't block any more, and gets goaded with Nelly Borca.
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + g.toughness(q) + (q.tapped ? -3 : 0))) ?? d.candidates[0];
+      case 'pacify': {
+        // On our turn, the blocker that stands in our way; on theirs, the attacker that would hit us hardest.
+        const theirs = perms.filter((q) => q.seat !== p.seat);
+        if (g.activeSeat === p.seat) return asTarget(bestOf(theirs.filter((q) => !q.tapped), (q) => g.toughness(q) + g.power(q))) ?? d.candidates[0];
+        return asTarget(bestOf(theirs.filter((q) => q.seat === g.activeSeat), (q) => g.power(q) + (q.tapped ? -10 : 0))) ?? d.candidates[0];
+      }
       case 'goad': {
         // The opponent's biggest creature, best of all one whose controller has plenty of other opponents to hit.
         return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat), (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0))) ?? d.candidates[0];
@@ -1249,7 +1370,26 @@ export class Bot implements Agent {
         const top = items.reduce<StackItem | null>((a, b) => (!a || stackWorth(b) > stackWorth(a) ? b : a), null);
         return top ? { kind: 'stack', id: top.id } : d.candidates[0];
       }
+      case 'redirect': {
+        // The opponent's spell that hurts us most; nothing to save, nothing to change.
+        const items = d.candidates.flatMap((t) => (t.kind === 'stack' ? g.stack.filter((s) => s.id === t.id) : []));
+        const worst = items.reduce<StackItem | null>((a, b) => (!a || this.harm(g, p, b) > this.harm(g, p, a) ? b : a), null);
+        if (worst && this.harm(g, p, worst) > 0) return { kind: 'stack', id: worst.id };
+        return d.cancellable ? null : d.candidates[0];
+      }
+      case 'tokenCopy':
+      case 'becomeCopy': {
+        // The best body to copy, but not a legend we control (the copy would die to the legend rule).
+        const legal = (q: Perm) => !(q.card.isLegendary && q.seat === p.seat && !(e.kind === 'tokenCopy' && e.nonlegendary));
+        const best = bestOf(perms, (q) => threat(g, q) + etbWorth(q) - (legal(q) ? 0 : 100));
+        // Gogo, Protean Thaumaturge: "you may" become a copy, so not of something worse than what it is now.
+        const self = e.kind === 'becomeCopy' ? p.battlefield.find((q) => q.card === d.card) : undefined;
+        if (d.cancellable && self && (!best || threat(g, best) <= threat(g, self))) return null;
+        return asTarget(best) ?? d.candidates[0];
+      }
       case 'steal': {
+        // Threaten: the biggest attacker it can send in now.
+        if (e.from === 'battlefield' && e.until) return asTarget(bestOf(perms, (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0) - (q.tapped && !e.untap ? 10 : 0))) ?? d.candidates[0];
         if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q) + (e.what === 'artifact' ? q.card.value : 0))) ?? d.candidates[0];
         // The library with the best creature in it.
         const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
@@ -1618,13 +1758,14 @@ export class Bot implements Agent {
       if (!perm) continue;
       const allowed = gd.defenders.map((s) => g.players[s]).filter((o) => o.alive);
       if (!allowed.length) continue;
-      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, hitDamage(g, perm));
+      const score = (o: PlayerState) => this.attackScore(g, o, o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, perm)), 0, g.playerProtectedFrom(o, p.seat) ? 0 : hitDamage(g, perm));
       forced.push({ attacker: perm.id, defender: allowed.reduce((a, b) => (score(b) > score(a) ? b : a)).seat });
     }
     candidateIds = candidateIds.filter((id) => !forced.some((f) => f.attacker === id));
     if (forced.length) return [...forced, ...this.attack(g, p, candidateIds, defenderSeats)];
     let candidates = candidateIds.map((id) => g.findPerm(id)).filter((q): q is Perm => q !== null && g.power(q) > 0);
-    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive);
+    // Absolute Virtue: nothing gets through to a player with protection from us, so they aren't worth attacking.
+    const opps = defenderSeats.map((s) => g.players[s]).filter((o) => o.alive && !g.playerProtectedFrom(o, p.seat));
     if (!candidates.length || !opps.length) return [];
 
     // Main target: who is most worth hitting, and can be hit.
@@ -1635,6 +1776,7 @@ export class Bot implements Agent {
       let unblockable = 0;
       let total = 0;
       for (const a of candidates) {
+        if (!g.canAttack(a, o.seat)) continue;
         total += hitDamage(g, a);
         if (!blockers.some((b) => g.canBlock(b, a))) unblockable += hitDamage(g, a);
       }
@@ -1666,9 +1808,12 @@ export class Bot implements Agent {
     const out: AttackDeclaration[] = [];
     // Attack taxes (Propaganda, Ghostly Prison) are paid per creature; one we can't pay for stays home, so send it elsewhere.
     let budget = g.availableMana(p);
+    // Crawlspace: only so many creatures can attack each player.
+    const sent = new Map<number, number>();
     for (const a of candidates) {
       for (const o of order) {
-        const tax = g.attackTax(o);
+        if (!g.canAttack(a, o.seat) || (sent.get(o.seat) ?? 0) >= g.attackLimit(o.seat)) continue;
+        const tax = g.attackTax(o, a);
         if (tax > budget) continue;
         const isMain = o === main;
         const blockers = o.battlefield.filter((b) => b.card.isCreature && !b.tapped && g.canBlock(b, a));
@@ -1682,6 +1827,7 @@ export class Bot implements Agent {
         if (!go && isMain && this.rng.chance(0.1 * this.aggression)) go = true;
         if (go) {
           out.push({ attacker: a.id, defender: o.seat });
+          sent.set(o.seat, (sent.get(o.seat) ?? 0) + 1);
           budget -= tax;
           break;
         }
@@ -1821,11 +1967,22 @@ export class Bot implements Agent {
           return p.life >= 25 ? 3 : p.life >= 12 ? 0 : -20;
         }, 1);
       }
+      case 'copySpell': {
+        // Ivy: copy it onto our own creature only when it helps that creature.
+        const item = g.stack.find((s) => s.card === d.options[0]?.card);
+        return item && item.effects.length > 0 && item.effects.every((e) => KIND_TO_US.has(e.kind)) ? [0] : [];
+      }
+      case 'payCost': {
+        // Wandering Archaic: pay to keep our good spell from being copied.
+        const item = g.stack.find((s) => s.card === d.options[0]?.card && s.controller === p.seat);
+        return item && stackWorth(item) >= 2 ? [0] : [];
+      }
       case 'sacrifice':
-        // Treasures first, then tokens and the least useful permanents; lands only when there are plenty.
+        // Treasures first, then what we only borrowed, then tokens and the least useful permanents; lands only when there are plenty.
         return top((i) => {
           const q = perm(i);
           if (!q) return d.options[i].label === 'Treasure' ? 100 : 0;
+          if (q.borrowed) return 50;
           return -threat(g, q) - (q.landInfo ? (g.landCount(p) > 7 ? 1 : 6) : 0) + (q.token ? 1 : 0);
         }, d.min);
       case 'ramp': {

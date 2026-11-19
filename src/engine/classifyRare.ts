@@ -186,8 +186,7 @@ export function recogniseRare(line: string, out: Found[], card: { isPermanent: b
   // --- Counterspells and redirection -----------------------------------------------
   if (/^counter target spell, activated ability, or triggered ability/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counterspell (also abilities)');
   if (/^counter target activated ability, triggered ability, or legendary spell/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter a legendary spell or an ability');
-  // Deflecting Swat, Misdirection, Bolt Bend: pointing removal elsewhere is about as good as countering it.
-  if (/^(?:you may )?(?:choose new targets for|change the target of) target spell(?: or ability)?(?: with a single target)?/.test(line)) return push({ kind: 'counter', target: 'noncreature' }, 'Redirect a spell (≈ counter it)');
+  // Deflecting Swat, Misdirection, Bolt Bend: real redirects now (classifyControl.ts).
   if (/^you may reveal the top card of your library\. if you do, counter that spell if it has the same mana value/.test(fullLine) && /^you may reveal/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter a spell with the same mana value as your top card', 0.2);
 
   // --- Pumps, protection, equipment ------------------------------------------------
@@ -218,7 +217,6 @@ export function recogniseRare(line: string, out: Found[], card: { isPermanent: b
   if (/^you may cast spells from your hand without paying their mana costs/.test(line)) return push({ kind: 'costReduction', amount: 9, filter: 'any' }, 'Your spells are free');
 
   // --- Copies and other odds ---------------------------------------------------------
-  if (/^copy target creature spell you control/.test(line)) return push({ kind: 'tokens', n: 1, power: 3, toughness: 3, keywords: [] }, 'Token copy of your creature spell (≈ 3/3)');
   if (/^each opponent chooses a creature card in their graveyard\. put those cards onto the battlefield under your control/.test(fullLine) && /^each opponent chooses/.test(line)) return push({ kind: 'recursion', n: 2, toBattlefield: true, what: 'artifactOrCreature', from: 'opponents' }, "Creatures from opponents' graveyards onto the battlefield under your control (≈ 2)");
   if (/^each player returns all creature cards of a type chosen this way from their graveyard to the battlefield/.test(line)) return push({ kind: 'recursion', n: 3, toBattlefield: true, what: 'artifactOrCreature' }, 'Creatures of the chosen type back to the battlefield (≈ 3 of yours)');
   if (/^each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield/.test(line)) {
