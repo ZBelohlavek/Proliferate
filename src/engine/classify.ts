@@ -24,9 +24,11 @@ import type {
 import { chargeMana, energyGateOf, MECHANIC_COST, mechanicCost, mechanicKeywords, mechanicLineHandled, mechanicTrigger, recogniseMechanics } from './classifyMechanics';
 import { recogniseRare, rareTrigger, rewriteRare } from './classifyRare';
 import { EMBLEM_COST, EMBLEM_STATIC_KINDS, emblemCost, emblemTrigger, recogniseEmblems, rewriteEmblems } from './classifyEmblems';
+import { castingBase, castingKeywords, castingLineHandled, recogniseCasting } from './classifyCasting';
 import { combatLineHandled, combatTrigger, describeProtection, protectionKeywords, recogniseCombat, tribeOf } from './classifyCombat';
 import { countingKeywords, countingLineHandled, countingMana, manaNote, countingTrigger, recogniseCounting, rewriteCounting } from './classifyCounting';
 import { chargeCondition, chargeThenCondition, counterLineHandled, counterTrigger, recogniseCounters, rewriteCounters, stationTier, tierKeywords } from './classifyCounters';
+import { controlLineHandled, controlTrigger, controlValue, recogniseControl } from './classifyControl';
 import { exileLineHandled, exileTrigger, exileValue, recogniseExile, rewriteExile } from './classifyExile';
 import { graveyardKeywords, graveyardLineHandled, graveyardTrigger, graveyardValue, recogniseGraveyard, recogniseRecursion } from './classifyGraveyard';
 
@@ -54,6 +56,7 @@ export interface RawCard {
 
 const NUMBER_WORDS: Record<string, number> = {
   a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, twenty: 20,
   x: -1, 'that many': 2, 'a number of': 2,
 };
 
@@ -64,7 +67,7 @@ function num(word: string | undefined, fallback = 1): number {
   return NUMBER_WORDS[w] ?? fallback;
 }
 
-const NUM = '(a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\\d+|that many|a number of)';
+const NUM = '(eleven|twelve|thirteen|fourteen|fifteen|twenty|a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\\d+|that many|a number of)';
 
 const BASIC_LAND_TYPES: Record<string, Mana> = {
   plains: 'W', island: 'U', swamp: 'B', mountain: 'R', forest: 'G', wastes: 'C',
@@ -188,6 +191,9 @@ function removalTargetOf(phrase: string): RemovalTarget | null {
 
 /** `line` is one sentence; `fullLine` is the whole ability, for context that spans sentences. */
 function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature: boolean }, fullLine = line): Found[] {
+  // Gaining control, copies, token replacement, changing targets (classifyControl.ts): read whole there.
+  const control = recogniseControl(line, fullLine, card);
+  if (control) return control;
   const out: Found[] = [];
   let m: RegExpMatchArray | null;
   // Playing cards from exile or the top of a library, free spells, searching (classifyExile.ts): whole abilities, read first.
@@ -739,6 +745,8 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
     // The wheel is the whole sentence: not a separate "draw seven".
     out.splice(0, out.length, { body: { kind: 'wheel', n: 7, graveyard, ...(exileSelf ? { exileSelf } : {}) }, note: `Shuffle your hand${graveyard ? ' and graveyard' : ''} into your library and draw seven${exileSelf ? ', then exile it' : ''}` });
   }
+  // --- Flash grants, hideaway, plotting (classifyCasting.ts) ------------------------
+  recogniseCasting(line, out, fullLine);
   // --- Rarer wordings nothing above read (classifyRare.ts) -----------------------
   if (!out.length) recogniseRare(line, out, card, fullLine);
 
@@ -836,6 +844,8 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if (exiled) return exiled;
   const rare = rareTrigger(l);
   if (rare) return rare;
+  const control = controlTrigger(l);
+  if (control) return control;
   // Counting effects, variable mana, tap and untap (classifyCounting.ts).
   l = rewriteCounting(l);
   const counting = countingTrigger(l);
@@ -1108,7 +1118,7 @@ export function classifyCard(raw: RawCard): SimCard {
   // Kicker, multikicker and offspring: the card is read without the extra cost paid; the kicked version is read at the end.
   const kickLine = fullText.match(KICKER_LINE);
   // Quest, oil, loot and other counters a permanent keeps on itself are read as charge counters.
-  const named = rewriteCounters(kickLine ? kickerText(fullText, false) : fullText);
+  const named = rewriteCounters(castingBase(kickLine ? kickerText(fullText, false) : fullText));
   const text = rewriteEmblems(named.text, raw.name, raw.superTypes.some((t) => t.toLowerCase() === 'legendary'));
   const keywords = parseKeywords(raw, text);
 
@@ -1592,6 +1602,8 @@ export function classifyCard(raw: RawCard): SimCard {
   else if (keywords.includes('flash')) card.notes.push('Flash');
 
   if (kickLine) readKicker(raw, card, kickLine, fullText);
+  // Foretell, suspend, plot, spree, bargain, gift and the other casting keywords (classifyCasting.ts).
+  castingKeywords(raw, fullText, card, classifyCard, parseManaCost);
   if (rule) applyCardRule(card, rule);
 
   // Rooms (rule 709.5): the other door is read on its own, and unlocked later for its mana cost.
@@ -1607,7 +1619,7 @@ export function classifyCard(raw: RawCard): SimCard {
     card.notes.push(`Room: ${b.name} is the other door (cast it, or unlock it for ${manaCost.toUpperCase()})${door.effects.length ? `: ${door.notes.filter((n) => !/^Not /.test(n)).join('; ')}` : ''}`);
     for (const u of door.unread ?? []) (card.unread ??= []).push(u);
   }
-  card.modeled = !!card.room?.door.modeled || !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station;
+  card.modeled = !!card.room?.door.modeled || !!card.kicker || isLand || (isCreature && (card.power > 0 || card.toughness > 0 || !!card.entersWithX || !!card.scales)) || card.effects.length > 0 || !!card.cycling || !!card.crew || !!card.mutate || !!card.morph || !!card.graveyard || !!card.levels?.some((l) => l.effects.length) || !!card.curse?.length || !!card.sunburst || !!card.station || !!card.casting;
   if (!card.modeled) card.notes.push('Not modeled — treated as a blank card');
   else for (const line of card.unread ?? []) card.notes.push(`Not read: "${line.length > 90 ? `${line.slice(0, 90)}…` : line}"`);
   // Notes call quest, oil and other self counters by their own name (they are read as charge counters).
@@ -1675,6 +1687,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   if (/^(enchant |equip\b|choose (one|two|one or both|one or more|up to \w+)\b)/.test(line) || /choose (one|two|one or both|one or more|up to one|up to two) —$/.test(line)) return true;
   if (/^~ can't be blocked\.?$/.test(line) && keywords.includes('unblockable')) return true;
   if (/^~ can't block\.?$/.test(line)) return true;
+  if (controlLineHandled(line)) return true;
   if (/^toxic \d+$/.test(line)) return true;
   if (/enters with (x|\w+) \+1\/\+1 counters?/.test(line)) return true;
   if (isLand && /enters tapped|^as ~ enters|^\(|^~ is every|basic land type/.test(line)) return true;
@@ -1684,7 +1697,7 @@ function handledElsewhere(line: string, keywords: string[], isLand: boolean): bo
   // Class levels, Saga boilerplate and alternative costs, read from the whole text.
   if (/^(\{[^}]+\})+: level \d+$|^evoke\b|^dash (\{[^}]+\})+|rather than pay ~'s mana cost/.test(line)) return true;
   // Text that changes nothing in this engine: deck-building rules, creature types, hidden-information permissions.
-  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line)) return true;
+  if (graveyardLineHandled(line) || mechanicLineHandled(line) || counterLineHandled(line) || exileLineHandled(line) || countingLineHandled(line) || castingLineHandled(line)) return true;
   if (/^~ is also an? [a-z, ]+\.?$|^as ~ enters, choose a number|^you can't cast permanent spells|^a deck can have|^changeling|^choose a background|^as ~ enters, choose a creature type|^as ~ enters, choose [a-z]+ or [a-z]+\.$|^as ~ enters, choose artifact, creature, enchantment, instant, or sorcery|^~ is the chosen type in addition to its other types|^(commander )?ninjutsu (\{[^}]+\})+$|^cumulative upkeep (\{[^}]+\})+$|^if you would lose unspent mana, that mana becomes \w+ instead|^you may look at the top card of your library any time|^exile ~\.?$|^devoid|^partner|^~ is all colors/.test(line)) return true;
   return false;
 }
@@ -1747,11 +1760,17 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
     };
   }
   // Static lines on a permanent only make sense for static effects.
-  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS];
+  const staticKinds = ['spellTax', 'landPunish', 'toughnessMatters', 'anthem', 'equip', 'costReduction', 'noMaxHand', 'winOnEmptyDraw', 'doubler', 'etbDoubler', 'attackTax', 'spellLimit', 'commandLock', 'graveyardHate', 'clone', 'selfKeyword', 'baseSize', 'enterCounters', 'untapAlways', 'millBoost', 'damageToMill', 'graveyardPlay', 'graveyardLock', 'drawRule', 'lifeLossMill', 'shuffleWhenTargeted', 'colorlessBoost', 'ringProtection', 'copyOnDiscard', 'foodCreatures', 'returnCurses', 'landRule', 'tapPunish', 'landDiesPunish', 'energyBoost', 'chargeWin', 'bountyPayout', 'bountyOnTarget', 'damageBonus', 'treasureBoost', 'playTop', 'freeEachTurn', 'searchRule', 'abilityDiscount', 'manaBoost', 'tokenMana', 'untapRule', 'upkeepCost', 'nabArtifacts', 'stolenDrain', 'tokenReplace', 'copyDoubler', 'givenAway', 'combatRule', 'goadPunish', 'playerProtection', 'commanderKeywords', 'creatureTypes', ...EMBLEM_STATIC_KINDS];
   // "You may play an additional land on each of your turns" is static; a one-off extra land drop is not.
   if (effect.kind === 'extraLand' && ctx.when === 'static') {
     card.effects.push(effect);
     card.notes.push('Extra land drop every turn');
+    return;
+  }
+  // Flash grants are static on a permanent (Vedalken Orrery) and last a while from a spell or loyalty ability (Borne Upon a Wind, Teferi).
+  if (ctx.when === 'static' && effect.kind === 'flashGrant') {
+    card.effects.push(effect);
+    card.notes.push(f.note);
     return;
   }
   if (ctx.when === 'static' && !staticKinds.includes(effect.kind)) return;
@@ -1782,6 +1801,7 @@ function describeTrigger(ctx: LineContext): string {
     case 'opponentDraw': return 'When an opponent draws: ';
     case 'opponentDiscard': return 'When an opponent discards: ';
     case 'opponentLoseLife': return 'When an opponent loses life: ';
+    case 'opponentSacrifice': return ctx.scope === 'all' ? 'When an opponent sacrifices or discards a permanent card: ' : 'When an opponent sacrifices a nontoken permanent: ';
     case 'ringTempts': return 'When the Ring tempts you: ';
     case 'lore': return 'When you add a lore counter to a Saga: ';
     case 'sacrifice': return 'When you sacrifice: ';
@@ -1914,7 +1934,7 @@ export function cardValue(card: SimCard): number {
       case 'tapAllies': v += 2; break;
       case 'untapRule': case 'upkeepCost': v += 0.5; break;
       case 'transform': v += card.back ? Math.max(0, card.back.value - v) * 0.5 : 0; break;
-      default: v += graveyardValue(e, mult) + exileValue(e, mult);
+      default: v += controlValue(e, mult) ?? graveyardValue(e, mult) + exileValue(e, mult);
     }
   }
   for (const c of card.curse ?? []) v += c.act === 'unbinding' || c.act === 'cruel' || c.act === 'double' ? 5 : c.act === 'misfortunes' || c.act === 'obsessionDraw' ? 1 : 2.5;

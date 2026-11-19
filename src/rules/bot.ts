@@ -17,7 +17,9 @@ import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect']);
+/** What a copy aimed at our own creature can carry and still help it (Ivy). */
+const KIND_TO_US = new Set(['pump', 'protect', 'counters', 'kwCounter', 'untap', 'gainLife', 'draw']);
 
 export interface BotOptions {
   /** How eagerly it attacks: about 0.6 (careful) to 1.5 (reckless). Default: random 0.8–1.3. */
@@ -28,6 +30,16 @@ type Removal = Extract<Effect, { kind: 'removal' }>;
 type Wipe = Extract<Effect, { kind: 'wipe' }>;
 type Pump = Extract<Effect, { kind: 'pump' }>;
 type CastAction = Extract<Action, { type: 'cast' }>;
+type HandAction = Extract<Action, { type: 'hand' }>;
+
+/** The card as this cast action would cast it: with its spree modes, kicker, emerge discount or other cost. */
+function castAs(g: Game, p: PlayerState, a: CastAction): SimCard {
+  if (a.free) return g.freeCard(a.card);
+  if (a.modes) return g.spreeCard(a.card, a.modes);
+  if (a.kick) return g.kickedCard(a.card, a.kick);
+  if (a.from === 'alt' && a.card.altCost?.emerge) return g.emergeCard(a.card, g.emergeDiscount(p, a.card));
+  return g.castCard(a.card, a.door ? 'door' : a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from, p.seat);
+}
 
 /** True if `p` controls a permanent that turns drawing from an empty library into a win (Laboratory Maniac). */
 function winsOnEmptyDraw(p: PlayerState): boolean {
@@ -149,7 +161,9 @@ function stackWorth(item: StackItem): number {
       case 'recursion': v += 2 * e.n; break;
       case 'counters': v += e.all ? 2 : 1; break;
       case 'damagePlayer': v += 0.5 * (e.n === -1 ? Math.max(item.x, 1) : e.n); break;
-      case 'wipe': case 'counter': case 'copySpell': break;
+      case 'tokenCopy': v += 3 * Math.max(e.n, 1); break;
+      case 'takeCard': case 'copyNext': v += 2; break;
+      case 'wipe': case 'counter': case 'copySpell': case 'redirect': break;
       default: v += 0.5;
     }
   }
@@ -165,6 +179,7 @@ export function etbWorth(perm: Perm): number {
     switch (e.kind) {
       case 'removal': v += 4; break;
       case 'steal': v += 6; break;
+      case 'tokenCopy': v += 3 * Math.max(e.n, 1); break;
       case 'draw': v += 1.5 * Math.max(e.n, 1); break;
       case 'tokens': v += Math.max(e.n, 1) * (e.power + e.toughness) * 0.4; break;
       case 'treasure': v += e.n; break;
@@ -256,12 +271,16 @@ export class Bot implements Agent {
     const casts = actions.filter((a): a is CastAction => a.type === 'cast');
     const top = g.stack[g.stack.length - 1];
 
+    // Madness and miracle: now or never (rules 702.35, 702.94).
+    const windowCast = this.chooseWindow(g, p, casts);
+    if (windowCast) return pick(windowCast.action, windowCast.x);
+
     // Something is on the stack: answer it or let it resolve.
     if (top) {
       if (this.considered.has(top.id)) return pick(undefined);
       this.considered.add(top.id);
       if (top.controller === p.seat) return pick(this.copyOwn(top, actions));
-      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions));
+      return pick(this.response(g, p, top, casts) ?? this.selfSave(p, top, actions) ?? this.redirect(g, p, top, actions));
     }
 
     const myTurn = g.activeSeat === p.seat;
@@ -289,6 +308,9 @@ export class Bot implements Agent {
       if (spell) return pick(spell.action, spell.x);
       const back = this.chooseGraveyard(g, p, actions);
       if (back) return pick(back);
+      // Suspend, plot and foretell with mana left over; transmute and channel when it pays.
+      const hand = this.chooseHand(g, p, actions);
+      if (hand) return pick(hand);
       // Crew a Vehicle when it hits harder than the creatures that would drive it.
       const crew = actions.find((a) => {
         if (a.type !== 'crew') return false;
@@ -309,8 +331,8 @@ export class Bot implements Agent {
       const unlock = actions.find((a) => a.type === 'unlock' && this.unlockWorth(g, p, a.permId));
       if (unlock) return pick(unlock);
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
-      // Before combat: haste and evasion abilities, tapping a blocker, and keeping a blocker out of the way (Zirda).
-      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap'))) ?? this.chooseCombatShaping(g, p, actions));
+      // Before combat: haste and evasion abilities, tapping a blocker, hasty copies (Kiki-Jiki), borrowed attackers, and keeping a blocker out of the way (Zirda).
+      return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext'))) ?? this.chooseCombatShaping(g, p, actions));
     }
 
     // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
@@ -344,7 +366,7 @@ export class Bot implements Agent {
       if (up) return pick(up);
       const spell = this.chooseSpell(g, p, casts, true);
       if (spell) return pick(spell.action, spell.x);
-      return pick(this.chooseAbility(g, p, actions) ?? this.chooseGraveyard(g, p, actions) ?? this.chooseCycle(g, p, actions));
+      return pick(this.chooseAbility(g, p, actions) ?? this.chooseGraveyard(g, p, actions) ?? this.chooseHand(g, p, actions) ?? this.chooseCycle(g, p, actions));
     }
     return pick(undefined);
   }
@@ -499,7 +521,7 @@ export class Bot implements Agent {
   /** Counter an opponent's spell, copy it, or protect a permanent it targets. */
   private response(g: Game, p: PlayerState, top: StackItem, casts: CastAction[]): Action | undefined {
     if (top.kind === 'spell') {
-      const counters = casts.filter((a) => a.card.effects.some((e) => e.kind === 'counter' && counterMatches(e.target, top.card)));
+      const counters = casts.filter((a) => castAs(g, p, a).effects.some((e) => e.kind === 'counter' && e.when === 'resolve' && counterMatches(e.target, top.card)));
       // Pay with mana when possible; a free counter costs a card, so it is kept for what really matters.
       const counter = counters.find((a) => a.from !== 'alt') ?? counters.find(() => this.urgent(g, p, top));
       if (counter && this.wantsToCounter(g, p, top)) return counter;
@@ -537,6 +559,40 @@ export class Bot implements Agent {
       const t = top.targets[i];
       const perm = t?.kind === 'perm' ? g.findPerm(t.id) : null;
       return e.kind === 'removal' && perm?.seat === p.seat && threat(g, perm) >= 9;
+    });
+  }
+
+  /** How much an opponent's spell or ability on the stack hurts us through its targets: our permanents, us, or our spells. */
+  private harm(g: Game, p: PlayerState, item: StackItem): number {
+    if (item.controller === p.seat) return 0;
+    let v = 0;
+    item.effects.forEach((e, i) => {
+      const t = item.targets[i];
+      if (!t) return;
+      if (t.kind === 'perm') {
+        const q = g.findPerm(t.id);
+        if (q?.seat === p.seat && !KIND_TO_US.has(e.kind)) v += Math.max(threat(g, q), 1);
+      } else if (t.kind === 'player') {
+        if (t.seat === p.seat && !KIND_TO_US.has(e.kind)) v += e.kind === 'damagePlayer' || e.kind === 'drain' ? 0.5 * Math.max(e.n === -1 ? item.x : e.n, 1) : 1.5;
+      } else {
+        const s = g.stack.find((o) => o.id === t.id);
+        if (s?.controller === p.seat && e.kind === 'counter') v += s.card.value + stackWorth(s);
+      }
+    });
+    return v;
+  }
+
+  /** Change the target of an opponent's spell that hurts us (Deflecting Swat, Bolt Bend), or pull it onto Spellskite. */
+  private redirect(g: Game, p: PlayerState, top: StackItem, actions: Action[]): Action | undefined {
+    const hurt = this.harm(g, p, top);
+    if (hurt < 3) return undefined;
+    return actions.find((a) => {
+      const e = a.type === 'activate' ? a.effect : a.type === 'cast' && a.from !== 'alt' ? a.card.effects.find((f) => f.kind === 'redirect') : undefined;
+      if (!e || e.kind !== 'redirect' || (a.type === 'cast' && !isInstantSpeed(a.card))) return false;
+      const src = a.type === 'activate' ? g.findPerm(a.permId) : null;
+      // Spellskite only helps when what it saves is worth more than Spellskite.
+      if (e.to === 'self' && src && hurt <= threat(g, src) + 1) return false;
+      return (g.targetCandidates(p, e, src) ?? []).some((t) => t.kind === 'stack' && t.id === top.id);
     });
   }
 
@@ -644,20 +700,30 @@ export class Bot implements Agent {
     let best: { action: CastAction; x: number } | undefined;
     let bestScore = -Infinity;
     for (const a of casts) {
+      const normal = casts.some((b) => b.card === a.card && b.from === 'hand' && !b.kick);
       if (a.from === 'alt') {
         // Alternative costs: only when the card can't be cast normally. Cards that cost a card to cast are kept for answers,
         // and evoke is only worth it for what the creature does as it enters.
         const alt = a.card.altCost!;
-        if (alt.pitch || alt.returnIslands || casts.some((b) => b.card === a.card && b.from === 'hand')) continue;
-        if (alt.evoke && !a.card.effects.some((e) => e.when === 'resolve')) continue;
+        // Prowl is its own reward (Notorious Throng's extra turn); emerge only eats a token or something small.
+        const always = alt.prowl || (alt.emerge && g.emergeFodder(p, a.card).some((q) => !q.isCommander && (q.token || q.card.value < 2.5)));
+        if (alt.pitch || alt.returnIslands || (normal && !always)) continue;
+        if ((alt.evoke || alt.warp) && !a.card.effects.some((e) => e.when === 'resolve')) continue;
+        // Blitz: a hasty attacker that draws a card when it dies, before combat.
+        if (alt.blitz && (g.step !== 'main1' || a.card.power < 2)) continue;
+        if (alt.emerge && !always) continue;
       }
-      const card = a.free ? g.freeCard(a.card) : a.kick ? g.kickedCard(a.card, a.kick) : g.castCard(a.card, a.door ? 'door' : a.faceDown ? 'faceDown' : a.mutate ? 'mutate' : a.from, p.seat);
+      // A suspend or plot card is better used that way than cast at full price early on.
+      if (!a.kick && !a.modes && a.from === 'hand' && a.card.casting && this.handFirst(g, a.card)) continue;
+      const card = castAs(g, p, a);
       const fromCommand = a.from === 'command';
       const kick = a.kick ? this.kickWorth(g, p, a.card, a.kick, a.maxX) : 0;
       if (kick === null) continue;
       // A kicked instant or sorcery that is much better (Maddening Cacophony mills half a library instead of eight):
       // hold it for the kicker until late in the game.
-      if (!a.kick && a.card.kicker && !a.card.kicker.multi && !a.card.kicker.offspring && !a.card.kicker.cost.x && (a.card.isInstant || a.card.isSorcery) && g.round < 8) continue;
+      if (!a.kick && a.card.kicker && (!a.card.kicker.as || a.card.kicker.as === 'entwine') && !a.card.kicker.multi && !a.card.kicker.offspring && !a.card.kicker.cost.x && (a.card.isInstant || a.card.isSorcery) && g.round < 8) continue;
+      // Dread Return's flashback costs three creatures: only for something much better than them.
+      if (a.from === 'graveyard' && a.card.casting?.flashbackSac && !this.flashbackSacWorth(g, p, a.card)) continue;
       // Everflowing Chalice: worth nothing without a kick.
       if (!a.kick && a.card.kicker?.charge) continue;
       // Retrace costs a land card from hand: only once there are lands to spare.
@@ -699,12 +765,117 @@ export class Bot implements Agent {
     return best;
   }
 
+  /** Madness and miracle: cast the card now if it is worth casting at all (the window closes once we pass). */
+  private chooseWindow(g: Game, p: PlayerState, casts: CastAction[]): { action: CastAction; x: number } | undefined {
+    for (const a of casts) {
+      if (a.from !== 'madness' && a.from !== 'miracle') continue;
+      const card = castAs(g, p, a);
+      const score = this.castScore(g, p, card, false, a.maxX, true);
+      if (score !== null && score > 0) return { action: a, x: a.maxX };
+    }
+    return undefined;
+  }
+
+  /**
+   * Suspend, plot, foretell, transmute or channel a card from hand. Cards with no mana cost are always suspended;
+   * otherwise only with spare mana in the second main phase (or at the end of the turn before ours, for channel).
+   */
+  private chooseHand(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const uses = actions.filter((a): a is HandAction => a.type === 'hand');
+    if (!uses.length) return undefined;
+    const myMain = g.activeSeat === p.seat && (g.step === 'main1' || g.step === 'main2');
+    const lands = g.landCount(p);
+    const missing = missingComboPieces(p);
+    let best: HandAction | undefined;
+    let bestScore = 0;
+    for (const a of uses) {
+      const c = a.card.casting!;
+      let score = 0;
+      switch (a.how) {
+        case 'suspend': {
+          // No mana cost: suspending is the only way to cast it. Otherwise when it is too dear to cast soon and the wait is short.
+          const soon = c.suspend!.n <= 4 || !!c.suspend!.onOpponentCast;
+          if (c.noCost) score = 10 + a.card.value;
+          else if (soon && a.card.cmc > lands + 1) score = 4 + a.card.value - c.suspend!.n * 0.5;
+          break;
+        }
+        case 'plot':
+          // Pay now, cast free later: with mana that would go unused this turn.
+          if (myMain && g.step === 'main2') score = 3 + a.card.value * 0.5;
+          break;
+        case 'foretell': {
+          // Worth it when the foretold version is cheaper or stronger, with mana left at the end of our turn.
+          const later = g.castCard(a.card, 'foretell');
+          const cheaper = g.effectiveCost(p, a.card) - g.effectiveCost(p, later);
+          if (myMain && g.step === 'main2' && (cheaper > 0 || !!c.foretell!.effects)) score = 2 + cheaper + (c.foretell!.effects ? 3 : 0);
+          break;
+        }
+        case 'transmute': {
+          // Find a combo piece, or a much better card of the same mana value.
+          const options = p.library.filter((l) => l.cmc === a.card.cmc);
+          if (options.some((l) => missing.has(l.name))) score = 20;
+          else if (g.round >= 4 && options.some((l) => l.value > a.card.value + 1.5)) score = 3;
+          break;
+        }
+        case 'channel': {
+          // A land is channeled only with lands to spare; the effect must be worth the card.
+          if (a.card.isLand && lands < 6) break;
+          const e = c.channel!.effects;
+          if (e.some((f) => f.kind === 'removal')) {
+            const f = e.find((x) => x.kind === 'removal')!;
+            const t = f.kind === 'removal' ? this.removalTarget(g, p, f, 0, g.targetCandidates(p, f, null) ?? []) : null;
+            score = t && t.score >= 4 ? t.score - 1 : 0;
+          } else if (e.some((f) => f.kind === 'tokens')) score = g.step === 'main1' || g.activeSeat !== p.seat ? 3 : 0;
+          else if (e.some((f) => f.kind === 'draw')) score = a.card.cmc > lands + 2 ? 2 : 0;
+          break;
+        }
+      }
+      if (score > bestScore) {
+        best = a;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  /** A card better suspended, plotted or foretold than cast from hand now. */
+  private handFirst(g: Game, card: SimCard): boolean {
+    const c = card.casting!;
+    if (c.suspend && c.suspend.n <= 2 && card.cmc >= 4) return true;
+    if (c.foretell?.effects && g.round < 10) return true;
+    return false;
+  }
+
+  /** Dread Return: three creatures for one, only when what comes back is worth more than the three of them. */
+  private flashbackSacWorth(g: Game, p: PlayerState, card: SimCard): boolean {
+    const n = card.casting!.flashbackSac!;
+    const fodder = p.battlefield.filter((q) => q.card.isCreature && !q.isCommander).sort((a, b) => threat(g, a) - threat(g, b)).slice(0, n);
+    if (fodder.length < n) return false;
+    const cost = fodder.reduce((sum, q) => sum + (q.token ? 1 : q.card.value), 0);
+    const best = Math.max(0, ...p.graveyard.filter((c) => c.isCreature && c !== card).map((c) => c.value));
+    return best > cost + 2;
+  }
+
   /**
    * What paying a spell's kicker (or offspring) `kicks` times adds to casting it, or null when it isn't worth it.
    * Kicked spells are usually strictly better, so the kicked version wins whenever the mana is there.
    */
   private kickWorth(g: Game, p: PlayerState, card: SimCard, kicks: number, maxX: number): number | null {
     const k = card.kicker!;
+    switch (k.as) {
+      case 'entwine': return 5;
+      // Buyback: the card comes back to use again.
+      case 'buyback': return 3;
+      // Cleave: the wider version is scored on its own.
+      case 'cleave': return 0;
+      // Bargain and casualty cost a permanent: only a token, a Treasure-like artifact or something small.
+      case 'bargain': return p.battlefield.some((q) => (q.card.isArtifact || q.card.isEnchantment || q.token) && !q.isCommander && (q.token || q.card.value < 2) && !q.landInfo) ? 4 : null;
+      case 'casualty': return p.battlefield.some((q) => q.card.isCreature && !q.isCommander && g.power(q) >= (k.casualty ?? 1) && (q.token || q.card.value < 3)) ? 6 : null;
+      // A gift helps an opponent: worth it for a better spell, never for an extra turn or an 8/8.
+      case 'gift': return k.gift === 'extraTurn' || k.gift === 'octopus' ? null : 1.5;
+      // Replicate: each copy needs its own use, so only one extra copy per opponent.
+      case 'replicate': return kicks < g.opponents(p).length ? kicks * 2 : null;
+    }
     if (k.offspring) {
       // A 1/1 copy: worth most when the creature does something as it enters, attacks or dies.
       const triggers = card.effects.filter((e) => e.when !== 'static' && e.when !== 'activated').length;
@@ -987,6 +1158,27 @@ export class Bot implements Agent {
         case 'transform': return isIncubator(perm.card) ? perm.counters >= 1 : !!perm.card.back && perm.card.back.value >= perm.card.value * 0.8;
         case 'hatch': return p.battlefield.some((q) => isIncubator(q.card) && q.counters >= 1);
         case 'artifactToken': return true;
+        // Hideaway lands: play the hidden card once the condition holds.
+        case 'playHidden': return !!perm.hidden && g.hiddenPlayable(p, e);
+        // Teferi's +1 (flash for sorceries until our next turn); a land sacrificed for flash isn't worth it.
+        case 'flashGrant': return e.when === 'loyalty';
+        // Jace Reawakened: plot a cheap card to cast free later.
+        case 'plotFromHand': return p.hand.some((c) => !c.isLand && c.cmc <= e.maxCmc && c.cmc >= 2);
+        // Kiki-Jiki and friends: a copy before combat (it has haste) or at the end of an opponent's turn.
+        case 'tokenCopy': {
+          if (e.of !== 'target') return true;
+          const pool = (g.targetCandidates(p, e, perm) ?? []).flatMap((t) => (t.kind === 'perm' ? [g.findPerm(t.id)] : [])).filter((q): q is Perm => !!q && !(q.card.isLegendary && q.seat === p.seat && !e.nonlegendary));
+          const worth = Math.max(0, ...pool.map((q) => threat(g, q) + etbWorth(q)));
+          return worth >= 3 && (e.haste || e.end ? g.step === 'main1' && g.activeSeat === p.seat : true);
+        }
+        // Becoming a copy of something clearly better than what it is now.
+        case 'becomeCopy':
+          return (g.targetCandidates(p, e, perm) ?? []).some((t) => t.kind === 'perm' && t.id !== perm.id && threat(g, g.findPerm(t.id)!) >= threat(g, perm) + 2);
+        // Taking something: worth it when there's something to take, and a temporary steal only before combat.
+        case 'steal':
+          if (e.until && !(g.step === 'main1' && g.activeSeat === p.seat)) return false;
+          return e.from !== 'battlefield' || (g.targetCandidates(p, e, perm) ?? []).length > 0;
+        case 'copyNext': return g.activeSeat === p.seat && g.step === 'main1' && p.hand.some((c) => c.isInstant || c.isSorcery);
         default: return false;
       }
     });
@@ -1195,7 +1387,26 @@ export class Bot implements Agent {
         const top = items.reduce<StackItem | null>((a, b) => (!a || stackWorth(b) > stackWorth(a) ? b : a), null);
         return top ? { kind: 'stack', id: top.id } : d.candidates[0];
       }
+      case 'redirect': {
+        // The opponent's spell that hurts us most; nothing to save, nothing to change.
+        const items = d.candidates.flatMap((t) => (t.kind === 'stack' ? g.stack.filter((s) => s.id === t.id) : []));
+        const worst = items.reduce<StackItem | null>((a, b) => (!a || this.harm(g, p, b) > this.harm(g, p, a) ? b : a), null);
+        if (worst && this.harm(g, p, worst) > 0) return { kind: 'stack', id: worst.id };
+        return d.cancellable ? null : d.candidates[0];
+      }
+      case 'tokenCopy':
+      case 'becomeCopy': {
+        // The best body to copy, but not a legend we control (the copy would die to the legend rule).
+        const legal = (q: Perm) => !(q.card.isLegendary && q.seat === p.seat && !(e.kind === 'tokenCopy' && e.nonlegendary));
+        const best = bestOf(perms, (q) => threat(g, q) + etbWorth(q) - (legal(q) ? 0 : 100));
+        // Gogo, Protean Thaumaturge: "you may" become a copy, so not of something worse than what it is now.
+        const self = e.kind === 'becomeCopy' ? p.battlefield.find((q) => q.card === d.card) : undefined;
+        if (d.cancellable && self && (!best || threat(g, best) <= threat(g, self))) return null;
+        return asTarget(best) ?? d.candidates[0];
+      }
       case 'steal': {
+        // Threaten: the biggest attacker it can send in now.
+        if (e.from === 'battlefield' && e.until) return asTarget(bestOf(perms, (q) => g.power(q) + (g.hasKw(q, 'flying') ? 1 : 0) - (q.tapped && !e.untap ? 10 : 0))) ?? d.candidates[0];
         if (e.from === 'battlefield') return asTarget(bestOf(perms, (q) => threat(g, q) + (e.what === 'artifact' ? q.card.value : 0))) ?? d.candidates[0];
         // The library with the best creature in it.
         const seats = d.candidates.flatMap((t) => (t.kind === 'player' ? [t.seat] : []));
@@ -1818,11 +2029,22 @@ export class Bot implements Agent {
           return p.life >= 25 ? 3 : p.life >= 12 ? 0 : -20;
         }, 1);
       }
+      case 'copySpell': {
+        // Ivy: copy it onto our own creature only when it helps that creature.
+        const item = g.stack.find((s) => s.card === d.options[0]?.card);
+        return item && item.effects.length > 0 && item.effects.every((e) => KIND_TO_US.has(e.kind)) ? [0] : [];
+      }
+      case 'payCost': {
+        // Wandering Archaic: pay to keep our good spell from being copied.
+        const item = g.stack.find((s) => s.card === d.options[0]?.card && s.controller === p.seat);
+        return item && stackWorth(item) >= 2 ? [0] : [];
+      }
       case 'sacrifice':
-        // Treasures first, then tokens and the least useful permanents; lands only when there are plenty.
+        // Treasures first, then what we only borrowed, then tokens and the least useful permanents; lands only when there are plenty.
         return top((i) => {
           const q = perm(i);
           if (!q) return d.options[i].label === 'Treasure' ? 100 : 0;
+          if (q.borrowed) return 50;
           return -threat(g, q) - (q.landInfo ? (g.landCount(p) > 7 ? 1 : 6) : 0) + (q.token ? 1 : 0);
         }, d.min);
       case 'ramp': {
@@ -1876,6 +2098,21 @@ export class Bot implements Agent {
       case 'manifest':
         // Manifest dread: a creature card can be turned face up later.
         return top((i) => (card(i).isCreature ? 10 : 0) + card(i).value, 1);
+      case 'cipher':
+        // Encode on the creature most likely to connect: evasion first, then power.
+        return top((i) => {
+          const q = perm(i);
+          if (!q) return 0;
+          return g.power(q) + (g.hasKw(q, 'flying') || g.hasKw(q, 'unblockable') ? 5 : 0) - (q.tapped ? 1 : 0);
+        }, 1);
+      case 'gift': {
+        // Give the gift to the opponent least able to use it: the one with the lowest life and smallest board.
+        const opps = g.opponents(p);
+        return top((i) => -(opps[i] ? opps[i].life + boardThreat(g, opps[i], false) * 2 : 0), 1);
+      }
+      case 'hideaway':
+        // Hide the best card: it is played for free later.
+        return top((i) => card(i).value + card(i).cmc * 0.5 - (card(i).isLand ? 3 : 0), 1);
       case 'impulse':
         // Exile the cards we would most like to play: spells we can afford, a land if we need one.
         return top((i) => this.cardScore(g, p, card(i), p.hand.filter((c) => c.isLand).length) + (card(i).isLand && g.landCount(p) < 5 ? 3 : 0), d.min);

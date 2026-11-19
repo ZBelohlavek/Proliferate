@@ -149,7 +149,6 @@ export function recogniseEmblems(line: string, out: Found[], fullLine: string, r
   if (/^counter the spell that set this off/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter that spell');
 
   // --- Mutate triggers (rule 702.140d) ----------------------------------------
-  if (/^gain control of target noncreature artifact/.test(line)) return push({ kind: 'steal', from: 'battlefield', what: 'artifact', noncreature: true }, 'Gain control of a noncreature artifact');
   if ((m = line.match(/^tap up to (x|one|two|three) target creatures?/)) && /(?:those creatures|it|that creature) (?:doesn't|don't) untap during (?:its|their) controller's next untap step/.test(fullLine)) {
     return push({ kind: 'stun', tap: true, n: m[1] === 'x' ? -1 : count(m[1], 1) }, `Tap ${m[1] === 'x' ? 'X' : m[1]} creatures; they don't untap next time`);
   }

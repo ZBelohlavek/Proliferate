@@ -92,9 +92,9 @@ describe('emblems and ultimates (rule 114)', () => {
     const tef = t.game.put(0, teferi());
     t.handlers[0] = activateOnce(() => tef, (e) => e.kind === 'extraTurn');
     t.until((g) => g.activeSeat === 1);
+    // Two extra turns for seat 0 right after this one, then seat 1's turn.
     expect(log(t, /takes an extra turn/)).toHaveLength(2);
-    // Three turns in a row for seat 0, then seat 1.
-    expect(log(t, /^— Round/).map((l) => l.includes('p0'))).toEqual([true, true, true, false]);
+    expect(t.game.turnNumber).toBe(4);
   });
 
   it('Ichormoon Gauntlet gives planeswalkers "[0]: Proliferate" and "[-12]: Take an extra turn"', () => {
@@ -277,7 +277,7 @@ describe('Saga chapters and mutate triggers', () => {
 
   it('Souvenir Snatcher takes a noncreature artifact when it mutates', () => {
     const snatcher = creature('Souvenir Snatcher', '{4}{G}', 5, 4, 4, { text: 'Mutate {5}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlying\nWhenever this creature mutates, gain control of target noncreature artifact.' });
-    expect(snatcher.effects[0]).toMatchObject({ kind: 'steal', when: 'mutates', what: 'artifact', noncreature: true });
+    expect(snatcher.effects[0]).toMatchObject({ kind: 'steal', when: 'mutates', what: 'noncreatureArtifact' });
     const t = new Table();
     const [a] = t.game.players;
     const rock = t.game.put(1, card({ name: 'Mind Stone', manaCost: '{2}', cmc: 2, types: ['Artifact'], text: '{T}: Add {C}.' }));
