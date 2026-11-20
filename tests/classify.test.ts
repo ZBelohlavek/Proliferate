@@ -138,7 +138,7 @@ describe('coverage of widely played Commander cards', () => {
     expect(kinds('Rule of Law')).toEqual(['spellLimit']);
     expect(kinds('Panharmonicon')).toEqual(['etbDoubler']);
     expect(kinds('Rest in Peace').sort()).toEqual(['exileGraveyards', 'graveyardHate']);
-    expect(byName('Rhystic Study').effects).toContainEqual(expect.objectContaining({ kind: 'draw', when: 'opponentCast', chance: 0.6 }));
+    expect(byName('Rhystic Study').effects).toContainEqual(expect.objectContaining({ kind: 'draw', when: 'opponentCast', unlessPays: 1 }));
     expect(byName('Smothering Tithe').effects).toContainEqual(expect.objectContaining({ kind: 'treasure', when: 'opponentDraw' }));
     expect(byName('Consecrated Sphinx').effects).toContainEqual(expect.objectContaining({ kind: 'draw', n: 2, when: 'opponentDraw' }));
     expect(kinds('Clone')).toEqual(['clone']);

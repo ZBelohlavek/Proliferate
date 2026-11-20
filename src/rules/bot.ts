@@ -340,7 +340,8 @@ export class Bot implements Agent {
       if (hand) return pick(hand);
       // Crew a Vehicle when it hits harder than the creatures that would drive it.
       const crew = actions.find((a) => {
-        if (a.type !== 'crew') return false;
+        // Crewed in the first main phase, to attack with it.
+        if (a.type !== 'crew' || g.step !== 'main1') return false;
         const vehicle = g.findPerm(a.permId);
         const drivers = vehicle ? g.crewFor(p, vehicle) : null;
         if (!vehicle || !drivers || vehicle.sick) return false;

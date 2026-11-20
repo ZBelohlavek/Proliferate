@@ -6,8 +6,10 @@
 // `notes` list records what we understood so users can audit their decks.
 
 import { applyCardRule, CARD_RULES } from './cardRules';
+import { readCondition } from './conditions';
 import type {
   CastFilter,
+  Cond,
   CurseAbility,
   CurseAct,
   Color,
@@ -188,7 +190,7 @@ function parseKeywords(raw: RawCard, text: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** chance: this part of the ability only happens some of the time (a condition in the same sentence). */
-type Found = { body: EffectBody; note: string; chance?: number; minRoll?: number; /** "That player" (see Effect.thatPlayer). */ thatPlayer?: boolean; /** "If it had no counters on it". */ noCounters?: boolean; /** Paid in energy when it happens, or skipped ("you may pay {E}{E}. When you do"). */ energyCost?: number; chargeAtResolve?: { n: number; reset: boolean } };
+type Found = { body: EffectBody; note: string; chance?: number; ifCond?: Cond; minRoll?: number; /** "That player" (see Effect.thatPlayer). */ thatPlayer?: boolean; /** "If it had no counters on it". */ noCounters?: boolean; /** Paid in energy when it happens, or skipped ("you may pay {E}{E}. When you do"). */ energyCost?: number; chargeAtResolve?: { n: number; reset: boolean } };
 
 function removalTargetOf(phrase: string): RemovalTarget | null {
   if (/nonland permanent|target permanent|target ([\w-]+ )?permanent/.test(phrase)) return 'permanent';
@@ -340,11 +342,12 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
       }
     }
     if (!out.some((f) => f.body.kind === 'removal')) {
-      m = line.match(new RegExp(`deals? ${NUM} damage to (any target|target creature|target creature or planeswalker|target creature or player|target attacking|target tapped creature|up to one target creature)`));
+      m = line.match(new RegExp(`deals? ${NUM} damage to (any target|target creature or planeswalker|target creature or player|target creature|target attacking|target tapped creature|up to one target creature)`));
       if (m) {
         const amount = num(m[1], 2);
         const anyTarget = m[2] === 'any target' || m[2] === 'target creature or player';
-        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : 'a creature'}` });
+        const orPlaneswalker = m[2] === 'target creature or planeswalker';
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}), ...(orPlaneswalker ? { orPlaneswalker } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : orPlaneswalker ? 'a creature or planeswalker' : 'a creature'}` });
       } else if (/deals damage equal to its power to (another |any )?(target|up to one target)|fights (target|another target|up to one target) creature/.test(line)) {
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'fight', amount: 0 }, note: 'Fight / bite removal' });
       } else if ((m = line.match(/(target player|target opponent|each opponent|each player|each other player) sacrifices (a|an|two|three) (?:nontoken )?(creatures?|attacking creature|nonland permanent|permanent)/))) {
@@ -629,7 +632,7 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
   // Dispatch: only with three artifacts out.
   if (/^(?:metalcraft — )?if you control three or more artifacts, exile that creature/.test(line)) out.push({ body: { kind: 'removal', target: 'creature', mode: 'exile', amount: 0 }, note: 'Exile a creature (with metalcraft)', chance: 0.5 });
   // Herald's Horn: a creature of the chosen type on top goes to hand.
-  if (/^if it's a creature card of the chosen type, you may reveal it and put it into your hand/.test(line)) out.push({ body: { kind: 'draw', n: 1 }, note: 'Draw 1 (if the top card is the chosen type)', chance: 0.35 });
+  if (/^if it's a creature card of the chosen type, you may reveal it and put it into your hand/.test(line)) out.push({ body: { kind: 'draw', n: 1 }, note: 'Draw 1 (if the top card is a creature of the chosen type)', ifCond: { k: 'topChosen' } });
   if ((m = line.match(/^annihilator (\d+)$/))) {
     const n = parseInt(m[1], 10);
     for (let i = 0; i < n; i++) out.push({ body: { kind: 'removal', target: 'permanent', mode: 'edict', amount: 0, each: 'opponents' }, note: i ? '' : `Annihilator ${n}: opponents sacrifice ${n} permanent${n > 1 ? 's' : ''}` });
@@ -821,6 +824,11 @@ interface LineContext {
   tapCreatures?: number;
   minCmc?: number;
   chance?: number;
+  ifCond?: Cond;
+  at?: 'draw' | 'main1' | 'combat' | 'end';
+  whose?: 'each' | 'opponents';
+  /** "Unless that player pays {N}" (-1: X, the source's power). */
+  unlessPays?: number;
   oncePerTurn?: boolean;
   nontoken?: boolean;
   loyalty?: number;
@@ -969,9 +977,9 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
   if ((m = l.match(/^when you cast (this spell|~),\s*(.*)$/))) return { when: 'resolve', body: m[2] };
   // Classes: "When this Class becomes level 2" happens as that level is gained (see classifyCard).
   if ((m = l.match(/^when ~ becomes level \d+,\s*(.*)$/))) return { when: 'resolve', body: m[1] };
-  if ((m = l.match(/^at the beginning of (your|each) (upkeep|end step|precombat main phase|combat on your turn|draw step|first main phase)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3] };
-  if ((m = l.match(/^at the beginning of each (player's|opponent's) (upkeep|end step)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3] };
-  if ((m = l.match(/^at the beginning of combat on your turn[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[1] };
+  if ((m = l.match(/^at the beginning of (your|each) (upkeep|end step|precombat main phase|combat on your turn|combat|draw step|first main phase)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3], ...stepOf(m[2], m[1] === 'each' && m[2] !== 'combat on your turn' ? 'each' : undefined) };
+  if ((m = l.match(/^at the beginning of each (player's|opponent's) (upkeep|end step|draw step|precombat main phase|combat)[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[3], ...stepOf(m[2], m[1] === "player's" ? 'each' : 'opponents') };
+  if ((m = l.match(/^at the beginning of combat on your turn[^,]*,\s*(.*)$/))) return { when: 'upkeep', body: m[1], at: 'combat' };
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) deals combat damage to (a player|an opponent|one or more|a player or|a player, )[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'self', body: m[3] };
   if ((m = l.match(/^whenever (~|equipped creature|enchanted creature) deals (combat )?damage[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'self', body: m[3] };
   if ((m = l.match(/^whenever one or more (\w+ )?(?:creatures|[a-z]+s) you control( that [^,]*?)? deal combat damage to a player[^,]*,\s*(.*)$/))) return { when: 'combatDamage', scope: 'oneOrMore', body: m[3], chance: m[2] ? 0.5 : undefined };
@@ -988,8 +996,10 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
     const mv = what.match(/mana value (\d+) or greater/);
     // "While ~ is attacking" and the like: rarely true when spells are cast.
     // "A spell from exile", "a spell that shares a creature type with ~": only some of your spells.
-    const chance = / while /.test(what) ? 0.15 : tribal ? 0.6 : /from exile|shares a creature type/.test(what) ? 0.5 : undefined;
-    return { when: 'cast', castFilter, body: m[4], minCmc: mv ? parseInt(mv[1], 10) : undefined, chance };
+    // "Of the chosen type" is checked against the spell (Reflections of Littjara, Vanquisher's Banner).
+    const chosen = /chosen type/.test(what);
+    const chance = / while /.test(what) ? 0.15 : chosen ? undefined : tribal ? 0.6 : /from exile|shares a creature type/.test(what) ? 0.5 : undefined;
+    return { when: 'cast', castFilter, body: m[4], minCmc: mv ? parseInt(mv[1], 10) : undefined, chance, ...(chosen ? { ifCond: { k: 'chosenSpell' } as Cond } : {}) };
   }
   if ((m = l.match(/^whenever (a|another|one or more)( nontoken)? (\w+ )?(creatures?|tokens?)( you control)?( with \w+)? (enters?|enter)[^,]*,\s*(.*)$/))) return { when: 'creatureEnters', body: m[8], nontoken: !!m[2] || undefined, chance: m[6] ? 0.7 : undefined };
   // Tribal wording: "whenever another nontoken Dragon you control enters". Treated as any creature.
@@ -1036,6 +1046,12 @@ function detectTrigger(line: string, isPermanent: boolean): LineContext {
 }
 
 /** Most lines are one ability. "Whenever ~ enters or attacks" is two triggers with the same effect. */
+/** Which step an "at the beginning of" ability triggers in (rules 503-513), and on whose turns. */
+function stepOf(step: string, whose?: 'each' | 'opponents'): { at?: 'draw' | 'main1' | 'combat' | 'end'; whose?: 'each' | 'opponents' } {
+  const at = /end step/.test(step) ? 'end' : /combat/.test(step) ? 'combat' : /draw step/.test(step) ? 'draw' : /main phase/.test(step) ? 'main1' : undefined;
+  return { ...(at ? { at } : {}), ...(whose ? { whose } : {}) };
+}
+
 function detectTriggers(line: string, isPermanent: boolean): LineContext[] {
   // "Whenever a player casts a spell" watches you and your opponents.
   const anyone = line.match(/^(.*?)whenever a player casts (.*)$/);
@@ -1219,6 +1235,12 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   if (named.name) card.counterName = named.name;
+  // Ward's cost (rule 702.21a).
+  const ward = text.match(/^ward(?: \{(\d+)\}|—pay (\d+) life|—discard (a|an|one|two|three) cards?|—sacrifice (a|an|one|two|three) [^.\n]*?)\.?$/m);
+  if (ward) {
+    const n = (w: string) => ({ a: 1, an: 1, one: 1, two: 2, three: 3 } as Record<string, number>)[w] ?? 1;
+    card.ward = ward[1] ? { mana: parseInt(ward[1], 10) } : ward[2] ? { life: parseInt(ward[2], 10) } : ward[3] ? { discard: n(ward[3]) } : { sacrifice: n(ward[4]) };
+  }
   // Deck-building rules the card itself changes (rules 903.3, 903.5b, 702.124).
   const deckRules = commanderRules(printed);
   if (deckRules.copyLimit !== undefined) card.copyLimit = deckRules.copyLimit;
@@ -1321,17 +1343,23 @@ export function classifyCard(raw: RawCard): SimCard {
     const contexts = bullet && header?.length ? header.map((h) => ({ ...h, body: option })) : detectTriggers(option, isPermanent);
     for (const ctx of contexts) {
     if (!ctx.body) continue;
-    // "Unless that player pays": assume opponents pay some of the time.
-    if ((ctx.when === 'opponentCast' || ctx.when === 'opponentDraw') && /unless (that player|they) pays?|that player may pay/.test(ctx.body)) ctx.chance = 0.6;
+    // "Unless that player pays {N}": that player decides as the ability resolves (rule 118.12). An amount that can't be read: some of the time.
+    if ((ctx.when === 'opponentCast' || ctx.when === 'opponentDraw') && /unless (that player|they) pays?|that player may pay/.test(ctx.body)) {
+      const tax = ctx.body.match(/(?:unless (?:that player|they) pays?|that player may pay) \{(\d+|x)\}/);
+      if (tax) ctx.unlessPays = tax[1] === 'x' ? -1 : parseInt(tax[1], 10);
+      else ctx.chance = 0.6;
+    }
     // "If ~ has four or more quest counters on it": checked against the counters (see classifyCounters.ts).
     const charged = ctx.when !== 'activated' ? chargeCondition(ctx.body) : null;
     if (charged) {
       ctx.minCharge = charged.min;
       ctx.body = charged.body;
     }
-    // Intervening "if" clauses: we can't check the condition, so assume it holds half the time.
+    // Intervening "if" clauses (rule 603.4): checked exactly when the engine can read them, otherwise assumed to hold half the time.
     if (ctx.when !== 'resolve' && ctx.when !== 'static' && /^if [^,]+, /.test(ctx.body) && !/^if [^,]+, (?:you may )?transform ~/.test(ctx.body)) {
-      ctx.chance = 0.5;
+      const cond = readCondition(ctx.body.match(/^if ([^,]+), /)![1]);
+      if (cond) ctx.ifCond = cond;
+      else ctx.chance = 0.5;
       ctx.body = ctx.body.replace(/^if [^,]+, /, '');
     }
     if (/only once each turn|for the first time each turn/.test(line)) ctx.oncePerTurn = true;
@@ -1822,6 +1850,10 @@ function pushEffect(card: SimCard, f: Found, ctx: LineContext) {
   if (ctx.minCmc) effect.minCmc = ctx.minCmc;
   const chance = f.chance !== undefined ? (ctx.chance ?? 1) * f.chance : ctx.chance;
   if (chance) effect.chance = chance;
+  if (ctx.unlessPays !== undefined) effect.unlessPays = ctx.unlessPays;
+  if (f.ifCond ?? ctx.ifCond) effect.ifCond = f.ifCond ?? ctx.ifCond;
+  if (ctx.at && ctx.when === 'upkeep') effect.at = ctx.at;
+  if (ctx.whose && ctx.when === 'upkeep') effect.whose = ctx.whose;
   if (f.minRoll ?? ctx.minRoll) effect.minRoll = f.minRoll ?? ctx.minRoll;
   if (ctx.oncePerTurn) effect.oncePerTurn = true;
   if (f.energyCost) effect.energyCost = f.energyCost;
