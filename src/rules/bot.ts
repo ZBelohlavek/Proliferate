@@ -12,6 +12,7 @@ import { cardColors, chargeUse, commanderName, counterMatches, creatureTypes, FO
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
+import { deckStyle, type DeckStyle, type Style } from './styles';
 import { comboPlan, missingComboPieces, pieceZones, UPKEEP_WINS, wantedPieces, WINCON_NAMES } from './wincons';
 
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
@@ -213,7 +214,9 @@ function survives(g: Game, creature: Perm, from: Perm): boolean {
 
 export class Bot implements Agent {
   private readonly rng: Rng;
-  readonly aggression: number;
+  aggression: number;
+  /** How the deck is built to win (styles.ts). */
+  private style: DeckStyle | null = null;
   /** Spells on the stack this bot already decided whether to answer. */
   private readonly considered = new Set<number>();
   /** X of the spell this bot is in the middle of casting, for choosing its targets. */
@@ -232,6 +235,13 @@ export class Bot implements Agent {
   decide(g: Game, d: Decision): Answer {
     const p = g.players[d.seat];
     this.plan ??= deckPlan(p);
+    if (!this.style) {
+      this.style = deckStyle(p.deck);
+      // Go-wide decks win by attacking with everything: they press harder.
+      if (this.is('tokens')) this.aggression *= 1.25;
+      // Control decks wait for their moment.
+      if (this.is('control')) this.aggression *= 0.8;
+    }
     switch (d.kind) {
       case 'priority': return this.priority(g, p, d.actions);
       case 'target': return this.target(g, p, d);
@@ -252,6 +262,16 @@ export class Bot implements Agent {
         // A commander that was bounced is cheaper to recast from hand (no tax); otherwise take it back.
         return d.to !== 'hand';
     }
+  }
+
+  private is(s: Style): boolean {
+    return !!this.style?.styles.includes(s);
+  }
+
+  /** Voltron: the creature the deck suits up, its commander when that is on the battlefield as a creature. */
+  private voltronHost(p: PlayerState): Perm | null {
+    if (!this.is('voltron')) return null;
+    return p.battlefield.find((q) => q.isCommander && q.card.isCreature) ?? null;
   }
 
   /**
@@ -991,7 +1011,8 @@ export class Bot implements Agent {
   }
 
   private reservedMana(g: Game, p: PlayerState): number {
-    if (g.round < 3) return 0;
+    // Control decks keep their answers up from early on.
+    if (g.round < (this.is('control') ? 2 : 3)) return 0;
     let reserve = 0;
     for (const c of p.hand) {
       if (c.effects.some((e) => e.kind === 'counter' || e.kind === 'protect')) {
@@ -1185,14 +1206,42 @@ export class Bot implements Agent {
     }
     // Burn and drain decks: the engines that drain on every death or spell are the plan, not an extra.
     if ((this.plan?.drain ?? 0) >= 8 && card.effects.some((e) => (e.kind === 'drain' || e.kind === 'damagePlayer') && e.when !== 'resolve')) score = Math.max(score, 55 + card.value);
+    score = this.styleScore(p, card, score);
     if (kinds.has('gainLife')) score = Math.max(score, 10);
     if (!card.modeled) {
       if (spell) return null;
       score = Math.max(score, 1);
     }
-    // Instants in our own main phase: only if nothing better. They usually wait for the end-of-turn window.
-    if (card.isInstant && !instantWindow && !card.effects.some((e) => e.kind === 'ramp')) score = Math.min(score, 20);
+    // Instants in our own main phase: only if nothing better. They usually wait for the end-of-turn window,
+    // unless a spellslinger engine of ours pays off every spell cast now.
+    const engine = this.is('spells') && p.battlefield.some((q) => !q.landInfo && q.card.effects.some((e) => e.when === 'cast'));
+    if (card.isInstant && !instantWindow && !engine && !card.effects.some((e) => e.kind === 'ramp')) score = Math.min(score, 20);
     return score || null;
+  }
+
+  /** What the deck's style makes of `card`: the pieces its plan is built on come down early. */
+  private styleScore(p: PlayerState, card: SimCard, score: number): number {
+    if (!this.style?.styles.length) return score;
+    const statics = card.effects.filter((e) => e.when !== 'resolve');
+    const creatures = p.battlefield.filter((q) => q.card.isCreature).length;
+    // Voltron: Equipment and Auras for the commander.
+    if (this.is('voltron') && card.effects.some((e) => e.kind === 'equip' && !e.steal && !e.lock) && creatures > 0) score = Math.max(score, this.voltronHost(p) ? 78 + card.value : 60 + card.value);
+    // Go wide: anthems once there is a board to pump, and the token makers that build it.
+    if (this.is('tokens')) {
+      if (!card.isInstant && !card.isSorcery && statics.some((e) => e.kind === 'anthem') && creatures >= 2) score = Math.max(score, 66 + card.value);
+      if (card.effects.some((e) => e.kind === 'tokens' && e.when !== 'resolve') || (card.effects.some((e) => e.kind === 'tokens') && !card.isInstant)) score = Math.max(score, 55 + card.value);
+    }
+    // Aristocrats: sacrifice outlets and death payoffs are the engine.
+    if (this.is('aristocrats') && card.effects.some((e) => e.activation?.sacCreature || ((e.kind === 'drain' || e.kind === 'damagePlayer' || e.kind === 'draw') && e.when === 'creatureDies' && e.scope !== 'self'))) score = Math.max(score, 62 + card.value);
+    // Spellslinger: the permanents that pay off every spell go down before the spells.
+    if (this.is('spells') && !card.isInstant && !card.isSorcery && card.effects.some((e) => e.when === 'cast')) score = Math.max(score, 75 + card.value);
+    // Reanimator: discard and self-mill outlets that fill the graveyard.
+    if (this.is('reanimator') && !card.isInstant && !card.isSorcery && card.effects.some((e) => e.kind === 'entomb' || (e.kind === 'mill' && e.who === 'you'))) score = Math.max(score, 55 + card.value);
+    // +1/+1 counters: the cards that put more on.
+    if (this.is('counters') && !card.isInstant && !card.isSorcery && statics.some((e) => e.kind === 'counters' || e.kind === 'doubler')) score = Math.max(score, 58 + card.value);
+    // Blink: the flicker engines, once there is something worth flickering.
+    if (this.is('blink') && !card.isInstant && !card.isSorcery && statics.some((e) => e.kind === 'blink') && creatures > 0) score = Math.max(score, 58 + card.value);
+    return score;
   }
 
   /**
@@ -1891,7 +1940,9 @@ export class Bot implements Agent {
     }
     if (e === null || e.kind === 'equip') {
       const pool = mine.length ? mine : perms;
-      return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0))) ?? d.candidates[0];
+      // Voltron: everything goes on the commander.
+      const host = this.voltronHost(p);
+      return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0) + (q === host ? 100 : 0))) ?? d.candidates[0];
     }
     const players = d.candidates.flatMap((t) => (t.kind === 'player' ? [g.players[t.seat]] : []));
     const boardPower = (o: PlayerState) => o.battlefield.filter((q) => q.card.isCreature).reduce((n, q) => n + g.power(q), 0);
@@ -2162,6 +2213,7 @@ export class Bot implements Agent {
 
     // Permanents our own spells and abilities on the stack already aim at.
     const aimed = new Set(g.stack.filter((s) => s.controller === p.seat).flatMap((s) => s.targets).flatMap((t) => (t?.kind === 'perm' ? [t.id] : [])));
+    const boards = new Map<number, number>();
     let best: { target: Target; score: number } | null = null;
     for (const t of candidates) {
       let score = 0;
@@ -2198,7 +2250,10 @@ export class Bot implements Agent {
         // -N/-N kills through indestructible; damage doesn't.
         if (e.mode === 'damage' && !e.shrink && g.hasKw(perm, 'indestructible')) continue;
         if (e.mode === 'fight' && (!fighter || (g.power(fighter) < g.toughness(perm) - perm.damage && !g.hasKw(fighter, 'deathtouch')))) continue;
-        const leader = boardThreat(g, g.players[perm.seat]) > 15 ? 1.2 : 1;
+        // Board strength per player, worked out once for all the candidates (boards of hundreds of tokens happen).
+        let board = boards.get(perm.seat);
+        if (board === undefined) boards.set(perm.seat, (board = boardThreat(g, g.players[perm.seat])));
+        const leader = board > 15 ? 1.2 : 1;
         score = threat(g, perm) * leader;
         // Fblthp shuffles itself away when targeted: the spell would be wasted.
         if (perm.card.effects.some((f) => f.kind === 'shuffleWhenTargeted')) score *= 0.2;
