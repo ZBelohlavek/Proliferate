@@ -193,6 +193,8 @@ export class Game {
   private pendingCommander: { seat: number; card: SimCard; to: 'graveyard' | 'exile' | 'hand' | 'library' }[] = [];
   /** Legendary permanents with the same name and controller, for the legend rule (704.5j). */
   private pendingLegend: { seat: number; name: string; ids: number[] }[] = [];
+  /** Hideaway lands that entered outside a spell's resolution (played from hand): their cards are hidden at the next check (rule 702.75a). */
+  private pendingHideaway: { seat: number; permId: number; n: number }[] = [];
   /** Defeated Sieges whose controller casts them transformed (rule 310.11b). */
   private pendingSiege: { seat: number; owner: number; card: SimCard }[] = [];
   /** Damage dealt to permanents that something watches (Phyrexian Obliterator, bounty counters), handled with state-based actions. */
@@ -4939,6 +4941,8 @@ export class Game {
     if (!card.isBasic && this.kindsInGame.has('landRule') && this.opponents(p).some((o) => this.landRules(o).has('oppNonbasicTapped'))) perm.tapped = true;
     perm.sick = false;
     p.battlefield.push(perm);
+    // Hideaway lands (Windbrisk Heights, Mosswort Bridge): the enter trigger is handled at the next state check.
+    if (card.casting?.hideaway) this.pendingHideaway.push({ seat: p.seat, permId: perm.id, n: card.casting.hideaway });
     // Elesh Norn, Mother of Machines: a land entering is a permanent entering.
     const times = this.triggerTimes(p, 'permanentEnters', card);
     const etb = card.effects.filter((e) => e.when === 'resolve');
@@ -8242,6 +8246,14 @@ export class Game {
           this.say(`${x.card.name} (${owner.name}) is put into the graveyard (legend rule).`);
           this.removePerm(x, 'graveyard');
         }
+        changed = true;
+      }
+      // Hideaway lands that entered since the last check (rule 702.75a).
+      while (this.pendingHideaway.length) {
+        const h = this.pendingHideaway.shift()!;
+        const owner = this.players[h.seat];
+        const perm = owner.battlefield.find((x) => x.id === h.permId);
+        if (perm && owner.alive && !perm.hidden) yield* this.hideaway(owner, perm, h.n);
         changed = true;
       }
       // Defeated Sieges: cast the back face without paying its mana cost (rule 310.11b).
