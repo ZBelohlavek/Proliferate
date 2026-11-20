@@ -242,9 +242,29 @@ export class Bot implements Agent {
         if (d.reason === 'mulligan') return !this.keepable(p.hand, p.mulligans);
         // Vihaan: Treasures become 3/3 attackers when there are enough of them to matter.
         if (d.reason === 'animate') return p.treasures >= 3;
+        if (d.reason === 'payTax') return this.payTax(g, p, d.prompt, d.card);
         // A commander that was bounced is cheaper to recast from hand (no tax); otherwise take it back.
         return d.to !== 'hand';
     }
+  }
+
+  /**
+   * "Unless that player pays {N}" (Rhystic Study, Mystic Remora, Smothering Tithe, Esper Sentinel): pay to save our spell,
+   * and pay to deny an opponent a card or a Treasure only when the mana isn't needed for a spell we could still cast this turn.
+   */
+  private payTax(g: Game, p: PlayerState, prompt: string, card: SimCard | undefined): boolean {
+    const n = Number(/pay \{(\d+)\}/.exec(prompt)?.[1] ?? 0);
+    const e = card?.effects.find((f) => f.unlessPays !== undefined);
+    if (e?.kind === 'counter') return true;
+    const left = g.availableMana(p) - n;
+    if (left < 0) return false;
+    // On our own turn the mana may still be wanted: keep it if a spell in hand needs it.
+    if (g.activeSeat === p.seat && (g.step === 'main1' || g.step === 'main2' || g.step === 'beginCombat')) {
+      const wanted = [...p.hand, ...p.commandZone].some((c) => !c.isLand && g.effectiveCost(p, c, p.commandZone.includes(c)) <= g.availableMana(p) && g.effectiveCost(p, c, p.commandZone.includes(c)) > left);
+      if (wanted) return false;
+    }
+    // A big tax for a small gift isn't worth it.
+    return n <= 2 || (e?.kind === 'draw' && n <= 3);
   }
 
   // -------------------------------------------------------------------------
@@ -361,6 +381,12 @@ export class Bot implements Agent {
       if (g.step === 'main2') return pick(this.chooseAbility(g, p, actions) ?? this.chooseCycle(g, p, actions));
       // Before combat: haste and evasion abilities, tapping a blocker, hasty copies (Kiki-Jiki), borrowed attackers, and keeping a blocker out of the way (Zirda).
       return pick(this.chooseAbility(g, p, actions.filter((a) => a.type === 'activate' && (a.effect.kind === 'pump' || a.effect.kind === 'overrun' || a.effect.kind === 'animate' || a.effect.kind === 'tap' || a.effect.kind === 'tokenCopy' || a.effect.kind === 'steal' || a.effect.kind === 'copyNext' || a.effect.kind === 'becomeCreature' || a.effect.kind === 'moveCounters'))) ?? this.chooseCombatShaping(g, p, actions));
+    }
+
+    // An opponent attacks us: crew a Vehicle that blocks better than the creatures that would drive it.
+    if (!myTurn && g.step === 'declareAttackers' && !top) {
+      const crew = this.crewToBlock(g, p, actions);
+      if (crew) return pick(crew);
     }
 
     // Before an opponent's attack: make their creatures attack (Bident of Thassa), or stop the one that would hit us hardest (Endbringer).
@@ -1361,6 +1387,21 @@ export class Bot implements Agent {
     });
   }
 
+  /** Crew a Vehicle to block (crew is offered at instant speed): it has to be able to stop an attacker coming at us and outclass its drivers as a blocker. */
+  private crewToBlock(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
+    const coming = g.attackers().filter((a) => a.attacking === p.seat && a.attackingPw === undefined);
+    if (!coming.length) return undefined;
+    return actions.find((a) => {
+      if (a.type !== 'crew') return false;
+      const vehicle = g.findPerm(a.permId);
+      const drivers = vehicle ? g.crewFor(p, vehicle) : null;
+      if (!vehicle || vehicle.tapped || vehicle.card.isCreature || !drivers) return false;
+      const stops = coming.some((x) => vehicle.card.toughness > g.power(x) || vehicle.card.power >= g.toughness(x) - x.damage);
+      const lost = drivers.reduce((n, q) => n + g.power(q) + g.toughness(q), 0);
+      return stops && vehicle.card.power + vehicle.card.toughness > lost;
+    });
+  }
+
   /** How much an activated ability is usually worth next to the other abilities on offer (only orders them). */
   private abilityRank(g: Game, p: PlayerState, e: Effect): number {
     switch (e.kind) {
@@ -1864,6 +1905,20 @@ export class Bot implements Agent {
         score = 50;
       } else if (t.kind === 'perm') {
         const perm = g.findPerm(t.id);
+        // Burn on a planeswalker ("any target", "creature or planeswalker"): kill it if the damage is enough, else chip it.
+        // A battle only when it is ours: defeating someone else's helps them cast its back face.
+        if (perm && e.mode === 'damage' && !perm.card.isCreature && !perm.emblem && (perm.card.isBattle ? !!e.anyTarget : perm.card.isPlaneswalker && perm.loyalty !== undefined && !!(e.anyTarget || e.orPlaneswalker))) {
+          if (perm.card.isBattle) {
+            if (perm.seat !== p.seat || amount < (perm.defense ?? 0)) continue;
+            score = 4;
+          } else {
+            if (perm.seat === p.seat) continue;
+            const loyalty = perm.loyalty ?? 0;
+            score = amount >= loyalty ? threat(g, perm) + 2 : threat(g, perm) * 0.4 * (amount / Math.max(1, loyalty));
+          }
+          if (!best || score > best.score) best = { target: t, score };
+          continue;
+        }
         if (!perm || perm.seat === p.seat || !g.removable(e.target, perm)) continue;
         if (perm.landInfo) {
           score = this.landTargetScore(g, perm);

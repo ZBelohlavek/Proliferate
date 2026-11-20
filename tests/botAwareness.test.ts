@@ -1,8 +1,10 @@
 // Bots using mechanics they used to pass over: hideaway lands, extra land drops from abilities,
-// activated counterspells and protection, and attacking a dangerous planeswalker through blockers.
+// activated counterspells and protection, attacking a dangerous planeswalker through blockers,
+// paying "unless that player pays" taxes, burning planeswalkers, and crewing to block.
 
 import { describe, expect, it } from 'vitest';
 import { Bot } from '../src/rules/bot';
+import type { AttackDeclaration } from '../src/rules/types';
 import { card, creature } from './helpers';
 import { castOnce, Table } from './table';
 
@@ -96,11 +98,51 @@ describe('planeswalker attacks', () => {
     let sent = 0;
     t.handlers[0] = (g, d) => {
       if (d.kind !== 'attackers') return undefined;
-      const out = bot.decide(g, d) as { planeswalker?: number }[];
+      const out = bot.decide(g, d) as AttackDeclaration[];
       sent = out.filter((a) => a.planeswalker === pw.id).length;
       return out;
     };
     t.finishTurn();
     expect(sent).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('rules from the real-rules pass', () => {
+  const mountain = () => card({ name: 'Mountain', types: ['Land'], superTypes: ['Basic'], subTypes: ['Mountain'], colorIdentity: ['R'] });
+  const rhystic = () => card({ name: 'Rhystic Study', manaCost: '{2}{U}', cmc: 3, types: ['Enchantment'], colorIdentity: ['U'], text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.' });
+  const ask = (n: number) => ({ kind: 'confirm' as const, seat: 0, reason: 'payTax' as const, prompt: `Rhystic Study (p1): pay {${n}}? If you don't, its controller draws a card.`, card: rhystic() });
+
+  it('a bot pays a small tax with mana to spare, but not mana it needs for a spell in hand', () => {
+    const t = new Table();
+    t.lands(0, 3);
+    const bot = new Bot(0, 1);
+    expect(bot.decide(t.game, ask(1))).toBe(true);
+    t.game.players[0].hand.push(creature('Bear Cub', '{2}{G}', 3, 3, 3));
+    expect(bot.decide(t.game, ask(1))).toBe(false);
+    t.game.players[0].hand = [];
+    expect(bot.decide(t.game, ask(4))).toBe(false);
+  });
+
+  it('a bot burns a planeswalker it can kill', () => {
+    const t = new Table();
+    const pw = t.game.put(1, walker(3));
+    t.game.put(0, mountain());
+    t.game.players[0].hand.push(card({ name: 'Lightning Bolt', manaCost: '{R}', cmc: 1, types: ['Instant'], colorIdentity: ['R'], text: 'Lightning Bolt deals 3 damage to any target.' }));
+    botSeat(t, 0);
+    t.finishTurn();
+    expect(t.game.findPerm(pw.id)).toBeNull();
+  });
+
+  it("a bot crews a Vehicle to block an attacker its drivers couldn't stop", () => {
+    const t = new Table();
+    const truck = t.game.put(1, card({ name: 'Test Truck', manaCost: '{3}', cmc: 3, types: ['Artifact'], subTypes: ['Vehicle'], power: '6', toughness: '6', text: 'Crew 1' }));
+    t.game.put(1, creature('Squirrel', '{G}', 1, 1, 1));
+    const ogre = t.game.put(0, creature('Ogre', '{3}{R}', 4, 4, 4));
+    t.handlers[0] = (_g, d) => (d.kind === 'attackers' ? [{ attacker: ogre.id, defender: 1 }] : undefined);
+    botSeat(t, 1);
+    t.finishTurn();
+    expect(t.game.findPerm(ogre.id)).toBeNull();
+    expect(t.game.findPerm(truck.id)).not.toBeNull();
+    expect(t.game.players[1].life).toBe(40);
   });
 });
