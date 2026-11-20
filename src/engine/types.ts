@@ -88,6 +88,21 @@ export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | '
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery' | 'flash';
 
+/** Conditions checked exactly (rule 603.4): see conditions.ts. */
+export type Cond =
+  | { k: 'youControl'; what: string; min: number; max?: number }
+  | { k: 'oppMoreLands' } | { k: 'oppMonarch' } | { k: 'youMonarch' }
+  | { k: 'notOwned'; min: number } | { k: 'landsTotal'; min: number }
+  | { k: 'oppLostLife' } | { k: 'youAttacked' } | { k: 'selfAttacked' }
+  | { k: 'drewMore'; min: number } | { k: 'fullParty' } | { k: 'selfUntapped' } | { k: 'creatureDied' }
+  | { k: 'uniqueName' } | { k: 'counters'; min: number } | { k: 'discarded'; opponent: boolean }
+  /** Herald's Horn: the top card of your library is a creature card of the chosen type. */
+  | { k: 'topChosen' }
+  /** "A spell of the chosen type": the spell that triggered it. */
+  | { k: 'chosenSpell' }
+  /** Counterbalance: the top card of your library has the same mana value as that spell. */
+  | { k: 'topSameMv' };
+
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
 
@@ -99,6 +114,16 @@ export type Effect = EffectBody & {
   /** Cast triggers: only for spells with at least this mana value. */
   minCmc?: number;
   /** Conditional ("if ...") triggers: probability the condition holds. */
+  /**
+   * "At the beginning of ..." abilities (when: 'upkeep') that trigger at another step: the draw step, the precombat main
+   * phase, beginning of combat, or the end step (rules 503-513). `whose`: on each player's turn, or each opponent's, not only yours.
+   */
+  at?: 'draw' | 'main1' | 'combat' | 'end';
+  whose?: 'each' | 'opponents';
+  /** An intervening "if" clause the engine checks as it triggers and again as it resolves (rule 603.4). See conditions.ts. */
+  ifCond?: Cond;
+  /** "Unless that player pays {N}": the player the trigger is about may pay N mana (-1: the source's power) to stop it (rule 118.12). */
+  unlessPays?: number;
   chance?: number;
   /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
   loyalty?: number;

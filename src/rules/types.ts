@@ -204,6 +204,9 @@ export interface PlayerState {
   pool?: PoolMana[];
   /** Turn number on which this player last lost life (Gev). */
   lostLifeTurn: number;
+  /** Turn number on which this player last discarded a card, and last attacked with a creature (conditions, rule 603.4). */
+  discardedTurn?: number;
+  attackedTurn?: number;
   /** Experience counters (Meren, Kratos). */
   experience: number;
   /** Energy counters (rule 122.1). */
@@ -444,7 +447,7 @@ export interface ChoiceOption {
 }
 
 export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost' | 'protector' | 'legend';
-export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate';
+export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate' | 'payTax';
 
 export type Decision =
   /** The player has priority: take one of these actions (the first is always "pass"). */

@@ -72,3 +72,82 @@ describe('damage to planeswalkers and battles (rules 115.4, 120.3)', () => {
     expect(a.life).toBe(life + 1);
   });
 });
+
+describe('"unless that player pays" is the payer\'s choice (rule 118.12)', () => {
+  const study = () => card({ name: 'Rhystic Study', manaCost: '{2}{U}', cmc: 3, types: ['Enchantment'], text: 'Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.', colorIdentity: ['U'] });
+  for (const pays of [true, false]) {
+    it(`the caster ${pays ? 'pays {1} and nothing happens' : "doesn't pay, and the Study draws"}`, () => {
+      const t = new Table();
+      const [a, b] = t.game.players;
+      t.game.put(1, study());
+      a.hand.push(creature('Bear', '{1}{G}', 2, 2, 2));
+      t.lands(0, 3);
+      let asked = '';
+      const cast = castOnce('Bear');
+      t.handlers[0] = (g, d) => {
+        if (d.kind === 'confirm' && d.reason === 'payTax') {
+          asked = d.prompt;
+          return pays;
+        }
+        return cast(g, d);
+      };
+      t.until((g) => g.players[0].battlefield.some((q) => q.card.name === 'Bear'));
+      expect(asked).toMatch(/pay \{1\}/);
+      const log = t.game.log!.slice(t.game.log!.findIndex((l) => /casts Bear/.test(l)));
+      expect(log.some((l) => l === `${b.name} draws 1 card.`)).toBe(!pays);
+      expect(a.battlefield.filter((q) => q.landInfo && q.tapped).length).toBe(pays ? 3 : 2);
+    });
+  }
+});
+
+describe('conditions the engine can see are checked, not rolled (rule 603.4)', () => {
+  it('Counterbalance counters a spell only when the top card has the same mana value', () => {
+    for (const same of [true, false]) {
+      const t = new Table();
+      const [a, b] = t.game.players;
+      t.game.put(1, card({ name: 'Counterbalance', manaCost: '{U}{U}', cmc: 2, types: ['Enchantment'], text: 'Whenever an opponent casts a spell, you may reveal the top card of your library. If you do, counter that spell if it has the same mana value as the revealed card.', colorIdentity: ['U'] }));
+      b.library.unshift(creature(same ? 'Two' : 'Five', same ? '{1}{G}' : '{4}{G}', same ? 2 : 5, 1, 1));
+      a.hand.push(creature('Bear', '{1}{G}', 2, 2, 2));
+      t.lands(0, 2);
+      t.handlers[0] = castOnce('Bear');
+      t.finishTurn();
+      expect(a.battlefield.some((q) => q.card.name === 'Bear')).toBe(!same);
+    }
+  });
+
+  it('Land Tax triggers only while an opponent has more lands', () => {
+    const tax = () => card({ name: 'Land Tax', manaCost: '{W}', cmc: 1, types: ['Enchantment'], text: 'At the beginning of your upkeep, if an opponent controls more lands than you, you may search your library for up to three basic land cards, reveal them, put them into your hand, then shuffle.', colorIdentity: ['W'] });
+    expect(tax().effects[0].ifCond).toEqual({ k: 'oppMoreLands' });
+    expect(tax().effects[0].chance).toBeUndefined();
+  });
+
+  it('"at the beginning of your end step" triggers in the end step, after combat (rule 513.1)', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const raider = card({ name: 'End Watcher', manaCost: '{B}', cmc: 1, types: ['Enchantment'], text: 'At the beginning of your end step, if you attacked this turn, you gain 3 life.', colorIdentity: ['B'] });
+    expect(raider.effects[0]).toEqual(expect.objectContaining({ when: 'upkeep', at: 'end', ifCond: { k: 'youAttacked' } }));
+    t.game.put(0, raider);
+    const bear = t.game.put(0, creature('Bear', '{1}{G}', 2, 2, 2));
+    t.handlers[0] = (_g, d) => (d.kind === 'attackers' ? [{ attacker: bear.id, defender: 1 }] : undefined);
+    const life = a.life;
+    t.finishTurn();
+    expect(a.life).toBe(life + 3);
+  });
+
+  it('"at the beginning of each opponent\'s upkeep" triggers on their turn, not yours', () => {
+    const c = card({ name: 'Taxer', manaCost: '{B}', cmc: 1, types: ['Enchantment'], text: "At the beginning of each opponent's upkeep, you gain 1 life.", colorIdentity: ['B'] });
+    expect(c.effects[0]).toEqual(expect.objectContaining({ when: 'upkeep', whose: 'opponents' }));
+    const t = new Table();
+    const [a, b] = t.game.players;
+    t.game.put(0, c);
+    const g = t.game as any;
+    g.pending = [];
+    g.fireStep(a, 'upkeep');
+    expect(g.pending.length).toBe(0);
+    g.fireStep(b, 'upkeep');
+    expect(g.pending.length).toBe(1);
+    g.pending = [];
+    g.fireStep(b, 'end');
+    expect(g.pending.length).toBe(0);
+  });
+});

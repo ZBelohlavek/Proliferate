@@ -15,7 +15,7 @@
 import { bloodCard, foodCard, incubatorCard, isFood, isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
 import type {
-  CastFilter, Color, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, FlashFilter, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
+  CastFilter, Color, Cond, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, FlashFilter, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
   About, Action, Answer, AttackDeclaration, BlockDeclaration, CastFrom, ChoiceOption, ChooseReason, Decision, DiedCard, HeldCard, MayPlay, Perm, PlayerState, PoolMana, PriorityAnswer, StackItem, Step, Target,
@@ -414,7 +414,7 @@ export class Game {
     }
     this.step = 'upkeep';
     this.cumulativeUpkeep(p);
-    this.fire(p, 'upkeep');
+    this.fireStep(p, 'upkeep');
     if (this.kindsInGame.has('when:eachUpkeep')) for (const q of this.players) if (q.alive) this.fire(q, 'eachUpkeep');
     yield* this.priority();
     if (this.stopped(p)) return;
@@ -516,7 +516,7 @@ export class Game {
     // Suspend (rule 702.62): a time counter comes off each suspended card; with the last, it is cast.
     if (p.held?.some((h) => h.way === 'suspend')) this.suspendUpkeep(p);
     if (this.kindsInGame.has('upkeepCost')) this.upkeepCosts(p);
-    this.fire(p, 'upkeep');
+    this.fireStep(p, 'upkeep');
     this.graveyardMark = this.players.map((q) => q.graveyard.length);
     if (this.anyCurse) {
       this.curseEvent(p, 'theirUpkeep');
@@ -532,6 +532,7 @@ export class Game {
     // Draw step (504). Only in a two-player game does the first player skip it (rule 103.8).
     this.step = 'draw';
     if (!(this.turnNumber === 1 && this.players.length === 2)) this.draw(p, 1);
+    this.fireStep(p, 'draw');
     if (this.anyCurse) this.curseEvent(p, 'theirDraw');
     yield* this.priority();
     if (this.stopped(p)) return;
@@ -539,6 +540,7 @@ export class Game {
     this.step = 'main1';
     // Sagas get a lore counter as the precombat main phase begins (rule 714.3b).
     for (const perm of p.battlefield) if (perm.card.saga) this.addLore(p, perm);
+    this.fireStep(p, 'main1');
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -607,6 +609,7 @@ export class Game {
     }
     this.endTemporaryTokens();
     this.endStepSacrifices();
+    this.fireStep(p, 'end');
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -1403,6 +1406,7 @@ export class Game {
 
   /** Madness (rule 702.35): a discarded madness card goes to exile, castable for its madness cost until its owner next passes. */
   private discarded(p: PlayerState, card: SimCard, quiet = false) {
+    p.discardedTurn = this.turnNumber;
     if (card.casting?.madness) {
       p.exile.push(card);
       (p.windows ??= []).push({ card, how: 'madness' });
@@ -3744,6 +3748,8 @@ export class Game {
       if (e.minCharge && (src?.charge ?? 0) < e.minCharge) continue;
       // "If" conditions the classifier couldn't read hold about half the time.
       if (e.chance !== undefined && !this.rng.chance(e.chance)) continue;
+      // Intervening "if" clauses it can read are checked as it triggers, and again as it resolves (rule 603.4).
+      if (e.ifCond && !this.condHolds(controller, src, e.ifCond, subject, about)) continue;
       if (e.oncePerTurn && src) {
         if (src.usedThisTurn.includes(e)) continue;
         src.usedThisTurn.push(e);
@@ -3807,6 +3813,21 @@ export class Game {
   }
 
   /** Abilities of `p`'s permanents that trigger on a simple event. */
+  /**
+   * "At the beginning of [your/each/each opponent's] upkeep, draw step, precombat main phase, combat, end step" abilities,
+   * on `active`'s turn (rules 503.1, 504.2, 505.4, 507.1, 513.1). "That player" is the active player.
+   */
+  private fireStep(active: PlayerState, step: 'upkeep' | 'draw' | 'main1' | 'combat' | 'end') {
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) {
+        const hits = perm.card.effects.filter((e) => e.when === 'upkeep' && (e.at ?? 'upkeep') === step
+          && (q === active ? e.whose !== 'opponents' : e.whose === 'each' || e.whose === 'opponents'));
+        if (hits.length) this.trigger(q, perm.card, perm.id, hits, 0, null, undefined, undefined, q === active ? undefined : active.seat);
+      }
+    }
+  }
+
   private fire(p: PlayerState, when: Trigger, x = 0, aboutSeat?: number) {
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === when);
@@ -3986,6 +4007,8 @@ export class Game {
       const aim = item.targets[i];
       if (aim) this.aimedSeat = aim.kind === 'player' ? aim.seat : aim.kind === 'perm' ? this.findPerm(aim.id)?.seat ?? this.aimedSeat : this.stack.find((s) => s.id === aim.id)?.controller ?? this.aimedSeat;
       if (!legal[i] || !p.alive) continue;
+      if (item.effects[i].ifCond && !this.condHolds(p, src, item.effects[i].ifCond!, item.subject, item.about)) continue;
+      if (item.effects[i].unlessPays !== undefined && (yield* this.paysTax(p, item, i, src))) continue;
       yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i], item.card);
     }
     this.resolving = null;
@@ -4002,6 +4025,79 @@ export class Game {
       else if (!(yield* this.spellAfterResolving(p, item))) this.leaveStack(p, item);
       this.tuckSpell = false;
       this.shuffleSpell = false;
+    }
+  }
+
+  /**
+   * "Unless that player pays {N}" (Rhystic Study, Mystic Remora, Esper Sentinel, Smothering Tithe): the player the trigger
+   * is about chooses as it resolves whether to pay (rules 118.12, 608.2d). True if they paid, so the effect doesn't happen.
+   */
+  private *paysTax(p: PlayerState, item: StackItem, i: number, src: Perm | null): Flow<boolean> {
+    const e = item.effects[i];
+    const seat = item.aboutSeat;
+    if (seat === undefined || seat === p.seat || !this.players[seat].alive) return false;
+    const payer = this.players[seat];
+    // Esper Sentinel: X is its power, as the ability resolves (or as it last existed).
+    const n = e.unlessPays === -1 ? (src ? Math.max(0, this.power(src)) : item.card.power) : e.unlessPays!;
+    if (n <= 0) {
+      this.say(`${payer.name} pays {0} for ${item.card.name}.`);
+      return true;
+    }
+    const plan = this.planPayment(payer, NO_COST, n, 0);
+    if (!plan) return false;
+    const pay = yield* ask<boolean>({ kind: 'confirm', seat, reason: 'payTax', prompt: `${item.card.name} (${p.name}): pay {${n}}? If you don't, ${this.taxConsequence(e)}.`, card: item.card });
+    if (!pay) {
+      this.say(`${payer.name} doesn't pay {${n}} for ${item.card.name}.`);
+      return false;
+    }
+    const again = this.planPayment(payer, NO_COST, n, 0);
+    if (!again) return false;
+    this.commitPayment(payer, again);
+    this.say(`${payer.name} pays {${n}} for ${item.card.name}.`);
+    return true;
+  }
+
+  /** What happens if a tax isn't paid, for the prompt. */
+  private taxConsequence(e: Effect): string {
+    switch (e.kind) {
+      case 'draw': return `its controller draws ${e.n === 1 ? 'a card' : `${e.n} cards`}`;
+      case 'treasure': return `its controller creates ${e.n === 1 ? 'a Treasure' : `${e.n} Treasures`}`;
+      case 'counter': return 'your spell is countered';
+      default: return 'its ability happens';
+    }
+  }
+
+  /** Does an intervening "if" condition hold for `p` now (rule 603.4)? `subject`: the spell that set it off; `about`: what it is about. */
+  private condHolds(p: PlayerState, src: Perm | null, c: Cond, subject?: number, about?: About): boolean {
+    const top = p.library[0];
+    const spell = subject !== undefined ? this.stack.find((s) => s.id === subject) : undefined;
+    switch (c.k) {
+      case 'youControl': {
+        const n = p.battlefield.filter((q) => !q.emblem && controlMatches(q, c.what)).length;
+        return n >= c.min && (c.max === undefined || n <= c.max);
+      }
+      case 'oppMoreLands': return this.opponents(p).some((o) => this.landCount(o) > this.landCount(p));
+      case 'oppMonarch': return this.monarch !== null && this.monarch !== p.seat;
+      case 'youMonarch': return this.monarch === p.seat;
+      case 'notOwned': return p.battlefield.filter((q) => q.owner !== undefined && q.owner !== p.seat && !q.token).length >= c.min;
+      case 'landsTotal': return this.alivePlayers().reduce((n, q) => n + this.landCount(q), 0) >= c.min;
+      case 'oppLostLife': return this.opponents(p).some((o) => o.lostLifeTurn === this.turnNumber);
+      case 'youAttacked': return p.attackedTurn === this.turnNumber;
+      case 'selfAttacked': return !!src && src.attackedTurn === this.turnNumber;
+      case 'drewMore': return p.drawsThisTurn >= c.min;
+      case 'fullParty': return this.partySize(p) >= 4;
+      case 'selfUntapped': return !!src && !src.tapped;
+      case 'creatureDied': return this.diedThisTurn > 0;
+      case 'uniqueName': {
+        const name = about?.card.name;
+        if (!name) return true;
+        return !p.battlefield.some((q) => q.card.isCreature && q.id !== about?.permId && q.card.name === name) && !p.graveyard.some((g) => g.isCreature && g.name === name);
+      }
+      case 'counters': return p.battlefield.filter((q) => q.card.isCreature || q.card.isArtifact).reduce((n, q) => n + this.counterCount(q), 0) >= c.min;
+      case 'discarded': return (c.opponent ? this.opponents(p) : this.alivePlayers()).some((q) => q.discardedTurn === this.turnNumber);
+      case 'topChosen': return !!top && top.isCreature && !!src?.chosenType && hasSubtype(top, src.chosenType);
+      case 'chosenSpell': return !!spell && !!src?.chosenType && hasSubtype(spell.card, src.chosenType);
+      case 'topSameMv': return !!top && !!spell && top.cmc === spell.card.cmc;
     }
   }
 
@@ -8353,6 +8449,7 @@ export class Game {
     this.step = 'beginCombat';
     // "At the beginning of combat on your turn" (The Ozolith).
     if (this.kindsInGame.has('when:beginCombat')) this.fire(p, 'beginCombat');
+    this.fireStep(p, 'combat');
     if (this.untapAttackersEachCombat) {
       const again = p.battlefield.filter((q) => q.tapped && q.attackedTurn === this.turnNumber && q.card.isCreature && !q.stun);
       for (const q of again) q.tapped = false;
@@ -8389,6 +8486,7 @@ export class Game {
     // Crawlspace: no more than so many creatures can attack a player each combat (rule 508.1c).
     const room = (seat: number) => this.attackLimit(seat) - attacking.filter((a) => a.attacking === seat).length;
     const declare = (perm: Perm, seat: number, pw?: number) => {
+      p.attackedTurn = this.turnNumber;
       perm.attacking = seat;
       perm.attackingPw = pw;
       perm.attackedTurn = this.turnNumber;
@@ -9636,6 +9734,20 @@ export function recursionMatches(what: RecursionWhat | undefined, card: SimCard)
     case 'permanent': return !card.isInstant && !card.isSorcery;
     case 'legendary': return card.isLegendary && !card.isInstant && !card.isSorcery;
     default: return card.isCreature;
+  }
+}
+
+/** "You control an artifact", "you control no Snakes": does this permanent count? */
+function controlMatches(perm: Perm, what: string): boolean {
+  const c = perm.card;
+  switch (what.replace(/^(nonland|nontoken) /, '')) {
+    case 'artifact': return c.isArtifact;
+    case 'creature': return c.isCreature;
+    case 'enchantment': return c.isEnchantment;
+    case 'planeswalker': return c.isPlaneswalker;
+    case 'land': return c.isLand || !!perm.landInfo;
+    case 'permanent': return what.startsWith('nonland') ? !(c.isLand || perm.landInfo) : what.startsWith('nontoken') ? !perm.token : true;
+    default: return hasSubtype(c, what);
   }
 }
 

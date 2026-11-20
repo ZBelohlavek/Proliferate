@@ -12,9 +12,9 @@
 // its own file so the rest of the reader stays easy to follow.
 
 import { boardTrigger, recogniseBoard } from './classifyBoard';
-import type { CastFilter, EffectBody, Trigger, TriggerScope } from './types';
+import type { CastFilter, Cond, EffectBody, Trigger, TriggerScope } from './types';
 
-type Found = { body: EffectBody; note: string; chance?: number };
+type Found = { body: EffectBody; note: string; chance?: number; ifCond?: Cond };
 type RareContext = { when: Trigger; scope?: TriggerScope; castFilter?: CastFilter; body: string; chance?: number; oncePerTurn?: boolean };
 
 const WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, x: -1 };
@@ -211,7 +211,7 @@ export function recogniseRare(line: string, out: Found[], card: { isPermanent: b
   if (/^counter target spell, activated ability, or triggered ability/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counterspell (also abilities)');
   if (/^counter target activated ability, triggered ability, or legendary spell/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter a legendary spell or an ability');
   // Deflecting Swat, Misdirection, Bolt Bend: real redirects now (classifyControl.ts).
-  if (/^you may reveal the top card of your library\. if you do, counter that spell if it has the same mana value/.test(fullLine) && /^you may reveal/.test(line)) return push({ kind: 'counter', target: 'any' }, 'Counter a spell with the same mana value as your top card', 0.2);
+  if (/^you may reveal the top card of your library\. if you do, counter that spell if it has the same mana value/.test(fullLine) && /^you may reveal/.test(line)) return void out.push({ body: { kind: 'counter', target: 'any', subject: true }, note: 'Counter that spell if your top card has the same mana value', ifCond: { k: 'topSameMv' } });
 
   // --- Pumps, protection, equipment ------------------------------------------------
   if ((m = line.match(/^(?:until end of turn, )?(?:up to one )?target creature( you control)? gets \+(\d+)\/\+(\d+) and gains ([a-z0-9, ]*?|) ?(?:until end of turn|\.?$)/))) {
