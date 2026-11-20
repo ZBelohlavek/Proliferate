@@ -994,7 +994,8 @@ export class Game {
       const up = this.faceUpCost(perm);
       if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
       // Crew, kept simple: in your first main phase, so the Vehicle can attack.
-      if (perm.card.crew && sorcery && this.step === 'main1' && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
+      // Crew is an activated ability: any time its controller has priority (rule 702.122a), say to block with the Vehicle.
+      if (perm.card.crew && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
       // Station (rule 702.184a): tap another untapped creature to add charge counters, as a sorcery, until the last threshold.
       if (sorcery && this.stationRoom(perm) && this.stationCrew(p, perm).length) actions.push({ type: 'station', permId: perm.id });
       // Rooms: a locked door is unlocked for its mana cost as a sorcery (rule 709.5e).
@@ -2988,9 +2989,58 @@ export class Game {
   }
 
   private wardCost(by: PlayerState, t: Target | null): number {
-    if (!t || t.kind !== 'perm') return 0;
+    return this.wardOf(by, t)?.mana ?? 0;
+  }
+
+  /** Ward on a permanent `by` targets (rule 702.21): its printed cost, or {2} for ward granted without one. */
+  private wardOf(by: PlayerState, t: Target | null): { mana?: number; life?: number; discard?: number; sacrifice?: number } | null {
+    if (!t || t.kind !== 'perm') return null;
     const perm = this.findPerm(t.id);
-    return perm && perm.seat !== by.seat && this.hasKw(perm, 'ward') ? WARD_COST : 0;
+    if (!perm || perm.seat === by.seat || !this.hasKw(perm, 'ward')) return null;
+    return perm.card.ward ?? { mana: WARD_COST };
+  }
+
+  /** Can `p` pay the parts of these targets' ward costs that aren't mana (life, discards, sacrifices)? `spell`: a card leaving the hand to be cast. */
+  private wardPayable(p: PlayerState, targets: (Target | null)[], spell?: SimCard): boolean {
+    let life = 0, discard = 0, sacrifice = 0;
+    for (const t of targets) {
+      const w = this.wardOf(p, t);
+      life += w?.life ?? 0;
+      discard += w?.discard ?? 0;
+      sacrifice += w?.sacrifice ?? 0;
+    }
+    // Life can be paid only up to your life total (rule 119.4).
+    return (life === 0 || p.life >= life) && p.hand.filter((c) => c !== spell).length >= discard && p.battlefield.length >= sacrifice;
+  }
+
+  /** Pay the life, discards and sacrifices ward asks for (rule 702.21a). */
+  private *payWardOther(p: PlayerState, targets: (Target | null)[], spell?: SimCard): Flow<void> {
+    for (const t of targets) {
+      const w = this.wardOf(p, t);
+      if (!w || (!w.life && !w.discard && !w.sacrifice)) continue;
+      const what = this.describeTarget(t!);
+      if (w.life) {
+        p.life -= w.life;
+        this.say(`${p.name} pays ${w.life} life for ward (${what}).`);
+      }
+      if (w.discard) {
+        const options = p.hand.filter((c) => c !== spell);
+        const picks = yield* this.choose(p, 'discard', `Ward (${what}): discard ${w.discard} card${w.discard > 1 ? 's' : ''}.`, options.map((c) => ({ label: c.name, card: c })), Math.min(w.discard, options.length), Math.min(w.discard, options.length));
+        for (const c of picks.map((i) => options[i])) {
+          p.hand.splice(p.hand.indexOf(c), 1);
+          this.discarded(p, c);
+        }
+      }
+      if (w.sacrifice) {
+        const options = p.battlefield.filter((q) => !q.emblem);
+        const picks = yield* this.choose(p, 'sacrifice', `Ward (${what}): sacrifice ${w.sacrifice} permanent${w.sacrifice > 1 ? 's' : ''}.`, options.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), Math.min(w.sacrifice, options.length), Math.min(w.sacrifice, options.length));
+        for (const q of picks.map((i) => options[i])) {
+          this.say(`${p.name} sacrifices ${q.card.name} for ward.`);
+          this.removePerm(q, 'graveyard');
+          this.sacrificed(p, q);
+        }
+      }
+    }
   }
 
   /**
@@ -3337,7 +3387,7 @@ export class Game {
 
     // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
     let ward = 0;
-    const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t));
+    const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t)) && this.wardPayable(p, [attachTo, ...targets, t], card);
     let attachTo: Target | null = null;
     // Curses enchant a player (rule 303.4). Only opponents are offered: a Curse on yourself is never what you want.
     if (permanent && card.curse) {
@@ -3448,6 +3498,7 @@ export class Game {
     }
     this.commitPayment(p, plan);
     p.life -= priced.cost.life + (card.xFromLife ? x : 0);
+    yield* this.payWardOther(p, [attachTo, ...targets], card);
     let manaSpent = 0;
     for (const units of plan.values()) manaSpent += units;
 
@@ -3641,7 +3692,7 @@ export class Game {
     let target: Target | null = null;
     const all = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
     if (all !== null) {
-      const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), discount, act.tap ? perm : undefined, true) !== null);
+      const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), discount, act.tap ? perm : undefined, true) !== null && this.wardPayable(p, [t]));
       if (!candidates.length) return false;
       target = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(perm.card, e), card: perm.card, effect: e, candidates, cancellable: true });
       if (!target || !candidates.some((c) => sameTarget(c, target!))) return false;
@@ -3667,6 +3718,7 @@ export class Game {
     this.commitPayment(p, plan);
     p.life -= act.cost.life;
     if (act.tap) perm.tapped = true;
+    yield* this.payWardOther(p, [target]);
     // Energy (rule 107.14) and charge counters paid as part of the cost. "Pay X {E}": X is the energy paid,
     // the target's mana value for HELIOS One, everything otherwise.
     let paidX = 0;
@@ -3899,7 +3951,7 @@ export class Game {
           targets.push(null);
           continue;
         }
-        let candidates = all.filter((c) => this.wardCost(p, c) === 0 || this.planPayment(p, NO_COST, WARD_COST, 0) !== null);
+        let candidates = all.filter((c) => (this.wardCost(p, c) === 0 || this.planPayment(p, NO_COST, this.wardCost(p, c), 0) !== null) && this.wardPayable(p, [c]));
         // "Counter that spell": only the spell that set it off.
         if (e.kind === 'counter' && e.subject) candidates = candidates.filter((c) => c.kind === 'stack' && c.id === t.subject);
         // No legal target: that part of the ability is removed (rule 603.3d).
@@ -3912,9 +3964,10 @@ export class Game {
         if (optional && !pick) continue;
         const chosen = pick && candidates.some((c) => sameTarget(c, pick)) ? pick : candidates[0];
         if (this.wardCost(p, chosen)) {
-          const plan = this.planPayment(p, NO_COST, WARD_COST, 0);
+          const plan = this.planPayment(p, NO_COST, this.wardCost(p, chosen), 0);
           if (plan) this.commitPayment(p, plan);
         }
+        yield* this.payWardOther(p, [chosen]);
         effects.push(e);
         targets.push(chosen);
       }

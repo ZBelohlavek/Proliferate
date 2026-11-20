@@ -1235,6 +1235,12 @@ export function classifyCard(raw: RawCard): SimCard {
   };
 
   if (named.name) card.counterName = named.name;
+  // Ward's cost (rule 702.21a).
+  const ward = text.match(/^ward(?: \{(\d+)\}|—pay (\d+) life|—discard (a|an|one|two|three) cards?|—sacrifice (a|an|one|two|three) [^.\n]*?)\.?$/m);
+  if (ward) {
+    const n = (w: string) => ({ a: 1, an: 1, one: 1, two: 2, three: 3 } as Record<string, number>)[w] ?? 1;
+    card.ward = ward[1] ? { mana: parseInt(ward[1], 10) } : ward[2] ? { life: parseInt(ward[2], 10) } : ward[3] ? { discard: n(ward[3]) } : { sacrifice: n(ward[4]) };
+  }
   // Deck-building rules the card itself changes (rules 903.3, 903.5b, 702.124).
   const deckRules = commanderRules(printed);
   if (deckRules.copyLimit !== undefined) card.copyLimit = deckRules.copyLimit;

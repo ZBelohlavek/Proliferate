@@ -986,6 +986,8 @@ export interface SimCard {
   entersWithX?: boolean;
   /** Planeswalkers: loyalty counters it enters with. */
   loyalty?: number;
+  /** Ward's cost as printed (rule 702.21): mana, life, cards to discard or permanents to sacrifice. Ward without one here costs {2}. */
+  ward?: { mana?: number; life?: number; discard?: number; sacrifice?: number };
   /** Battles (rule 310): the defense counters it enters with. */
   isBattle?: boolean;
   defense?: number;

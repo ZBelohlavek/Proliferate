@@ -151,3 +151,53 @@ describe('conditions the engine can see are checked, not rolled (rule 603.4)', (
     expect(g.pending.length).toBe(0);
   });
 });
+
+describe('ward as printed and crew at instant speed', () => {
+  it('ward—pay life costs life, not mana (rule 702.21a)', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const witch = t.game.put(1, creature('Life Warded', '{2}{B}', 3, 3, 2, { text: 'Ward—Pay 3 life.' }));
+    expect(witch.card.ward).toEqual({ life: 3 });
+    a.hand.push(bolt('Test Bolt deals 3 damage to any target.'));
+    t.lands(0, 1);
+    const cast = castOnce('Test Bolt');
+    t.handlers[0] = (g, d) => (d.kind === 'target' ? { kind: 'perm', id: witch.id } : cast(g, d));
+    const life = a.life;
+    t.finishTurn();
+    expect(a.life).toBe(life - 3);
+    expect(t.game.findPerm(witch.id)).toBeNull();
+  });
+
+  it('ward {4} needs four more mana', () => {
+    const t = new Table();
+    const [a] = t.game.players;
+    const big = t.game.put(1, creature('Mana Warded', '{4}{U}', 5, 3, 3, { text: 'Ward {4}' }));
+    expect(big.card.ward).toEqual({ mana: 4 });
+    a.hand.push(bolt('Test Bolt deals 3 damage to any target.'));
+    t.lands(0, 4);
+    let offered: number[] | undefined;
+    t.handlers[0] = (_g, d) => {
+      if (d.kind === 'target') offered = d.candidates.flatMap((c) => (c.kind === 'perm' ? [c.id] : []));
+      return castOnce('Test Bolt')(_g, d);
+    };
+    t.finishTurn();
+    // One land for the spell, four for ward: five needed, only four there.
+    expect(offered ?? []).not.toContain(big.id);
+  });
+
+  it('a Vehicle can be crewed on an opponent\'s turn, to block (rule 702.122a)', () => {
+    const t = new Table();
+    const vehicle = t.game.put(1, card({ name: 'Test Wagon', manaCost: '{2}', cmc: 2, types: ['Artifact'], subTypes: ['Vehicle'], power: '4', toughness: '4', text: 'Crew 1', colorIdentity: [] }));
+    t.game.put(1, creature('Pilot', '{G}', 1, 1, 1));
+    let crewOffered = false;
+    t.handlers[1] = (g, d) => {
+      if (d.kind === 'priority' && g.activeSeat === 0) {
+        const i = d.actions.findIndex((x) => x.type === 'crew' && x.permId === vehicle.id);
+        if (i !== -1) crewOffered = true;
+      }
+      return undefined;
+    };
+    t.finishTurn();
+    expect(crewOffered).toBe(true);
+  });
+});
