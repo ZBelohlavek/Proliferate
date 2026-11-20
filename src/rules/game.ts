@@ -148,6 +148,9 @@ const CURSE_HARM: Record<CurseAct, number> = {
 /** What a Treasure token is, for locks on artifacts' abilities (Karn, the Great Creator). */
 const TREASURE_TYPES = { isCreature: false, isArtifact: true, isEnchantment: false };
 /** A Food's ability: "{2}, {T}, Sacrifice this permanent: You gain 3 life." Creatures have it while Ygra is out. */
+/** Most permanents a player gets tokens up to (see boardFull). */
+const BOARD_CAP = 250;
+
 export const FOOD: Effect = { kind: 'gainLife', n: 3, when: 'activated', activation: { cost: { generic: 2, pips: [], x: 0, life: 0 }, tap: true, sacrifice: true } };
 /** Mana an opponent pays to target a permanent with ward (the classifier doesn't keep the exact ward cost). */
 const WARD_COST = 2;
@@ -5478,7 +5481,7 @@ export class Game {
           this.say(`${p.name} amasses ${e.power}${made.length ? ', making an Army token' : ''} (Army is ${this.power(army)}/${this.toughness(army)}).`);
           break;
         }
-        const count = Math.min((e.n === -1 ? x : e.n) * 2 ** this.doublers(p, 'tokens'), 40);
+        const count = Math.min((e.n === -1 ? x : e.n) * 2 ** this.doublers(p, 'tokens'), 40, Math.max(0, BOARD_CAP - p.battlefield.length));
         // Moonlit Meditation: the first tokens each turn are copies of the enchanted permanent instead.
         const host = count > 0 ? this.moonlitHost(p) : null;
         if (host) {
@@ -9598,9 +9601,18 @@ export class Game {
 
   /** Make one token that copies `card` for `p` (its enters abilities happen, rule 707.2). */
   private *makeCopyToken(p: PlayerState, card: SimCard, landInfo?: LandInfo): Flow<Perm | null> {
+    if (this.boardFull(p)) return null;
     const made = yield* this.enter(p, card, false, 0, null, undefined, 'token');
     if (made && landInfo) made.landInfo = landInfo;
     return made;
+  }
+
+  /**
+   * A board this big only comes from a loop that has already won in practice (Myrkul and Ondu Spiritdancer
+   * copying each other): further tokens are left out so the simulation can finish the game.
+   */
+  private boardFull(p: PlayerState): boolean {
+    return p.battlefield.length >= BOARD_CAP;
   }
 
   /** Token copies (Kiki-Jiki, Helm of the Host, Second Harvest, March of Progress ...). */
