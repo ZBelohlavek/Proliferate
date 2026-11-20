@@ -157,6 +157,8 @@ export interface Perm {
   encoded?: SimCard[];
   /** Hideaway (rule 702.75): the card exiled face down with it. */
   hidden?: SimCard;
+  /** Seat of the hidden card's owner: whoever hid it from their library, not always the permanent's owner. */
+  hiddenOwner?: number;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
@@ -204,6 +206,9 @@ export interface PlayerState {
   pool?: PoolMana[];
   /** Turn number on which this player last lost life (Gev). */
   lostLifeTurn: number;
+  /** Turn number on which this player last discarded a card, and last attacked with a creature (conditions, rule 603.4). */
+  discardedTurn?: number;
+  attackedTurn?: number;
   /** Experience counters (Meren, Kratos). */
   experience: number;
   /** Energy counters (rule 122.1). */
@@ -360,6 +365,8 @@ export interface StackItem {
   subject?: number;
   /** Cast face down for {3} (morph, disguise): the real card. `card` is then the nameless 2/2 everyone sees. */
   faceDown?: SimCard;
+  /** Cast transformed (a defeated Siege, rule 310.11b): the card's front face. `card` is then its back face. */
+  front?: SimCard;
   /** Cast for its mutate cost: the permanent it merges with (rule 702.140). */
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */
@@ -442,7 +449,7 @@ export interface ChoiceOption {
 }
 
 export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost' | 'protector' | 'legend';
-export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate';
+export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate' | 'payTax';
 
 export type Decision =
   /** The player has priority: take one of these actions (the first is always "pass"). */
