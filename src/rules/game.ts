@@ -21,7 +21,7 @@ import type {
   About, Action, Answer, AttackDeclaration, BlockDeclaration, CastFrom, ChoiceOption, ChooseReason, Decision, DiedCard, HeldCard, MayPlay, Perm, PlayerState, PoolMana, PriorityAnswer, StackItem, Step, Target,
 } from './types';
 import type { CardKind, Who } from '../engine/typesExile';
-import { artifactCount, assembledCombo, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
+import { artifactCount, assembledCombo, comboPlan, UPKEEP_COUNTERS, UPKEEP_WINS, WINCON_NAMES } from './wincons';
 
 /** A piece of the game that may stop to ask players for decisions. */
 export type Flow<T> = Generator<Decision, T, Answer>;
@@ -249,7 +249,8 @@ export class Game {
   /** Isochron Scepter: the card exiled with each one (keyed by permanent id). */
   readonly imprinted = new Map<number, SimCard>();
   /** Life each seat lost this turn (Bloodchief Ascension). */
-  private lifeLostThisTurn: number[] = [];
+  /** Life each seat has lost this turn (read by combo conditions in wincons.ts). */
+  lifeLostThisTurn: number[] = [];
   /** Seats that can't cast spells this turn (Silence). */
   private readonly silenced = new Set<number>();
   /** Pacts: what each seat must pay at its next upkeep or lose the game. */
@@ -258,6 +259,8 @@ export class Game {
   diedThisTurn = 0;
   /** Seats that hold a card from a combo or an alternative win, so the checks cost nothing for other decks. */
   private readonly winconSeats = new Set<number>();
+  /** Loops aimed at one opponent, by "seat:combo", with the turn each last ran (once a turn). */
+  private readonly comboTurns = new Map<string, number>();
 
   constructor(decks: SimDeck[], seed: number, opts: GameOptions = {}) {
     if (decks.length < 2 || decks.length > 6) throw new Error(`A game needs 2–6 players, got ${decks.length}.`);
@@ -305,6 +308,7 @@ export class Game {
     this.lifeLostThisTurn = this.players.map(() => 0);
     this.players.forEach((p, seat) => {
       if ([...p.deck.commanders, ...p.deck.cards.map((e) => e.card)].some((c) => WINCON_NAMES.has(c.name) && !c.effects.some((e) => e.kind === 'winIf'))) this.winconSeats.add(seat);
+      if (comboPlan(p).combos.length) this.winconSeats.add(seat);
     });
   }
 
@@ -5206,7 +5210,8 @@ export class Game {
     max = Math.min(max, options.length);
     min = Math.min(min, max);
     if (max <= 0) return [];
-    if (min === options.length) return options.map((_, i) => i);
+    // Taking all of them is no choice, unless the order is the choice (putting cards back in any order).
+    if (min === options.length && (options.length === 1 || (reason !== 'rearrange' && reason !== 'stack'))) return options.map((_, i) => i);
     const answer = yield* ask<number[] | null>({ kind: 'choose', seat: p.seat, reason, prompt, options, min, max });
     const picks = [...new Set((Array.isArray(answer) ? answer : []).filter((i) => Number.isInteger(i) && i >= 0 && i < options.length))].slice(0, max);
     // Fill up from the front if too few were picked.
@@ -6795,6 +6800,9 @@ export class Game {
         this.say(`${perm.card.name} returns to ${owner.name}'s hand.`);
         this.removePerm(perm, 'hand');
         break;
+      case 'proteus':
+        yield* this.proteus(perm);
+        break;
       case 'damage':
         if (e.energyPaid) {
           // Galvanic Discharge: pay just enough energy to kill it, or all of it if that falls short.
@@ -6830,6 +6838,55 @@ export class Game {
         break;
       }
     }
+  }
+
+  /**
+   * Proteus Staff: the creature goes to the bottom of its owner's library (a commander may go to the
+   * command zone instead, rule 903.9b). Its controller reveals cards from the top of their library
+   * until a creature card, puts that onto the battlefield and the rest on the bottom in any order.
+   * With no other creature in the library, the one just tucked comes straight back and the
+   * controller gets to stack their whole library.
+   */
+  private *proteus(perm: Perm): Flow<void> {
+    const controller = this.players[perm.seat];
+    const owner = this.players[perm.owner ?? perm.seat];
+    const card = perm.token ? null : realCard(perm);
+    this.say(`${perm.card.name} is put on the bottom of ${owner.name}'s library.`);
+    this.removePerms([perm], 'library');
+    if (card) {
+      const at = owner.library.indexOf(card);
+      if (at !== -1) {
+        owner.library.splice(at, 1);
+        owner.library.push(card);
+      }
+      const pending = this.pendingCommander.findIndex((c) => c.card === card);
+      if (pending !== -1) {
+        this.pendingCommander.splice(pending, 1);
+        const move = yield* ask<boolean>({ kind: 'confirm', seat: owner.seat, reason: 'commandZone', prompt: `Return ${card.name} to the command zone? (Otherwise it stays on the bottom of your library.)`, card, to: 'library' });
+        if (move && owner.library.includes(card)) {
+          owner.library.splice(owner.library.indexOf(card), 1);
+          owner.commandZone.push(card);
+          this.say(`${card.name} returns to ${owner.name}'s command zone.`);
+        }
+      }
+    }
+    if (!controller.alive) return;
+    const lib = controller.library;
+    const at = lib.findIndex((c) => c.isCreature);
+    const revealed = lib.splice(0, at === -1 ? lib.length : at);
+    const found = at === -1 ? null : lib.shift()!;
+    this.say(`${controller.name} reveals ${revealed.length + (found ? 1 : 0)} card${revealed.length + (found ? 1 : 0) === 1 ? '' : 's'}${found ? ` and finds ${found.name}` : ' and finds no creature'}.`);
+    if (revealed.length) {
+      const picks = revealed.length === 1 ? [0] : yield* this.choose(controller, 'stack', `Put the ${revealed.length} revealed cards on the bottom of your library in any order: choose them from the top down.`, revealed.map((c) => ({ label: c.name, card: c })), revealed.length, revealed.length);
+      const order = [...picks.map((i) => revealed[i]), ...revealed.filter((_, i) => !picks.includes(i))];
+      lib.push(...order);
+      if (revealed.length > 1) this.say(`${controller.name} puts the rest on the bottom of their library in the order they choose.`);
+    }
+    if (!found) return;
+    const isCommander = controller.deck.commanders.includes(found);
+    const entered = yield* this.enter(controller, found, isCommander, 0, null);
+    // Fblthp, the Lost: "If it entered from your library ..., draw two cards instead."
+    if (entered && found.name === 'Fblthp, the Lost') this.trigger(controller, found, entered.id, [{ kind: 'draw', n: 1, when: 'resolve' } as Effect]);
   }
 
   /**
@@ -8499,6 +8556,28 @@ export class Game {
     if (!opps.length) return;
     const found = assembledCombo(this, p);
     if (!found) return;
+    if (found.kind === 'one' || found.kind === 'millOne') {
+      // A loop aimed at one opponent: the one doing best goes, once a turn.
+      const key = `${p.seat}:${found.combo.name}`;
+      if (this.comboTurns.get(key) === this.turnNumber) return;
+      const pool = opps.filter((o) => (found.kind === 'one' ? !o.shielded && o.life > 0 : o.library.length > 0));
+      if (!pool.length) return;
+      this.comboTurns.set(key, this.turnNumber);
+      const victim = pool.reduce((a, b) => (b.life + b.battlefield.length > a.life + a.battlefield.length ? b : a));
+      if (found.kind === 'one') {
+        this.say(`${p.name} loops ${found.combo.name} at ${victim.name}.`);
+        this.loseLife(victim, victim.life, p, 'noncombat');
+      } else {
+        this.say(`${p.name} loops ${found.combo.name} and mills ${victim.name}'s library.`);
+        for (const card of victim.library.splice(0)) this.toGraveyard(victim, card, false);
+        victim.milledBy = p.seat;
+      }
+      return;
+    }
+    if (found.kind === 'win') {
+      this.winGame(p, found.combo.name);
+      return;
+    }
     if (found.kind === 'mill') {
       // Every opponent's library goes to the graveyard; each loses the next time they would draw.
       const left = opps.filter((o) => o.library.length > 0);

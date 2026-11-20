@@ -12,7 +12,7 @@ import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isI
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
-import { COMBOS, missingComboPieces, UPKEEP_WINS, WINCON_NAMES } from './wincons';
+import { comboPlan, missingComboPieces, pieceZones, UPKEEP_WINS, wantedPieces, WINCON_NAMES } from './wincons';
 
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
@@ -105,7 +105,7 @@ export function threat(g: Game, perm: Perm): number {
   }
   if (perm.isCommander) t += 4;
   // Combo pieces and alternative win conditions are worth answering even when they look harmless.
-  if (WINCON_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw' || e.kind === 'winIf')) t += 6;
+  if (WINCON_NAMES.has(card.name) || comboPlan(g.players[perm.seat]).pieces.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw' || e.kind === 'winIf')) t += 6;
   // Platinum Angel, Phyrexian Unlife: what keeps a player at 0 or less life in the game.
   const shield = card.effects.find((e) => e.kind === 'cantLose' && e.when === 'static');
   if (shield && shield.kind === 'cantLose') t += g.players[perm.seat].life <= 0 ? 30 : shield.lifeOnly ? 2 : 6;
@@ -243,6 +243,8 @@ export class Bot implements Agent {
         // Vihaan: Treasures become 3/3 attackers when there are enough of them to matter.
         if (d.reason === 'animate') return p.treasures >= 3;
         if (d.reason === 'payTax') return this.payTax(g, p, d.prompt, d.card);
+        // Proteus Staff on our own commander with no other creature in the library: it comes right back, so leave it there.
+        if (d.to === 'library' && d.card && !p.library.some((c) => c !== d.card && c.isCreature) && p.library.length > 2) return false;
         // A commander that was bounced is cheaper to recast from hand (no tax); otherwise take it back.
         return d.to !== 'hand';
     }
@@ -706,7 +708,7 @@ export class Bot implements Agent {
       if (top.effects[i].kind === 'removal' && perm?.seat === p.seat && threat(g, perm) >= 7) return true;
     }
     // The last piece of a combo or an alternative win the caster already has the rest of.
-    if (COMBOS.some((c) => c.pieces.some((g1) => g1.includes(top.card.name)) && c.pieces.every((g1) => g1.includes(top.card.name) || caster.battlefield.some((q) => g1.includes(q.card.name))))) return true;
+    if (comboPlan(caster).combos.some((c) => c.pieces.some((g1) => g1.includes(top.card.name)) && c.pieces.every((g1) => g1.includes(top.card.name) || caster.battlefield.some((q) => g1.includes(q.card.name))))) return true;
     if (top.isCommander || top.card.value >= 9) return this.rng.chance(0.6);
     if (top.card.value >= 6) return this.rng.chance(0.25);
     return false;
@@ -1017,7 +1019,14 @@ export class Bot implements Agent {
     if (kinds.has('silence') && kinds.size === 1) return 45;
 
     // Combos and alternative wins: the missing piece goes down as soon as possible.
-    if (missingComboPieces(p).has(card.name)) return this.comboReady(p, card) ? 120 : null;
+    const zones = comboPlan(p).pieces.has(card.name) ? pieceZones(p, card.name) : '';
+    if (zones) {
+      // A piece that does its job from the battlefield goes down as soon as it can.
+      if (zones.includes('B') && missingComboPieces(p).has(card.name)) return this.comboReady(p, card) ? 120 : null;
+      // A piece that has to stay in hand (cast as part of the loop, or imprinted on Isochron Scepter) is held while the rest comes together.
+      if (!zones.includes('B') && this.comboUnderway(p, card)) return null;
+      if (card.name === 'Isochron Scepter') return this.comboReady(p, card) ? 120 : null;
+    }
     if (ALT_WIN_NAMES.has(card.name) || card.effects.some((e) => e.kind === 'winOnEmptyDraw')) return 70 + card.value;
     // Don't draw ourselves out of the game.
     const drawsN = card.effects.reduce((n, e) => n + (e.kind === 'draw' && e.when === 'resolve' ? (e.n === -1 ? x : e.n) : 0), 0);
@@ -1191,7 +1200,58 @@ export class Bot implements Agent {
 
   private comboReady(p: PlayerState, card: SimCard): boolean {
     if (card.name !== 'Isochron Scepter') return true;
-    return p.hand.some((c) => c.name === 'Dramatic Reversal');
+    // Only with the instant it is meant to imprint in hand.
+    return p.hand.some((c) => c.name === 'Dramatic Reversal' || (c.isInstant && c.cmc <= 2 && pieceZones(p, c.name).includes('S')));
+  }
+
+  /** True if `card` belongs to a combo of the deck's plan of which `p` already holds another piece. */
+  private comboUnderway(p: PlayerState, card: SimCard): boolean {
+    const have = new Set([...p.hand.filter((c) => c !== card).map((c) => c.name), ...p.battlefield.map((q) => q.card.name), ...p.commandZone.map((c) => c.name)]);
+    return comboPlan(p).combos.some((c) => c.pieces.some((g1) => g1.includes(card.name)) && c.pieces.some((g1) => !g1.includes(card.name) && g1.some((n) => have.has(n))));
+  }
+
+  /**
+   * How much `p` wants `c` as its next draw: missing combo pieces first (the nearest combo's
+   * first), then a land when short of them, then what it can cast soon.
+   */
+  drawWorth(g: Game, p: PlayerState, c: SimCard, wanted: string[]): number {
+    const at = wanted.indexOf(c.name);
+    if (at !== -1) return 100 - at;
+    const lands = g.landCount(p) + p.hand.filter((x) => x.isLand).length;
+    if (c.isLand) return lands < 5 ? 6 : lands >= 8 ? -2 : 1;
+    if (!c.modeled) return -1;
+    return c.cmc > g.landCount(p) + 3 ? 0.5 : c.value;
+  }
+
+  /**
+   * Proteus Staff's "rest on the bottom in any order", which with no other creature in the library
+   * is the whole library: the cards we want next on top (the nearest combo's missing pieces and
+   * what finishes it), then lands while short of them, then the rest by how good they are.
+   */
+  private stackOrder(g: Game, p: PlayerState, cards: SimCard[]): number[] {
+    const wanted = wantedPieces(p);
+    const idx = cards.map((_, i) => i);
+    const worth = cards.map((c) => this.drawWorth(g, p, c, wanted));
+    // Each name once at the front: a second copy of a wanted card is just a card.
+    const seen = new Set<string>();
+    for (const i of [...idx].sort((a, b) => worth[b] - worth[a])) {
+      if (worth[i] >= 50 && seen.has(cards[i].name)) worth[i] = cards[i].value;
+      seen.add(cards[i].name);
+    }
+    return idx.sort((a, b) => worth[b] - worth[a]);
+  }
+
+  /**
+   * Proteus Staff on our own creature: with no other creature card left in the library, the creature
+   * comes straight back and we stack the whole library (Fblthp, the Lost also draws two as it returns).
+   */
+  private stackTarget(g: Game, p: PlayerState, candidates: Target[]): Perm | null {
+    if (p.library.some((c) => c.isCreature) || p.library.length < 3) return null;
+    const mine = candidates.flatMap((t) => (t.kind === 'perm' ? [g.findPerm(t.id)] : [])).filter((q): q is Perm => !!q && q.seat === p.seat && q.card.isCreature && !q.token);
+    if (!mine.length) return null;
+    // The one whose return is worth the most: an enters-the-battlefield draw first.
+    const etbDraw = (q: Perm) => q.card.effects.some((e) => e.kind === 'draw' && e.when === 'resolve') ? 10 : 0;
+    return mine.reduce((a, b) => (etbDraw(b) - threat(g, b) * 0.1 > etbDraw(a) - threat(g, a) * 0.1 ? b : a));
   }
 
   private chooseAbility(g: Game, p: PlayerState, actions: Action[]): Action | undefined {
@@ -1300,6 +1360,7 @@ export class Bot implements Agent {
           if (e.self) return this.selfPumpNow(g, p, perm, e);
           return !!e.grant?.includes('unblockable') && g.step === 'main1' && g.activeSeat === p.seat && p.battlefield.some((q) => q.card.isCreature && !q.tapped && !q.sick && g.power(q) >= 3);
         case 'removal': {
+          if (e.mode === 'proteus' && this.stackTarget(g, p, g.targetCandidates(p, e, perm) ?? [])) return true;
           const t = this.removalTarget(g, p, e, 0, g.targetCandidates(p, e, perm) ?? []);
           return !!t && t.score >= 3 + g.round * 0.2;
         }
@@ -1692,6 +1753,8 @@ export class Bot implements Agent {
         // The attacker that would hurt us most.
         return asTarget(bestOf(perms, (q) => (q.attacking === p.seat ? 10 : 0) + (q.blocked ? 0 : 5) + g.power(q))) ?? d.candidates[0];
       case 'removal': {
+        const stack = e.mode === 'proteus' ? this.stackTarget(g, p, d.candidates) : null;
+        if (stack) return asTarget(stack);
         const pick = this.removalTarget(g, p, e, this.castingX, d.candidates);
         if (pick) return pick.target;
         // Forced to choose (a trigger): the least valuable legal target.
@@ -1936,6 +1999,8 @@ export class Bot implements Agent {
         if (perm.card.effects.some((f) => f.kind === 'shuffleWhenTargeted')) score *= 0.2;
         if (g.hasKw(perm, 'ward')) score *= 0.6;
         if (e.mode === 'bounce') score *= perm.token ? 1.3 : 0.7;
+        // Proteus Staff: they get the next creature from their library in its place.
+        if (e.mode === 'proteus') score *= perm.token ? 1.3 : 0.5;
       } else continue;
       if (!best || score > best.score) best = { target: t, score };
     }
@@ -2487,14 +2552,16 @@ export class Bot implements Agent {
       }
       case 'bottom':
       case 'discard': {
+        // Combo pieces are the last to go.
         const lands = p.hand.filter((c) => c.isLand).length;
-        return top((i) => -this.cardScore(g, p, card(i), lands), d.min);
+        const pieces = comboPlan(p).pieces;
+        return top((i) => -this.cardScore(g, p, card(i), lands) - (pieces.has(card(i).name) ? 20 : 0), d.min);
       }
       case 'tutor': {
         const needLand = g.landCount(p) < 4 && !p.hand.some((c) => c.isLand);
-        // The missing piece of a combo beats anything else.
-        const missing = missingComboPieces(p);
-        return top((i) => (missing.has(card(i).name) ? 300 : 0) + (card(i).isLand === needLand ? 100 : 0) + card(i).value, 1);
+        // The missing piece of the nearest combo beats anything else.
+        const wanted = wantedPieces(p);
+        return top((i) => (wanted.includes(card(i).name) ? 300 - wanted.indexOf(card(i).name) : 0) + (card(i).isLand === needLand ? 100 : 0) + card(i).value, 1);
       }
       case 'recursion':
         return top((i) => card(i).value, d.max);
@@ -2565,11 +2632,13 @@ export class Bot implements Agent {
           return threat(g, q) - (q.card.isLegendary && q.seat === p.seat ? 100 : 0);
         }, 1);
       case 'scry': {
-        // Send away lands when flooded, expensive spells when short of lands.
+        // Send away lands when flooded, expensive spells when short of lands. Never a combo piece we still need.
         const lands = g.landCount(p);
         const landsInHand = p.hand.filter((c) => c.isLand).length;
+        const wanted = wantedPieces(p);
         return indexes.filter((i) => {
           const c = card(i);
+          if (wanted.includes(c.name)) return false;
           if (c.isLand) return lands + landsInHand >= 6;
           if (!c.modeled) return true;
           return c.cmc > lands + 3;
@@ -2612,13 +2681,15 @@ export class Bot implements Agent {
         // Cast for free: the biggest useful spell, never one that would only hurt us.
         return top((i) => (this.freeWorth(g, p, card(i)) > 0 ? 100 + this.freeWorth(g, p, card(i)) : -1), 1).filter((i) => this.freeWorth(g, p, card(i)) > 0);
       case 'rearrange': {
-        // Best cards on top: what we can cast soon, a land when short. Ponder shuffles when nothing is worth keeping.
-        const lands = g.landCount(p) + p.hand.filter((c) => c.isLand).length;
-        const worth = (c: SimCard) => (c.isLand ? (lands < 5 ? 6 : lands >= 8 ? -2 : 1) : !c.modeled ? -1 : c.cmc > g.landCount(p) + 3 ? 0.5 : c.value);
+        // Best cards on top: missing combo pieces, what we can cast soon, a land when short. Ponder shuffles when nothing is worth keeping.
+        const wanted = wantedPieces(p);
+        const worth = (c: SimCard) => this.drawWorth(g, p, c, wanted);
         const order = top((i) => worth(card(i)), d.options.length);
         if (d.min === 0 && order.every((i) => worth(card(i)) <= 1)) return [];
         return order;
       }
+      case 'stack':
+        return this.stackOrder(g, p, d.options.map((o) => o.card!));
       case 'mutate': {
         // On top when the new card brings the better body: power counts double, evasion helps.
         const body = (c: SimCard) => c.power * 2 + c.toughness + (c.keywords.includes('flying') || c.keywords.includes('unblockable') ? c.power : 0);
