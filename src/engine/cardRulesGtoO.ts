@@ -102,10 +102,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     text: '',
     why: 'Voting: bots vote together in this engine, so its drain never happens. It plays as a 2/1.',
   },
-  'Hallowed Haunting': {
-    text: 'Whenever you cast an enchantment spell, create a white Spirit Cleric creature token with "This token\'s power and toughness are each equal to the number of Spirits you control."',
-    why: 'Flying and vigilance with seven enchantments is left out: its deck rarely gets there.',
-  },
   'Hammer of Purphoros': {
     text: 'Creatures you control have haste.\n{3}{R}, {T}: Create a 3/3 colorless Golem enchantment artifact creature token.',
     why: 'Sacrificing a land is played as one more mana in the cost.',
@@ -291,10 +287,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     text: 'When you cast this spell, draw four cards.\nAnnihilator 4\nIf ~ would be put into a graveyard from anywhere, reveal ~ and shuffle it into its owner\'s library instead.',
     why: 'Its owner shuffles their whole graveyard into their library; played as Kozilek alone.',
   },
-  'Kratos, God of War': {
-    text: "Double strike\nCreatures you control have haste.\nAt the beginning of each player's end step, ~ deals damage to that player equal to the number of creatures that player controls that didn't attack this turn.",
-    why: 'All creatures have haste, opponents\' too; played for yours.',
-  },
   'Kroxa, Titan of Death\'s Hunger': {
     text: "When ~ enters, sacrifice it unless it escaped.\nWhenever ~ enters or attacks, each opponent discards a card, then each opponent who didn't discard a nonland card this way loses 3 life.\nEscape—{B}{B}{R}{R}, Exile five other cards from your graveyard.",
     why: 'Played as written (rule 702.138c: "escaped").',
@@ -396,12 +388,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
     text: '{T}: Draw a card, then discard a card.\n{4}, {T}: Transform ~.',
     why: 'Four permanent types in your graveyard to transform is left out.',
   },
-  'Mauhúr, Uruk-hai Captain': {
-    text: 'Menace',
-    add: [{ kind: 'doubler', tokens: false, counters: true, when: 'static' }],
-    notes: ['More +1/+1 counters on your creatures (≈ doubling)'],
-    why: 'One extra +1/+1 counter on an Army, Goblin or Orc is played as doubling: its Armies get one counter at a time.',
-  },
   'Mentor of the Meek': {
     text: 'Whenever another creature you control enters, you may pay {1}. If you do, draw a card.',
     why: 'Only creatures with power 2 or less: in its deck, most are.',
@@ -441,12 +427,6 @@ export const CARD_RULES_G_TO_O: Record<string, CardRule> = {
   'Mondrak, Glory Dominus': {
     text: 'If one or more tokens would be created under your control, twice that many of those tokens are created instead.\n{1}{W}{W}, Sacrifice a creature: Put an indestructible counter on ~.',
     why: 'Sacrificing two artifacts or creatures is played as one creature.',
-  },
-  'Monstrosity of the Lake': {
-    text: 'Islandcycling {2}',
-    add: [{ kind: 'stun', tap: true, n: 99, when: 'resolve', chance: 0.4 }],
-    notes: ['When it enters, pay {5}: tap all opponents\' creatures and stun them (≈ 40%)'],
-    why: 'The {5} is only paid sometimes; it taps and stuns opponents\' creatures about 40% of the time.',
   },
   'Monument to Endurance': {
     text: 'Whenever you discard a card, draw a card. This ability triggers only once each turn.\nWhenever you discard a card, each opponent loses 3 life. This ability triggers only once each turn.',

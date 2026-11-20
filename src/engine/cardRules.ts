@@ -29,6 +29,7 @@ import { CARD_RULES_G_TO_O } from './cardRulesGtoO';
 import { LAND_RULES } from './cardRulesLands';
 import { LATE_RULES } from './cardRulesLate';
 import { FINAL_RULES } from './cardRulesFinal';
+import { EXACT_RULES } from './cardRulesExact';
 
 export interface CardRule {
   text?: string;
@@ -197,6 +198,7 @@ export const CARD_RULES: Record<string, CardRule> = {
 
   // --- The last rules-bending cards (cardRulesFinal.ts) -------------------------------------
   ...FINAL_RULES,
+  ...EXACT_RULES,
 };
 
 /** Apply a card's own rule to what the reader made of it. The caller re-derives `modeled` and `value`. */

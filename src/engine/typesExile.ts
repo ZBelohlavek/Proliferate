@@ -47,6 +47,8 @@ export type ExileEffect =
       ownTurn?: boolean; /** Exile cards until one of this kind is exiled; only that one may be played. */ untilKind?: CardKind;
       /** Played while the source stays on the battlefield (Nightveil Specter, Intellect Devourer). */ whileSource?: boolean;
       /** Exile from a hand (Intellect Devourer) or a graveyard (Savvy Trader) instead of a library. */ zone?: 'hand' | 'graveyard';
+      /** Cards still exiled go back to their owners' hands when the source leaves (Intellect Devourer). */ returnToHand?: boolean;
+      /** At the next end step, cards still exiled go to their owners' graveyards (Mnemonic Betrayal). */ endReturn?: 'graveyard';
     }
   /**
    * Cast spells without paying their mana costs as this resolves (rule 608.2g).
@@ -58,7 +60,8 @@ export type ExileEffect =
    * instead of casting it free (Tinybones). exileAfter: an instant or sorcery cast this way is exiled afterwards.
    */
   | {
-      kind: 'freeCast'; from: 'top' | 'until' | 'hand' | 'graveyard' | 'search'; n: number; casts: number; who: Who;
+      kind: 'freeCast'; from: 'top' | 'until' | 'hand' | 'graveyard' | 'search' | /** The cards just milled (Jace's Mindseeker). */ 'milled';
+      /** An opponent chooses one of the cards first; it can't be cast (Plargg and Nassari). */ oppExcludes?: boolean; n: number; casts: number; who: Who;
       /** A graveyard card chosen at random from each player (Kefka). */ random?: boolean;
       only?: CardKind; maxCmc?: number; rest?: 'bottom' | 'graveyard' | 'hand' | 'shuffle' | 'exile' | 'top';
       copy?: boolean; copies?: number; pay?: boolean; anyMana?: boolean; exileAfter?: boolean;

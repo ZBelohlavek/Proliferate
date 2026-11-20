@@ -8,7 +8,7 @@
 import { isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
 import type { Color, Effect, Mana, SimCard } from '../engine/types';
-import { cardColors, chargeUse, commanderName, counterMatches, FOOD, isAura, isInstantSpeed, type Game } from './game';
+import { cardColors, chargeUse, commanderName, counterMatches, creatureTypes, FOOD, isAura, isInstantSpeed, type Game } from './game';
 import type {
   Action, Agent, Answer, AttackDeclaration, BlockDeclaration, Decision, Perm, PlayerState, PriorityAnswer, StackItem, Target,
 } from './types';
@@ -17,7 +17,7 @@ import { comboPlan, missingComboPieces, pieceZones, UPKEEP_WINS, wantedPieces, W
 const ALT_WIN_NAMES = new Set(Object.keys(UPKEEP_WINS));
 
 const ALL_COLORS: Mana[] = ['W', 'U', 'B', 'R', 'G'];
-const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect', 'preventNext', 'deathShield']);
+const REACTIVE_KINDS = new Set(['counter', 'pump', 'protect', 'copySpell', 'fog', 'redirect', 'preventNext', 'deathShield', 'energyCounter', 'saveBounce', 'phaseOut', 'graceTurn']);
 /** What a copy aimed at our own creature can carry and still help it (Ivy). */
 const KIND_TO_US = new Set(['pump', 'protect', 'counters', 'kwCounter', 'untap', 'gainLife', 'draw']);
 
@@ -243,6 +243,10 @@ export class Bot implements Agent {
         // Vihaan: Treasures become 3/3 attackers when there are enough of them to matter.
         if (d.reason === 'animate') return p.treasures >= 3;
         if (d.reason === 'payTax') return this.payTax(g, p, d.prompt, d.card);
+        // "You may pay {N}" (Monstrosity of the Lake, Trail of Crumbs, Tolarian Kraken, Mana Vault): pay when the mana is there.
+        if (d.reason === 'mayPay') return g.availableMana(p) >= Number(/pay \{(\d+)\}/.exec(d.prompt)?.[1] ?? 0);
+        // Professor Onyx: discard spare cards (extra lands, a full hand) rather than lose 3 life, unless life is plentiful.
+        if (d.reason === 'discardOrLose') return p.life <= 12 || p.hand.length >= 4 || p.hand.some((c) => c.isLand && g.landCount(p) >= 5);
         // Proteus Staff on our own commander with no other creature in the library: it comes right back, so leave it there.
         if (d.to === 'library' && d.card && !p.library.some((c) => c !== d.card && c.isCreature) && p.library.length > 2) return false;
         // A commander that was bounced is cheaper to recast from hand (no tax); otherwise take it back.
@@ -584,7 +588,7 @@ export class Bot implements Agent {
   /** Counter an opponent's spell, copy it, or protect a permanent it targets. */
   private response(g: Game, p: PlayerState, top: StackItem, casts: CastAction[]): Action | undefined {
     if (top.kind === 'spell') {
-      const counters = casts.filter((a) => castAs(g, p, a).effects.some((e) => e.kind === 'counter' && e.when === 'resolve' && counterMatches(e.target, top.card)));
+      const counters = casts.filter((a) => castAs(g, p, a).effects.some((e) => (e.kind === 'counter' && e.when === 'resolve' && counterMatches(e.target, top.card)) || (e.kind === 'energyCounter' && p.energy + 2 >= 3)));
       // Pay with mana when possible; a free counter costs a card, so it is kept for what really matters.
       const counter = counters.find((a) => a.from !== 'alt') ?? counters.find(() => this.urgent(g, p, top));
       if (counter && this.wantsToCounter(g, p, top)) return counter;
@@ -593,6 +597,11 @@ export class Bot implements Agent {
         const copy = casts.find((a) => a.from !== 'alt' && a.card.effects.some((e) => e.kind === 'copySpell' && e.what === 'spell' && !e.yours));
         if (copy) return copy;
       }
+    }
+    // Tishana's Tidebinder: flash it in to counter an opponent's ability worth stopping.
+    if (top.kind === 'ability' && top.controller !== p.seat && stackWorth(top) >= 2) {
+      const binder = casts.find((a) => a.from !== 'alt' && a.card.effects.some((e) => e.kind === 'counterAbility' && e.when === 'resolve'));
+      if (binder) return binder;
     }
     // A board wipe that would cost us a real board: protect all of it if we can.
     if (top.controller !== p.seat && top.effects.some((e) => e.kind === 'wipe') && boardThreat(g, p, true) > 6) {
@@ -607,7 +616,7 @@ export class Bot implements Agent {
       const perm = g.findPerm(t.id);
       if (!perm || perm.seat !== p.seat || threat(g, perm) < 5) continue;
       // Protection, or a blink that makes the removal lose its target.
-      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => (f.kind === 'protect' && (f.returns === undefined || ((e.mode === 'destroy' || e.mode === 'damage') && perm.card.isCreature && !perm.token))) || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
+      const save = casts.find((a) => a.from !== 'alt' && isInstantSpeed(a.card) && a.card.effects.some((f) => f.kind === 'saveBounce' || f.kind === 'phaseOut' || (f.kind === 'protect' && (f.returns === undefined || ((e.mode === 'destroy' || e.mode === 'damage') && perm.card.isCreature && !perm.token))) || (f.kind === 'pump' && f.protect) || (f.kind === 'blink' && f.when === 'resolve' && (f.what === 'permanent' || perm.card.isCreature) && !perm.token)));
       if (save) return save;
     }
     return undefined;
@@ -1052,7 +1061,10 @@ export class Bot implements Agent {
 
     if (kinds.has('wipe')) {
       const wipe = card.effects.find((e): e is Wipe => e.kind === 'wipe' && (e.when === 'resolve' || e.when === 'unlock'))!;
-      return this.wipeIsGood(g, p, wipe, x) ? 95 : null;
+      // Calamity of the Titans: x is the mana value of the colorless creature card we would reveal.
+      const shown = wipe.belowReveal ? Math.max(-1, ...p.hand.filter((c) => c !== card && c.isCreature && !cardColors(c).length).map((c) => c.cmc)) : x;
+      if (wipe.belowReveal && shown < 0) return null;
+      return this.wipeIsGood(g, p, wipe, shown) ? 95 : null;
     }
 
     // Land hate: only when it hurts the table more than us, or the deck is built on it.
@@ -1068,7 +1080,11 @@ export class Bot implements Agent {
       score = Math.max(score, 100 - g.round * 4);
     }
     const spell = card.isInstant || card.isSorcery;
-    const removal = card.effects.find((e): e is Removal => e.kind === 'removal' && e.when === 'resolve');
+    const found = card.effects.find((e): e is Removal => e.kind === 'removal' && e.when === 'resolve');
+    // Fire Covenant, Crackle with Power: the damage is worked out from X.
+    const removal = found?.amountFrom ? { ...found, amountFrom: undefined, amount: Math.floor(g.amountOf(p, found.amountFrom, null, x) * (found.xTimes ?? 1)) } : found;
+    const exact = this.exactWorth(g, p, card, instantWindow);
+    if (exact === null) return null;
     if (removal) {
       const target = this.removalTarget(g, p, removal, x, g.targetCandidates(p, removal, null) ?? []);
       if (target && target.score >= 3 + g.round * 0.2) score = Math.max(score, 70 + target.score);
@@ -1124,6 +1140,7 @@ export class Bot implements Agent {
     if (kinds.has('extraTurn') || kinds.has('approach') || kinds.has('steal') || kinds.has('cheat')) score = Math.max(score, 55 + card.value);
     if (spell && kinds.has('counters') && !p.battlefield.some((q) => q.card.isCreature)) return null;
 
+    if (exact > 0) score = Math.max(score, exact);
     if (!spell) score = Math.max(score, 50 + card.value);
     if (kinds.has('draw')) score = Math.max(score, 45 + card.value);
     if (kinds.has('mill') || kinds.has('discard') || kinds.has('scry')) score = Math.max(score, 25 + card.value);
@@ -1158,6 +1175,51 @@ export class Bot implements Agent {
     // Instants in our own main phase: only if nothing better. They usually wait for the end-of-turn window.
     if (card.isInstant && !instantWindow && !card.effects.some((e) => e.kind === 'ramp')) score = Math.min(score, 20);
     return score || null;
+  }
+
+  /**
+   * The spells that play as printed (cardRulesExact.ts): how much one is worth casting now, 0 if nothing special, or null
+   * to hold it.
+   */
+  private exactWorth(g: Game, p: PlayerState, card: SimCard, instantWindow: boolean): number | null {
+    const kinds = new Set(card.effects.filter((e) => e.when === 'resolve').map((e) => e.kind));
+    const opps = g.opponents(p);
+    const creatureWorth = (c: SimCard) => c.value + c.cmc * 0.5;
+    if (kinds.has('piles') || kinds.has('plotDig')) return 45 + card.value;
+    if (kinds.has('exileUntilMv')) return (this.plan?.mill ?? 0) >= 6 ? 55 + card.value : 30;
+    if (kinds.has('shellGame')) {
+      const best = Math.max(0, ...opps.flatMap((o) => o.battlefield.filter((q) => q.card.isCreature).map((q) => threat(g, q))));
+      return best >= 4 ? 55 + best : null;
+    }
+    if (kinds.has('livingDeath')) {
+      const swing = (q: PlayerState) => q.graveyard.filter((c) => c.isCreature).reduce((n, c) => n + creatureWorth(c), 0) - q.battlefield.filter((r) => r.card.isCreature).reduce((n, r) => n + threat(g, r), 0);
+      const theirs = opps.reduce((n, o) => n + swing(o), 0) / Math.max(1, opps.length);
+      return swing(p) - theirs >= 6 ? 80 : null;
+    }
+    if (kinds.has('patriarch')) {
+      const byType = new Map<string, number>();
+      for (const c of p.graveyard) if (c.isCreature) for (const t of creatureTypes(c)) byType.set(t, (byType.get(t) ?? 0) + creatureWorth(c));
+      const best = Math.max(0, ...byType.values());
+      return best >= 8 ? 60 + best : null;
+    }
+    if (kinds.has('dredgeMire')) return opps.some((o) => o.graveyard.some((c) => c.isCreature)) ? 45 : null;
+    if (kinds.has('selectiveOblit')) {
+      const loses = (q: PlayerState) => {
+        const all = q.battlefield.filter((r) => !r.emblem && cardColors(r.card).length > 0);
+        const keep = Math.max(0, ...(['W', 'U', 'B', 'R', 'G'] as const).map((c) => all.filter((r) => cardColors(r.card).length === 1 && cardColors(r.card)[0] === c).reduce((n, r) => n + threat(g, r), 0)));
+        return all.reduce((n, r) => n + threat(g, r), 0) - keep;
+      };
+      const theirs = opps.reduce((n, o) => n + loses(o), 0);
+      return theirs >= 12 && theirs >= loses(p) * 1.6 + 4 ? 90 : null;
+    }
+    if (kinds.has('necromancy')) {
+      // At sorcery speed: cast at instant speed it would be sacrificed at cleanup.
+      if (instantWindow || !g.sorcerySpeed(p)) return null;
+      const best = Math.max(0, ...g.players.flatMap((q) => q.graveyard.filter((c) => c.isCreature).map(creatureWorth)));
+      return best >= 4 ? 55 + best : null;
+    }
+    if (kinds.has('tapAllOf')) return g.activeSeat === p.seat && g.step === 'main1' && this.readyAttackers(g, p).length >= 2 ? 40 + card.value : null;
+    return 0;
   }
 
   /**
@@ -1728,7 +1790,36 @@ export class Bot implements Agent {
       const pool = mine.length ? mine : perms;
       return asTarget(bestOf(pool, (q) => g.power(q) + (q.isCommander ? 2 : 0) - (q.sick ? 1 : 0))) ?? d.candidates[0];
     }
+    const players = d.candidates.flatMap((t) => (t.kind === 'player' ? [g.players[t.seat]] : []));
+    const boardPower = (o: PlayerState) => o.battlefield.filter((q) => q.card.isCreature).reduce((n, q) => n + g.power(q), 0);
     switch (e.kind) {
+      // Fall of the Impostor, Suppression Ray: the opponent with the most on the board. Stonehorn Dignitary: the one most likely to attack us.
+      case 'exileBiggest':
+      case 'tapAllOf':
+      case 'skipCombat': {
+        const theirs = players.filter((o) => o.seat !== p.seat);
+        const pick = (theirs.length ? theirs : players).reduce<PlayerState | null>((a, b) => (!a || boardPower(b) > boardPower(a) ? b : a), null);
+        return pick ? { kind: 'player', seat: pick.seat } : d.candidates[0];
+      }
+      case 'energyCounter':
+      case 'counterAbility': {
+        const items = d.candidates.flatMap((t) => (t.kind === 'stack' ? g.stack.filter((s) => s.id === t.id) : []));
+        const theirs = items.filter((s) => s.controller !== p.seat);
+        if (!theirs.length) return e.kind === 'counterAbility' ? null : d.candidates[0];
+        const top = theirs.reduce((a, b) => (stackWorth(b) + b.card.value * 0.3 > stackWorth(a) + a.card.value * 0.3 ? b : a));
+        return { kind: 'stack', id: top.id };
+      }
+      case 'saveBounce':
+      case 'phaseOut':
+        return asTarget(this.threatened(g, p, mine)) ?? asTarget(bestOf(mine, (q) => threat(g, q))) ?? asTarget(bestOf(perms, (q) => threat(g, q))) ?? d.candidates[0];
+      case 'oneCounter': {
+        // More of our good counters, fewer of theirs (Clockspinning): +1/+1 counters, loyalty, lore on our side.
+        const own = mine.filter((q) => q.counters > 0 || (q.loyalty ?? 0) > 0 || (q.charge ?? 0) > 0 || (q.lore ?? 0) > 0);
+        if (own.length) return asTarget(bestOf(own, (q) => threat(g, q)));
+        const theirs = perms.filter((q) => q.seat !== p.seat && (q.counters > 0 || (q.loyalty ?? 0) > 0));
+        if (theirs.length && (e.remove || e.either)) return asTarget(bestOf(theirs, (q) => threat(g, q)));
+        return asTarget(bestOf(perms.filter((q) => q.seat !== p.seat && (q.counters < 0 || (q.stun ?? 0) > 0)), (q) => threat(g, q))) ?? (d.cancellable ? null : d.candidates[0]);
+      }
       case 'ownPerm': {
         const doomed = perms.find((q) => q.id === this.doomed);
         if (doomed) return asTarget(doomed);
@@ -2199,7 +2290,14 @@ export class Bot implements Agent {
       // Ugin, the Spirit Dragon: colored permanents with mana value X or less.
       if (e.maxCmc !== undefined && perm.card.cmc > (e.maxCmc === -1 ? x : e.maxCmc)) return false;
       if (e.colored && !cardColors(perm.card).length) return false;
-      if (creaturesOnly && !perm.card.isCreature) return false;
+      if (creaturesOnly && !perm.card.isCreature && !(e.walkers && perm.card.isPlaneswalker)) return false;
+      // Midnight Banshee, Calamity of the Titans (x is the revealed card's mana value).
+      if (e.nonblack && cardColors(perm.card).includes('B')) return false;
+      if (e.belowReveal && perm.card.cmc >= x) return false;
+      // Wave of Reckoning: a creature dies to its own power. Phyresis Outbreak: its controller's poison (plus the one it gives).
+      if (e.selfPower) return perm.card.isCreature && g.power(perm) >= g.toughness(perm) && !g.hasKw(perm, 'indestructible');
+      if (e.perPoison) return perm.card.isCreature && g.players[perm.seat].poison + 1 >= g.toughness(perm);
+      if (e.mode === 'damage' && e.amountFrom) return perm.card.isCreature && g.amountOf(p, e.amountFrom, null, x) >= g.toughness(perm) && !g.hasKw(perm, 'indestructible');
       // Wrath of the Skies: up to the energy we will have.
       if (e.byEnergy && perm.card.cmc > Math.max(0, x) + p.energy) return false;
       if (e.mode === 'damage') return perm.card.isCreature && (e.amount === -1 ? x : e.amount) >= g.toughness(perm) && (!!e.shrink || !g.hasKw(perm, 'indestructible'));
@@ -2690,6 +2788,43 @@ export class Bot implements Agent {
       }
       case 'stack':
         return this.stackOrder(g, p, d.options.map((o) => o.card!));
+      case 'pileSplit': {
+        // Splitting an opponent's cards (Fact or Fiction): make the better pile as poor as possible.
+        const order = [...indexes].sort((a, b) => card(b).value - card(a).value);
+        let best: number[] = [];
+        let bestMax = Infinity;
+        const total = order.reduce((n, i) => n + card(i).value, 0);
+        for (let mask = 0; mask < 1 << Math.min(order.length, 8); mask++) {
+          const first = order.filter((_, k) => mask & (1 << k));
+          const sum = first.reduce((n, i) => n + card(i).value, 0);
+          const worst = Math.max(sum, total - sum);
+          if (worst < bestMax) {
+            bestMax = worst;
+            best = first;
+          }
+        }
+        return best;
+      }
+      case 'pilePick': {
+        // A face-down card is worth an average card; take the pile worth more.
+        const worth = (i: number) => (d.options[i].pile ?? []).reduce((n, c) => n + (c ? this.cardScore(g, p, c, p.hand.filter((h) => h.isLand).length) : 2.5), 0);
+        return top(worth, 1);
+      }
+      case 'plotDig':
+        // Plot the priciest spell: it is cast free later.
+        return top((i) => card(i).cmc + card(i).value * 0.5, 1);
+      case 'shellGame':
+        // Never one of ours; otherwise the biggest threat.
+        return top((i) => (perm(i)?.seat === p.seat ? -1000 : perm(i) ? threat(g, perm(i)!) : 0), 1);
+      case 'creatureType':
+      case 'color':
+        return top((i) => d.options[i].value ?? 0, 1);
+      case 'giveCard':
+        // The card an opponent gets: our least valuable.
+        return top((i) => -card(i).value - card(i).cmc * 0.3, 1);
+      case 'pickAway':
+        // Take away the opponent's best free spell.
+        return top((i) => card(i).value + card(i).cmc, 1);
       case 'mutate': {
         // On top when the new card brings the better body: power counts double, evasion helps.
         const body = (c: SimCard) => c.power * 2 + c.toughness + (c.keywords.includes('flying') || c.keywords.includes('unblockable') ? c.power : 0);

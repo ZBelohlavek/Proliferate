@@ -54,8 +54,8 @@ const DISCOUNT_EACH: { re: RegExp; per: NonNullable<SimCard['discount']>['per'];
 const DISCOUNT_IF: { re: RegExp; per: NonNullable<SimCard['discount']>['per']; what: string; approx?: boolean }[] = [
   { re: /^you control a creature with power 4 or greater$/, per: 'bigCreature', what: 'you control a creature with power 4 or more' },
   { re: /^an opponent has three or more poison counters$/, per: 'poisoned', what: 'an opponent has 3+ poison counters' },
-  { re: /^it targets a legendary creature$/, per: 'legendaryTarget', what: 'an opponent has a legendary creature to target', approx: true },
-  { re: /^it targets an attacking creature$/, per: 'attackingTarget', what: 'a creature is attacking', approx: true },
+  { re: /^it targets a legendary creature$/, per: 'legendaryTarget', what: 'it targets a legendary creature' },
+  { re: /^it targets an attacking creature$/, per: 'attackingTarget', what: 'it targets an attacking creature' },
 ];
 
 /** Read from the whole text: counted power and toughness, and spells that cost less. */
