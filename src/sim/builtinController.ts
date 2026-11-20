@@ -4,7 +4,7 @@
 
 import type { GameResult, SimDeck } from '../engine/types';
 import type { WorkerRequest, WorkerResponse } from './builtinWorker';
-import { limitReached, NO_LIMIT, type RunLimit } from './limit';
+import { limitReached, NO_LIMIT, settleProgress, type RunLimit, type SettleProgress } from './limit';
 import type { Pairing } from './pods';
 import { addResult, type Stats } from './stats';
 
@@ -30,8 +30,12 @@ export class BuiltinController {
   /** The current (or last) run's limit and progress. */
   limit: RunLimit = NO_LIMIT;
   gamesThisRun = 0;
-  /** True when the last run ended because it hit its time or game limit. */
+  /** True when the last run ended because it hit its time or game limit, or settled. */
   finishedByLimit = false;
+  /** Decks in the current (or last) run. */
+  private deckIds: string[] = [];
+  /** With "until the results settle": how close the run is. */
+  settle: SettleProgress | null = null;
   private limitTimer: ReturnType<typeof setInterval> | null = null;
   private lastSave = 0;
 
@@ -61,6 +65,8 @@ export class BuiltinController {
     this.limit = settings.limit;
     this.gamesThisRun = 0;
     this.finishedByLimit = false;
+    this.deckIds = decks.map((d) => d.id);
+    this.settle = settings.limit.settle ? settleProgress(this.stats.decks, this.deckIds, settings.limit.settle) : null;
     // Time limits are also checked on a timer, in case results are slow to arrive.
     if (settings.limit.stopAt !== null) this.limitTimer = setInterval(() => this.checkLimit(), 1000);
     for (let i = 0; i < settings.workers; i++) {
@@ -81,7 +87,8 @@ export class BuiltinController {
   }
 
   private checkLimit() {
-    if (this.running && limitReached(this.limit, this.gamesThisRun)) {
+    if (this.limit.settle) this.settle = settleProgress(this.stats.decks, this.deckIds, this.limit.settle);
+    if (this.running && (limitReached(this.limit, this.gamesThisRun) || this.settle?.settled)) {
       this.stop();
       this.finishedByLimit = true;
       this.notify();

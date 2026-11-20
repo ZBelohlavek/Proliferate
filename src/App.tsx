@@ -2,6 +2,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { SimDeck } from './engine/types';
 import { ForgeController } from './sim/forgeController';
 import { BUILTIN_MAX_ROUNDS, BuiltinController } from './sim/builtinController';
+import { SETTLE_MARGIN } from './sim/limit';
 import { emptyStats } from './sim/stats';
 import {
   loadBuiltinStats, loadDecks, loadSelected, loadSettings, loadStats,
@@ -83,6 +84,7 @@ export default function App() {
         limit: {
           stopAt: settings.runMode === 'time' ? Date.now() + settings.runMinutes * 60_000 : null,
           maxGames: settings.runMode === 'games' ? settings.runGames : null,
+          settle: settings.runMode === 'settled' ? SETTLE_MARGIN : null,
         },
       });
       return;
