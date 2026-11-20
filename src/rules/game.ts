@@ -3387,6 +3387,7 @@ export class Game {
 
     // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
     let ward = 0;
+    const targets: (Target | null)[] = [];
     const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t)) && this.wardPayable(p, [attachTo, ...targets, t], card);
     let attachTo: Target | null = null;
     // Curses enchant a player (rule 303.4). Only opponents are offered: a Curse on yourself is never what you want.
@@ -3412,7 +3413,6 @@ export class Game {
       if (!t || t.kind !== 'perm' || !candidates.some((c) => sameTarget(c, t))) return false;
       mutateOnto = t.id;
     }
-    const targets: (Target | null)[] = [];
     for (const e of effects) {
       const all = this.aimAs(card, p.seat, false, () => this.targetCandidates(p, e, null));
       if (all === null) {
