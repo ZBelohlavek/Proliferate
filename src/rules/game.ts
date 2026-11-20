@@ -1602,6 +1602,7 @@ export class Game {
     const pick = top.length === 1 ? [0] : yield* this.choose(p, 'hideaway', `${perm.card.name}: exile which card face down?`, top.map((c) => ({ label: c.name, card: c })), 1, 1);
     const at = pick[0] ?? 0;
     perm.hidden = top[at];
+    perm.hiddenOwner = p.seat;
     top.splice(at, 1);
     p.library.push(...this.rng.shuffle(top));
     this.say(`${p.name} hides a card under ${perm.card.name}.`);
@@ -7180,7 +7181,7 @@ export class Game {
       controller.revoltTurn = this.turnNumber;
       // Hideaway: the face-down card stays in exile when its permanent leaves (rule 702.75a).
       if (perm.hidden) {
-        owner.exile.push(perm.hidden);
+        this.players[perm.hiddenOwner ?? owner.seat].exile.push(perm.hidden);
         perm.hidden = undefined;
       }
       // Rest in Peace, Dauthi Voidwalker: exiled instead, so nothing "dies". An unearthed creature is exiled if it would leave.
@@ -8034,6 +8035,16 @@ export class Game {
 
   /** Check state-based actions until nothing changes, then put waiting triggers on the stack. */
   private *checkState(): Flow<void> {
+    // Putting triggers on the stack can change the game too (life paid for ward as targets are chosen), so state-based
+    // actions are checked again until nothing more happens (rule 117.5).
+    for (let round = 0; round < 5; round++) {
+      const before = this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join();
+      yield* this.checkStateOnce();
+      if (this.over || this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join() === before) return;
+    }
+  }
+
+  private *checkStateOnce(): Flow<void> {
     for (let i = 0; i < 100; i++) {
       if (this.damagedQueue.length) yield* this.damagedEvents();
       this.pendingLegend = [];

@@ -157,6 +157,8 @@ export interface Perm {
   encoded?: SimCard[];
   /** Hideaway (rule 702.75): the card exiled face down with it. */
   hidden?: SimCard;
+  /** Seat of the hidden card's owner: whoever hid it from their library, not always the permanent's owner. */
+  hiddenOwner?: number;
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
