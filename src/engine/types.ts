@@ -6,6 +6,7 @@
 // engine, and `modeled` records whether we understood the card at all.
 
 import type { ExileEffect } from './typesExile';
+import type { AmountFrom, ExactEffect } from './typesExact';
 
 export type Color = 'W' | 'U' | 'B' | 'R' | 'G';
 export const COLORS: Color[] = ['W', 'U', 'B', 'R', 'G'];
@@ -80,13 +81,16 @@ export type Trigger =
   | 'permLeaves' // a permanent you control leaves the battlefield (castFilter 'creature': only creatures); x = the +1/+1 counters it had (The Ozolith, Resourceful Defense)
   | 'beginCombat' // the beginning of combat on your turn (The Ozolith)
   | 'minusCounters' // you put one or more -1/-1 counters on a creature; x = how many (Nest of Scarabs)
+  | 'ninjutsu' // you activate a ninjutsu ability (Satoru Umezawa)
+  | 'combatDamagedYou' // one or more creatures deal combat damage to you (Witch-king of Angmar)
+  | 'defenderBlocks' // a creature you control with defender blocks (Perimeter Captain)
   | 'static'; // always on while the permanent is on the battlefield
 
 /** Which creature a creature-based trigger watches. */
 /** 'attached': the creature this Equipment or Aura is on. 'all': creatures of every player. 'opponents': only opponents' creatures. */
 export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | 'opponents';
 
-export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery' | 'flash';
+export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery' | 'flash' | /** Artifact or creature cards (Thran Vigil's graveyard watch). */ 'artifactOrCreature';
 
 /** Conditions checked exactly (rule 603.4): see conditions.ts. */
 export type Cond =
@@ -101,7 +105,11 @@ export type Cond =
   /** "A spell of the chosen type": the spell that triggered it. */
   | { k: 'chosenSpell' }
   /** Counterbalance: the top card of your library has the same mana value as that spell. */
-  | { k: 'topSameMv' };
+  | { k: 'topSameMv' }
+  /** Your turn (Thran Vigil). */
+  | { k: 'yourTurn' }
+  /** Pollywog Prodigy: the spell that set it off has mana value less than the source's power. */
+  | { k: 'spellBelowPower' };
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 /** `proteus`: put on the bottom of its owner's library; its controller reveals until a creature card and puts that onto the battlefield (Proteus Staff). */
@@ -170,9 +178,19 @@ export type Effect = EffectBody & {
   zones?: ('graveyard' | 'exile' | 'hand' | 'library')[];
   /** 'playerAttacks': only when the player attacks with at least this many creatures (Aurelia). */
   minAttackers?: number;
+  /** The number this effect uses is worked out as it resolves (cardRulesExact.ts): its n, amount, or +X/+X. `xTimes` multiplies it. */
+  amountFrom?: AmountFrom;
+  /** "You may pay {N}. If you do, ...": paid as it resolves, or this part does nothing (rule 118.12). */
+  mayPay?: number;
+  /** "Up to X target ..." / "any number of target ...": the spell chooses up to X (or any number of) different targets for this effect (rule 601.2c). */
+  multi?: 'x' | 'any';
+  /** Multi-target damage "divided as you choose" among the targets (rule 601.2d): `amount` in all, not to each. */
+  divided?: boolean;
+  /** Part of another activated ability with the same cost (Wick's draw): not activated by itself. */
+  rider?: boolean;
   /** For activated abilities: the mana cost and whether it taps the source. */
   activation?: {
-    cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number;
+    cost: ManaCost; tap: boolean; sacrifice: boolean; /** "Sacrifice a creature" as part of the cost. */ sacCreature?: boolean; /** Only a creature of this subtype ("sacrifice a Snail", Wick). */ sacType?: string; /** "Tap four untapped Advisors you control" as part of the cost. */ tapCreatures?: number;
     /** "Pay {E}{E}": energy counters paid (rule 107.14). -1: "pay X {E}", any amount, and X is what was paid. */
     energy?: number;
     /** "Remove three charge counters from ~": charge counters removed from the source. */
@@ -188,7 +206,7 @@ export type Effect = EffectBody & {
     /** Boast: only if the source attacked this turn, once each turn (rule 702.142). */
     boast?: boolean;
     /** "Sacrifice a Food", "sacrifice five artifacts", "sacrifice a permanent" (Claws of Gix): other permanents of yours sacrificed as part of the cost. */
-    sacOther?: { what: 'food' | 'artifact' | 'permanent'; n: number };
+    sacOther?: { what: 'food' | 'artifact' | 'permanent' | 'enchantment'; n: number };
     /** "Exile this enchantment": the source is exiled as a cost (not a sacrifice). */
     exileSelf?: boolean;
   };
@@ -196,6 +214,7 @@ export type Effect = EffectBody & {
 
 export type EffectBody =
   | ExileEffect
+  | ExactEffect
   | { kind: 'ramp'; lands: number; toHand: number; tapped: boolean }
   /**
    * energy: each use also costs this many energy counters (Solar Transformer).
@@ -214,7 +233,7 @@ export type EffectBody =
       /** "Remove a +1/+1 counter from ~: Add one mana": each +1/+1 counter is a mana, without tapping (Crystalline Crawler). */
       fromCounters?: boolean;
       /** "Sacrifice an artifact: Add {C}{C}": each spare artifact token you control is this much mana, sacrificed when spent (Krark-Clan Ironworks). */
-      sacArtifact?: boolean }
+      sacArtifact?: boolean; /** "{T}, Sacrifice this artifact: Add one mana of any color" on a permanent itself (what Vraska's -2 makes). */ sacSelf?: boolean }
   /**
    * Spells cost less. from: only spells cast from a graveyard ('graveyard'), a graveyard or exile ('graveyardOrExile') or
    * anywhere but your hand ('notHand', which includes the command zone). first: only the first such spell you cast each turn.
@@ -235,7 +254,7 @@ export type EffectBody =
   /** Static: your creature tokens have "{T}: Add one mana of any color" (Insidious Roots). */
   | { kind: 'tokenMana' }
   /** Tap target permanent an opponent controls: a creature ('creature'), a nonland permanent ('nonland'), or an artifact, creature or land ('any'). noFlying: only a creature without flying. */
-  | { kind: 'tap'; target: 'creature' | 'nonland' | 'any'; noFlying?: boolean }
+  | { kind: 'tap'; target: 'creature' | 'nonland' | 'any'; noFlying?: boolean; /** "Tap or untap target creature": your own tapped creature is untapped instead (Tolarian Kraken). */ orUntap?: boolean }
   /** Static: untap steps change: nobody untaps ('none', Stasis) or creatures with power 3 or more don't untap ('bigCreatures', Meekstone). */
   | { kind: 'untapRule'; rule: 'none' | 'bigCreatures' }
   /** Static: "at the beginning of your upkeep, sacrifice ~ unless you pay {cost}" (Stasis). */
@@ -252,7 +271,7 @@ export type EffectBody =
    * toughness among your creatures (Rishkar's Expertise, Last March of the Ents), your hand size plus one (Sea Gate
    * Restoration) or your devotion to red (Clive). discardHand: you discard your hand first (Clive).
    */
-  | { kind: 'draw'; n: number; count?: 'greatestPower' | 'greatestToughness' | 'handPlusOne' | 'redDevotion'; discardHand?: boolean }
+  | { kind: 'draw'; n: number; count?: 'greatestPower' | 'greatestToughness' | 'handPlusOne' | 'redDevotion'; discardHand?: boolean; /** Each opponent draws instead of you (Jace, Memory Adept's -7). */ opponents?: boolean; /** "You may draw a card. If you do, discard a card." */ loot?: boolean }
   /** Each player discards their hand, then draws `n` cards, or as many as the most anyone discarded ('max': Windfall, Jace's Archivist). */
   | { kind: 'wheelAll'; n: number | 'max' }
   /** Exchange life totals with the opponent highest on life, only when that gains you life, so the "draw what you lost" rider never applies (Mister Negative). */
@@ -262,12 +281,21 @@ export type EffectBody =
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
   /** replace: a destroyed land's controller may search for a basic land to put onto the battlefield (Ghost Quarter). */
   /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; /** "Target creature or planeswalker": damage that may also hit a planeswalker ("any target" already may, and battles too, rule 115.4). */ orPlaneswalker?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
-  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean; /** Only mana value up to this (-1: X, Ugin's -X). */ maxCmc?: number; /** Only permanents that are one or more colors. */ colored?: boolean }
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; /** "Target creature or planeswalker": damage that may also hit a planeswalker ("any target" already may, and battles too, rule 115.4). */ orPlaneswalker?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean; /** Each exiled creature's controller makes a 2/2 Boar (Curse of the Swine). */ boar?: boolean; /** Edict: a creature with the greatest power (Professor Onyx). */ biggest?: boolean }
+  | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean; /** Only mana value up to this (-1: X, Ugin's -X). */ maxCmc?: number; /** Only permanents that are one or more colors. */ colored?: boolean;
+      /** Each creature deals damage to itself equal to its power (Wave of Reckoning). */ selfPower?: boolean;
+      /** -1/-1 for each poison counter the creature's controller has (Phyresis Outbreak). */ perPoison?: boolean;
+      /** Only nonblack creatures (Midnight Banshee). */ nonblack?: boolean;
+      /** Only mana value less than the card revealed as it was cast (Calamity of the Titans: the stack item's x). */ belowReveal?: boolean;
+      /** Planeswalkers too. */ walkers?: boolean }
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean; /** "Counter that spell": the spell that set off this trigger. */ subject?: boolean }
   /** fragile: the token has "when this token becomes the target of a spell, sacrifice it" (Jace's Illusions). */
-  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any'; /** The tokens' creature types ("1/1 white Soldier creature token"), lowercased, for tribal rules. */ subtypes?: string[]; /** Living weapon, job select: attach the source Equipment to the first token (rules 702.92, 702.182). */ attachSource?: boolean }
+  | { kind: 'tokens'; n: number; power: number; toughness: number; keywords: string[]; /** Amass: grow the one Army you control instead of making another (rule 701.47). */ army?: boolean; fragile?: 'spell' | 'any'; /** The tokens' creature types ("1/1 white Soldier creature token"), lowercased, for tribal rules. */ subtypes?: string[]; /** Living weapon, job select: attach the source Equipment to the first token (rules 702.92, 702.182). */ attachSource?: boolean;
+      /** Wick: if you already control a creature of this type, a +1/+1 counter on one of them instead. */ elseCounterOn?: string;
+      /** Power and toughness equal to the Spirits you control (Hallowed Haunting). */ ptFrom?: 'spirits';
+      /** Legendary tokens (Avacyn). */ legendary?: boolean;
+      /** "When this token dies, you gain N life" (Pest Infestation). */ diesGain?: number }
   /**
    * Create token copies of the source permanent (Skyclave Relic, Jace, Mirror Mage; offspring makes a 1/1 one).
    * size: the copy's power and toughness. loyalty: its starting loyalty.
@@ -288,14 +316,14 @@ export type EffectBody =
   /** Shuffle your hand (and graveyard) into your library, then draw n. exileSelf: then exile the source. */
   | { kind: 'wheel'; n: number; graveyard: boolean; exileSelf?: boolean }
   /** keywords: "creatures you control have lifelink". */
-  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen' | 'token'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** Only nonlegendary creatures (Cybermen Squadron). */ nonlegendary?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string }
+  | { kind: 'anthem'; p: number; t: number; keywords?: string[]; /** Only creatures with power or toughness 1 or less (Tetsuko). */ small?: boolean; /** Only enchantment creatures, or only creatures you control but don't own (Garland). */ only?: 'enchantment' | 'artifact' | 'stolen' | 'token'; /** "Other creatures you control": not the source itself. */ other?: boolean; /** Only nonlegendary creatures (Cybermen Squadron). */ nonlegendary?: boolean; /** "+1/+1 for each blessing counter on ~": times the source's charge counters (Boon of the Spirit Realm). */ perCharge?: boolean; /** Only creatures of this subtype ("other Elves you control"), or of the type chosen as the source entered ('chosen'). */ subtype?: string; /** Every player's creatures, not only yours (Kratos: "all creatures have haste"). */ everyone?: boolean; /** Only during your turn (Yuna). */ yourTurn?: boolean; /** The source too, even if it isn't of the `only` kind (Yuna). */ selfToo?: boolean; /** Only while you control this many enchantments (Hallowed Haunting). */ minEnchantments?: number }
   /** scale: what X counts when the bonus is "+X/+X, where X is ...". */
-  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[] }
+  | { kind: 'overrun'; p: number; t: number; trample: boolean; scale?: 'creatures' | 'power'; /** Keywords the team gains this turn. */ grant?: string[]; /** Only creatures of this type ("Wizards you control"). */ subtype?: string }
   /** grant: keywords the creature gains until end of turn ("can't be blocked this turn" is 'unblockable'). */
   /** self: the source itself ("~ gains haste until end of turn"), no target. */
-  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean; /** "Double its power": +X/+0 where X is its power as this resolves (p is the bots' estimate). */ doublePower?: boolean }
+  | { kind: 'pump'; p: number; t: number; protect: boolean; grant?: string[]; self?: boolean; /** "Double its power": +X/+0 where X is its power as this resolves (p is the bots' estimate). */ doublePower?: boolean; /** Then tap the source (Witch-king of Angmar). */ tapSelf?: boolean }
   /** cost: the equip cost of an Equipment, when the text gives one. */
-  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean; /** The enchanted permanent loses all abilities: a vanilla creature of `lockSize` (Amphibian Downpour) or a land that taps for {C} (Imprisoned in the Moon). */ lock?: 'blank' | 'land'; lockSize?: { p: number; t: number } }
+  | { kind: 'equip'; p: number; t: number; keywords: string[]; aura: boolean; cost?: ManaCost; /** Control Magic: you control the enchanted creature. */ steal?: boolean; /** The enchanted permanent loses all abilities: a vanilla creature of `lockSize` (Amphibian Downpour) or a land that taps for {C} (Imprisoned in the Moon). */ lock?: 'blank' | 'land'; lockSize?: { p: number; t: number }; /** Reconfigure (rule 702.151): a creature that can attach itself, and isn't a creature while attached (Razorfield Ripper). */ reconfigure?: boolean }
   /** all: every permanent you control. player: you can't lose life either, until your next turn. */
   | { kind: 'protect'; all?: boolean; player?: boolean; /** Undying Malice, Not Dead After All: instead of protection, it returns tapped if it dies this turn, with this many +1/+1 counters. */ returns?: number }
   /** gain: life you gain afterwards; -1 = equal to the total life lost. */
@@ -323,14 +351,14 @@ export type EffectBody =
   /** You may play these cards from your graveyard (Crucible of Worlds: lands; Muldrotha: permanents, one of each type a turn). */
   | { kind: 'graveyardPlay'; what: 'lands' | 'permanents' | 'artifacts'; lifeCost?: number; /** It enters with a finality counter. */ finality?: boolean }
   /** Grafdigger's Cage: creature cards can't enter from graveyards and nobody casts spells from graveyards. */
-  | { kind: 'graveyardLock' }
+  | { kind: 'graveyardLock'; /** Only stops cards entering from graveyards, not casting from them (Soulless Jailer). */ enterOnly?: boolean }
   /** Put the top (or bottom) card of your library into your graveyard; a creature card with power up to the source's goes onto the battlefield (Grenzo). */
   | { kind: 'millReanimate'; fromBottom: boolean }
   /** Persist and undying: the creature that just died returns with a -1/-1 (persist) or +1/+1 (undying) counter. */
   | { kind: 'returnSelf'; counters: number; tapped?: boolean }
   /** proliferate: only creatures that already have a counter. */
   /** byExperience: as many counters as you have experience counters (Kratos). */
-  | { kind: 'counters'; n: number; all: boolean; /** "Each artifact creature you control" (Steel Overseer). */ artifact?: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean }
+  | { kind: 'counters'; n: number; all: boolean; /** "Each artifact creature you control" (Steel Overseer). */ artifact?: boolean; proliferate?: boolean; byExperience?: boolean; /** "Other target creature": never the source itself. */ other?: boolean; /** With `all`: only creatures of this type ("each other Moogle you control"). */ subtype?: string }
   /** Replacement effects that double the tokens and/or +1/+1 counters you get. */
   | { kind: 'doubler'; tokens: boolean; counters: boolean }
   /**
@@ -345,7 +373,7 @@ export type EffectBody =
   /** Each player can't cast more than one spell each turn. */
   | { kind: 'spellLimit' }
   /** Spells cost more: your opponents' (or everyone's, with `all`), optionally only noncreature spells. */
-  | { kind: 'spellTax'; amount: number; filter: 'any' | 'noncreature'; all?: boolean }
+  | { kind: 'spellTax'; amount: number; filter: 'any' | 'noncreature' | 'artifactInstantSorcery'; all?: boolean }
   /** Ankh of Mishra, Zo-Zu: a land entering costs its controller life. */
   | { kind: 'landPunish'; n: number }
   /** Creatures deal combat damage with toughness (Doran); `defenders`: only those with defender, which may also attack (Arcades). */
@@ -569,7 +597,7 @@ export type EffectBody =
    * (Void Winnower); 'overLands': noncreature spells with mana value above their land count (Lavinia); 'graveyard':
    * noncreature spells from graveyards or exile (Soulless Jailer); 'oneNonPhyrexian': one non-Phyrexian spell a turn (Phyrexian Censor).
    */
-  | { kind: 'castLock'; who: 'all' | 'opponents'; rule: 'all' | 'yourTurn' | 'sorcerySpeed' | 'evenCmc' | 'overLands' | 'graveyard' | 'oneNonPhyrexian' }
+  | { kind: 'castLock'; who: 'all' | 'opponents' | 'you'; rule: 'all' | 'yourTurn' | 'sorcerySpeed' | 'evenCmc' | 'overLands' | 'graveyard' | 'oneNonPhyrexian' | /** Codie: no permanent spells. */ 'permanents' }
   /** Your opponents can't cast spells this turn (Silence). */
   | { kind: 'silence' }
   /** Static: spells you control can't be countered: all of them (Chimil), spells with flash (Cunning Nightbonder), creature and enchantment spells (Destiny Spinner). */
@@ -682,7 +710,7 @@ export type EffectBody =
   /** Target creature you control gains protection from the color of your choice until end of turn (Mother of Runes). */
   /** Static: creatures you control are every creature type (Maskwood Nexus), or also the type chosen as the source entered (Leyline of Transformation). */
   | { kind: 'creatureTypes'; every: boolean }
-  | { kind: 'protectColor'; /** It also gains toxic this turn (Skrelv). */ toxic?: number }
+  | { kind: 'protectColor'; /** It also gains toxic this turn (Skrelv). */ toxic?: number; /** Hexproof from the color and can't be blocked by creatures of that color, instead of protection (Skrelv). */ hexproofUnblockable?: boolean }
   /** You may move a Curse attached to you onto an opponent; if you do, draw n cards (Lynde). */
   | { kind: 'passCurse'; n: number }
   /**
@@ -693,7 +721,7 @@ export type EffectBody =
   /** Mindcrank: whenever an opponent loses life, they mill that many cards. */
   | { kind: 'lifeLossMill' }
   /** Untap your permanents: up to n lands, all your creatures, all your nonland permanents, one permanent, or the source itself. */
-  | { kind: 'untap'; what: 'lands' | 'creatures' | 'nonland' | 'artifacts' | 'permanent' | 'self'; n: number }
+  | { kind: 'untap'; what: 'lands' | 'creatures' | 'nonland' | 'artifacts' | 'permanent' | 'self'; n: number; /** Only if the source is tapped (Mana Vault). */ ifTapped?: boolean }
   /**
    * Additional combat phases (rule 500.8): `n` combats, then an additional main phase if `main`. They come right after
    * the current phase, or after the second main phase ('lastMain', World at War). firstOnly: only during the turn's
@@ -756,7 +784,7 @@ export type EffectBody =
    * The Locust God), into its owner's library `n` cards from the top (0: the bottom; God-Eternals, Murderous Rider), or simply
    * back to the battlefield ('battlefield', Wave of Rats).
    */
-  | { kind: 'returnAs'; as: 'battlefield' | 'enchantment' | 'stunned' | 'handAtEnd' | 'library'; n?: number }
+  | { kind: 'returnAs'; as: 'battlefield' | 'enchantment' | 'stunned' | 'handAtEnd' | 'library' | /** Accursed Witch: transformed, attached to an opponent. */ 'curseOnOpponent'; n?: number; /** With curseOnOpponent: the back face's Curse abilities and static effects (Infectious Curse). */ curse?: CurseAbility[]; backEffects?: Effect[] }
   /** Static: if this card would be put into a graveyard from anywhere, it is shuffled into its owner's library instead (Nexus of Fate, Blightsteel Colossus). */
   | { kind: 'shuffleInstead' }
   /**

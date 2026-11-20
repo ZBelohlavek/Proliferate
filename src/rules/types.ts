@@ -47,6 +47,8 @@ export interface Perm {
   owner?: number;
   /** The card this permanent really is, while it is a copy of another (Clone). */
   printed?: SimCard;
+  /** Reconfigure: the creature card it is again once unattached (rule 702.151). */
+  reconfigured?: SimCard;
   tapped: boolean;
   /** Summoning sick: came under its controller's control this turn (rule 302.6). */
   sick: boolean;
@@ -159,6 +161,14 @@ export interface Perm {
   hidden?: SimCard;
   /** Seat of the hidden card's owner: whoever hid it from their library, not always the permanent's owner. */
   hiddenOwner?: number;
+  /** Necromancy: the Aura whose leaving makes this creature's controller sacrifice it. */
+  diesWith?: number;
+  /** Sacrificed at the next cleanup step (Necromancy cast at instant speed). */
+  sacAtCleanup?: boolean;
+  /** Soulbond (rule 702.95): the creature this one is paired with. */
+  pairedWith?: number;
+  /** Seal of the Guildpact: the two colors chosen as it entered. */
+  chosenColors?: Color[];
   damage: number;
   /** Dealt damage by a deathtouch source since the last state-based check (rule 704.5h). */
   deathtouched: boolean;
@@ -226,6 +236,22 @@ export interface PlayerState {
   instantSorceryThisTurn?: number;
   /** Combat damage dealt to this player is prevented this turn; `tokens`: and makes that many 2/1 flyers (Inkshield). */
   fogged?: { tokens: boolean };
+  /** Total mana value and number of noncreature spells cast this turn (Call Forth the Tempest, Magebane Lizard). */
+  spellMvThisTurn?: number;
+  noncreatureThisTurn?: number;
+  /** Combat phases to skip (Stonehorn Dignitary). */
+  skipCombat?: number;
+  /** Phased-out permanents (rule 702.26): they phase in before this player's next untap. */
+  phased?: Perm[];
+  /** Angel's Grace: the turn on which damage can't take this player below 1 life. */
+  graceTurn?: number;
+  /** Summon: Good King Mog XII: the turn on which noncreature spells make token copies. Codie: the turn whose next spell digs. */
+  castCopyTurn?: number;
+  codieTurn?: number;
+  /** Once-each-turn alternative costs used (Tlincalli Hunter, Darksteel Monolith, Demon of Fate's Design): the turn each was last used. */
+  altOnceUsed?: Partial<Record<'creatureFromExile' | 'colorlessFromHand' | 'enchantmentForLife', number>>;
+  /** Commander Liara Portyr: spells cast from exile cost this much less on this turn. */
+  exileDiscount?: { turn: number; n: number };
   alive: boolean;
   drewFromEmpty: boolean;
   landsPlayed: number;
@@ -276,7 +302,7 @@ export interface PlayerState {
 /** Mana in a player's pool. `until`: when it empties: as the step it was made in ends, at end of combat (firebending) or after the owner's next precombat main phase (Mana Drain). */
 export interface PoolMana {
   n: number;
-  colors: 'any' | ['C'];
+  colors: 'any' | import('../engine/types').Mana[];
   turn: number;
   step: Step;
   combat: number;
@@ -317,6 +343,8 @@ export interface MayPlay {
   sourceId?: number;
   /** Where it came from, for the log. */
   source: string;
+  /** Intellect Devourer: returned to its owner's hand when the source leaves the battlefield. */
+  returnTo?: 'hand';
 }
 
 /** Something a spell or ability can target. */
@@ -381,6 +409,12 @@ export interface StackItem {
   aboutSeat?: number;
   /** Dies triggers: the card of the creature that died, for "return that card" (Minion's Return). */
   died?: DiedCard;
+  /** Converge: colors of mana spent to cast it (Bring to Light). */
+  colors?: number;
+  /** Cast from its owner's hand (River Song's Diary). */
+  fromHand?: boolean;
+  /** Cast when a sorcery couldn't have been (Necromancy). */
+  instantSpeed?: boolean;
   /** Triggered abilities: the card or permanent the trigger is about (the creature that died, entered or attacked; the card an opponent sacrificed). */
   about?: About;
 }
@@ -446,10 +480,14 @@ export interface ChoiceOption {
   label: string;
   card?: SimCard;
   permId?: number;
+  /** A pile of cards (Fact or Fiction); null for a face-down card. */
+  pile?: (SimCard | null)[];
+  /** What the engine thinks the option is worth to the chooser (creature types, colors). */
+  value?: number;
 }
 
-export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost' | 'protector' | 'legend' | 'stack';
-export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate' | 'payTax';
+export type ChooseReason = 'bottom' | 'discard' | 'tutor' | 'recursion' | 'sacrifice' | 'ramp' | 'extraLand' | 'counters' | 'fighter' | 'clone' | 'cheat' | 'take' | 'scry' | 'mutate' | 'manifest' | 'blink' | 'pitch' | 'untap' | 'entomb' | 'exileCard' | 'torment' | 'station' | 'player' | 'impulse' | 'freeCast' | 'rearrange' | 'cipher' | 'gift' | 'hideaway' | 'copySpell' | 'payCost' | 'protector' | 'legend' | 'stack' | 'pileSplit' | 'pilePick' | 'plotDig' | 'shellGame' | 'creatureType' | 'giveCard' | 'color' | 'pickAway';
+export type ConfirmReason = 'mulligan' | 'commandZone' | 'animate' | 'payTax' | 'mayPay' | 'discardOrLose';
 
 export type Decision =
   /** The player has priority: take one of these actions (the first is always "pass"). */

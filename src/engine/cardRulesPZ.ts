@@ -23,12 +23,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: 'Whenever you cast a spell from exile, ~ deals 3 damage to target opponent.',
     why: 'The ability is granted to your commander; here the enchantment has it. The damage equals the spell\'s mana value, played as 3 (a typical exiled spell).',
   },
-  'Perimeter Captain': {
-    text: 'Defender',
-    add: [{ kind: 'gainLife', n: 2, when: 'eachUpkeep', chance: 0.5 }],
-    notes: ['When a creature you control with defender blocks: gain 2 life (≈ every other turn)'],
-    why: 'The engine has no "blocks" trigger: the 2 life comes at half the upkeeps, about as often as its defenders block.',
-  },
   'Perpetual Timepiece': {
     text: '{T}: Mill two cards.',
     why: 'Shuffling graveyard cards back into the library is left out: it only matters against decking, which bots rarely face.',
@@ -54,12 +48,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Plasma Caster': {
     text: 'Equipped creature gets +1/+1.\nWhenever equipped creature attacks, you get {E}{E}.\nEquip {2}',
     why: 'Spending the energy to flip a coin against a blocker is left out.',
-  },
-  'Pollywog Prodigy': {
-    text: 'Whenever an opponent casts a noncreature spell, draw a card.',
-    add: [{ kind: 'counters', n: 1, all: false, when: 'creatureEnters', chance: 0.6 }],
-    notes: ['Evolve: +1/+1 counter when a bigger creature enters (≈ 60% of your creatures)'],
-    why: 'Evolve (rule 702.100) is read as a counter for most creatures entering. The draw needs a spell with mana value less than its power; that is left out, so it draws a little more often.',
   },
   'Polygraph Orb': {
     text: 'When ~ enters, look at the top four cards of your library. Put two of them into your hand and the rest into your graveyard. You lose 2 life.\n{2}, {T}: Each opponent discards a card.',
@@ -120,12 +108,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: 'Whenever you sacrifice a permanent, put a +1/+1 counter on ~.\n{1}{B}{G}, Sacrifice a creature: You gain 1 life and draw a card.',
     why: 'Sacrificing an artifact instead of a creature is left out; the creature trigger counts any sacrificed permanent.',
   },
-  'Razorfield Ripper': {
-    text: 'Whenever ~ attacks, you get {E}.',
-    add: [{ kind: 'pump', p: 3, t: 3, protect: false, self: true, when: 'attack', scope: 'self' }],
-    notes: ['When it attacks: +X/+X this turn, X = your energy (≈ +3/+3)'],
-    why: 'X is your energy count, about 3 by mid-game. Reconfigure is left out: it stays a creature.',
-  },
   'Reaper of Sheoldred': {
     text: 'Infect',
     add: [{ kind: 'damagedPunish', what: 'poison', when: 'static' }],
@@ -157,12 +139,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: '{1}, {T}: Each opponent mills two cards.\n{2}{U}{U}, {T}: Each opponent mills ten cards.',
     why: 'Exhaust (once only) mills each player as many cards as are in their graveyard; played as ten, and not limited to once.',
   },
-  'Satoru Umezawa': {
-    text: 'Commander ninjutsu {2}{U}{B}',
-    add: [{ kind: 'draw', n: 1, when: 'combatDamage', scope: 'any', oncePerTurn: true }],
-    notes: ['Once a turn, when a creature of yours connects: a card from the top three (≈ ninjutsu trigger)'],
-    why: 'Giving every creature in hand ninjutsu is left out; Satoru keeps the dig, played as drawing one when your creatures connect, once a turn.',
-  },
   'Satsuki, the Living Lore': {
     text: '{T}: Put a lore counter on target Saga you control.',
     why: 'Puts a lore counter on each Saga; played as one. The death trigger is read as before.',
@@ -174,10 +150,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Scorch Spitter': {
     text: 'Whenever ~ attacks, ~ deals 1 damage to target opponent.',
     why: 'Hits the player it attacks; bots pick the same opponent.',
-  },
-  'Seal of the Guildpact': {
-    text: 'Each spell you cast costs {1} less to cast for each of the chosen colors it is.',
-    why: 'The two colors are the deck\'s main colors, chosen as it enters.',
   },
   'Seasoned Dungeoneer': {
     text: 'When ~ enters, you become the monarch.',
@@ -297,11 +269,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     notes: ['Return two creatures to their owners\' hands'],
     why: 'Played as printed, except wizardcycling {2}, which the reader takes for landcycling.',
   },
-  'Stonehorn Dignitary': {
-    effects: [{ kind: 'fog', who: 'you', when: 'resolve' }],
-    notes: ['When it enters: an opponent skips their next combat (≈ a Fog for you)'],
-    why: 'One opponent skips their next combat phase; played as a Fog that keeps you safe from attacks.',
-  },
   'Stormkeld Vanguard': {
     text: "~ can't be blocked by creatures with power 2 or less.",
     why: 'Played as printed.',
@@ -313,11 +280,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Strixhaven Stadium': {
     text: '{T}: Add {C}. Put a point counter on ~.\nWhenever a creature you control deals combat damage to an opponent, put a point counter on ~. Then if it has ten or more point counters on it, remove them all and that player loses the game.',
     why: 'Losing a point counter when a creature deals combat damage to you is left out.',
-  },
-  'Suppression Ray': {
-    effects: [{ kind: 'tap', target: 'creature', when: 'resolve' }],
-    notes: ['Tap a player\'s creatures (≈ tap their best creature); stun counters with energy left out'],
-    why: 'Taps all creatures one player controls; played as tapping their best one.',
   },
   'Surge Conductor': {
     text: 'Whenever another artifact you control enters, proliferate.',
@@ -334,12 +296,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Tainted Sigil': {
     text: '{T}, Sacrifice ~: You gain 10 life.',
     why: 'Gains the life everyone lost this turn; played as 10.',
-  },
-  'Tandem Lookout': {
-    text: 'Whenever ~ deals combat damage to a player, draw a card.',
-    add: [{ kind: 'draw', n: 1, when: 'combatDamage', scope: 'any', chance: 0.25 }],
-    notes: ['Soulbond: its partner also draws when it connects (≈ a quarter of your creatures\' hits)'],
-    why: 'Soulbond (rule 702.95) pairs it with another creature; the partner\'s draw is spread over your creatures\' hits.',
   },
   'Tekuthal, Inquiry Dominus': {
     text: 'Flying\n{1}{U/P}{U/P}: Put an indestructible counter on ~.',
@@ -367,12 +323,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: 'Foretell {1}{G}',
     why: 'Must be blocked, can\'t be blocked by more than one creature, and returning to exile foretold after dealing damage are left out: it plays as a 6/6.',
   },
-  'The Great Henge': {
-    text: '{T}: Add {G}{G}. You gain 2 life.\nWhenever a nontoken creature you control enters, put a +1/+1 counter on it and draw a card.',
-    add: [{ kind: 'costReduction', amount: 4, filter: 'any', when: 'static' }],
-    notes: ['Costs {X} less, X = your greatest power (≈ 4)'],
-    why: 'The discount for your greatest power is played as {4}.',
-  },
   'The Grim Captain\'s Locker': {
     text: '{T}: Surveil 1.',
     why: 'Giving creature cards in your graveyard escape is left out.',
@@ -389,23 +339,9 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: 'Draw a card.',
     why: 'Making a permanent snow or not snow is left out; the card comes at once instead of next upkeep.',
   },
-  'Thieving Amalgam': {
-    text: "At the beginning of each opponent's upkeep, you manifest the top card of that player's library.",
-    add: [
-      { kind: 'damagePlayer', n: 2, lifeLoss: true, when: 'creatureDies', chance: 0.5 },
-      { kind: 'gainLife', n: 2, when: 'creatureDies', chance: 0.5 },
-    ],
-    notes: ['When a creature you control but don\'t own dies: its owner loses 2, you gain 2 (≈ half your creatures, the manifests)'],
-    why: 'The engine does not tell creatures you own from ones you don\'t on death; about half its creatures are manifests of opponents\' cards.',
-  },
   'Thought-Stalker Warlock': {
     text: 'Menace\nWhen ~ enters, target opponent discards a card.',
     why: 'You choose the card only if they lost life this turn; played as a plain discard.',
-  },
-  'Thran Vigil': {
-    effects: [{ kind: 'counters', n: 1, all: false, when: 'creatureEnters', chance: 0.3 }],
-    notes: ['A +1/+1 counter when an artifact or creature card leaves your graveyard on your turn (≈ a third of your creatures entering)'],
-    why: 'No trigger watches cards leaving the graveyard; its deck brings creatures back, so it is spread over creatures entering.',
   },
   'Threefold Thunderhulk': {
     text: '~ enters with three +1/+1 counters on it.\nWhenever ~ enters or attacks, create a number of 1/1 colorless Gnome artifact creature tokens equal to its power.\n{2}, Sacrifice a creature: Put a +1/+1 counter on ~.',
@@ -415,11 +351,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     effects: [{ kind: 'counters', n: 1, all: true, proliferate: true, when: 'activated', activation: { cost: { generic: 0, pips: [], x: 0, life: 0 }, tap: true, sacrifice: false, sacOther: { what: 'artifact', n: 1 } } }],
     notes: ['Activated ({T}, sacrifice an artifact): proliferate'],
     why: 'Played as printed.',
-  },
-  'Thrumming Stone': {
-    effects: [{ kind: 'copySpell', what: 'trigger', when: 'cast', castFilter: 'creature', chance: 0.6 }],
-    notes: ['Ripple 4: free copies of the same card from the top four (≈ a copy of a creature spell, 60%)'],
-    why: 'Its deck is 20 Persistent Petitioners: ripple 4 finds another one most of the time. Played as copying the creature spell (a token) instead of casting the card from the library.',
   },
   'Thunderwave': {
     effects: [{ kind: 'wipe', target: 'creatures', mode: 'damage', amount: 3, oneSided: false, when: 'resolve' }],
@@ -441,12 +372,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Tivit, Seller of Secrets': {
     text: "Flying, ward {3}\nCouncil's dilemma — Whenever ~ enters or deals combat damage to a player, starting with you, each player votes for evidence or bribery. For each evidence vote, investigate. For each bribery vote, create a Treasure token.",
     why: 'Your extra vote is already in the reading: votes are counted as you choosing for everyone.',
-  },
-  'Tlincalli Hunter': {
-    text: 'Trample',
-    add: [{ kind: 'costReduction', amount: 3, filter: 'creature', from: 'graveyardOrExile', first: true, when: 'static' }],
-    notes: ['Once a turn, a creature spell cast from exile costs less (≈ {3})'],
-    why: 'Paying {0} instead of the mana cost for a creature from exile, once a turn; played as {3} off.',
   },
   'Tomb Trawler': {
     text: '',
@@ -570,12 +495,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     text: '{T}: Add {G}.',
     why: 'Threshold (+3/+3 with seven cards in your graveyard) is left out: it plays as a mana creature.',
   },
-  'Wharf Infiltrator': {
-    text: 'Skulk\nWhenever ~ deals combat damage to a player, you may draw a card. If you do, discard a card.',
-    add: [{ kind: 'tokens', n: 1, power: 3, toughness: 2, keywords: [], when: 'discard', chance: 0.4 }],
-    notes: ['When you discard a creature card: pay {2} for a 3/2 Eldrazi Horror (≈ 40% of discards)'],
-    why: 'The discard trigger has no card-type filter or optional payment: the 3/2 comes on 40% of your discards, about how often the card is a creature and {2} is spare.',
-  },
   'Wild-Magic Sorcerer': {
     text: 'Whenever you cast a spell from exile, discover 3.',
     why: 'Cascade on the first spell cast from exile each turn, read as discover 3.',
@@ -583,12 +502,6 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
   'Wildsear, Scouring Maw': {
     text: 'Trample\nWhenever you cast an enchantment spell, discover 3.',
     why: 'Enchantment spells from hand have cascade; read as discover 3 (a free spell of mana value 3 or less).',
-  },
-  'Witch-king of Angmar': {
-    text: 'Flying\nDiscard a card: ~ gains indestructible until end of turn. Tap ~.',
-    add: [{ kind: 'ringTempts', when: 'upkeep', chance: 0.5 }],
-    notes: ['When creatures deal combat damage to you: the Ring tempts you (≈ every other turn); their sacrifice left out'],
-    why: 'No trigger watches combat damage to you. Opponents sacrificing the creatures that hit you is left out.',
   },
   'Witch-king, Bringer of Ruin': {
     text: 'Flying\nWhenever ~ attacks, target opponent sacrifices a creature.',
