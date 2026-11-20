@@ -15,7 +15,7 @@
 import { bloodCard, foodCard, incubatorCard, isFood, isIncubator } from '../engine/artifactTokens';
 import { Rng } from '../engine/rng';
 import type {
-  CastFilter, Color, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, FlashFilter, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
+  CastFilter, Color, Cond, CopyFilter, CurseAbility, CurseAct, Effect, Elimination, FlashFilter, GameResult, LandInfo, LossReason, Mana, ManaCost, RecursionWhat, SimCard, SimDeck, Trigger,
 } from '../engine/types';
 import type {
   About, Action, Answer, AttackDeclaration, BlockDeclaration, CastFrom, ChoiceOption, ChooseReason, Decision, DiedCard, HeldCard, MayPlay, Perm, PlayerState, PoolMana, PriorityAnswer, StackItem, Step, Target,
@@ -70,6 +70,8 @@ interface CastVia {
   entry?: MayPlay;
   /** Added to the log line after the card's name. */
   label: string;
+  /** Cast transformed: the card in `zone` is this front face, and its back face (`card`) is the spell (rule 712.11). */
+  front?: SimCard;
 }
 
 /** A triggered ability waiting to be put on the stack (rule 603.3). */
@@ -412,7 +414,7 @@ export class Game {
     }
     this.step = 'upkeep';
     this.cumulativeUpkeep(p);
-    this.fire(p, 'upkeep');
+    this.fireStep(p, 'upkeep');
     if (this.kindsInGame.has('when:eachUpkeep')) for (const q of this.players) if (q.alive) this.fire(q, 'eachUpkeep');
     yield* this.priority();
     if (this.stopped(p)) return;
@@ -514,7 +516,7 @@ export class Game {
     // Suspend (rule 702.62): a time counter comes off each suspended card; with the last, it is cast.
     if (p.held?.some((h) => h.way === 'suspend')) this.suspendUpkeep(p);
     if (this.kindsInGame.has('upkeepCost')) this.upkeepCosts(p);
-    this.fire(p, 'upkeep');
+    this.fireStep(p, 'upkeep');
     this.graveyardMark = this.players.map((q) => q.graveyard.length);
     if (this.anyCurse) {
       this.curseEvent(p, 'theirUpkeep');
@@ -530,6 +532,7 @@ export class Game {
     // Draw step (504). Only in a two-player game does the first player skip it (rule 103.8).
     this.step = 'draw';
     if (!(this.turnNumber === 1 && this.players.length === 2)) this.draw(p, 1);
+    this.fireStep(p, 'draw');
     if (this.anyCurse) this.curseEvent(p, 'theirDraw');
     yield* this.priority();
     if (this.stopped(p)) return;
@@ -537,6 +540,7 @@ export class Game {
     this.step = 'main1';
     // Sagas get a lore counter as the precombat main phase begins (rule 714.3b).
     for (const perm of p.battlefield) if (perm.card.saga) this.addLore(p, perm);
+    this.fireStep(p, 'main1');
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -605,6 +609,7 @@ export class Game {
     }
     this.endTemporaryTokens();
     this.endStepSacrifices();
+    this.fireStep(p, 'end');
     yield* this.priority();
     if (this.stopped(p)) return;
 
@@ -989,7 +994,8 @@ export class Game {
       const up = this.faceUpCost(perm);
       if (up && this.planPayment(p, up, 0, 0) !== null) actions.push({ type: 'turnFaceUp', permId: perm.id });
       // Crew, kept simple: in your first main phase, so the Vehicle can attack.
-      if (perm.card.crew && sorcery && this.step === 'main1' && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
+      // Crew is an activated ability: any time its controller has priority (rule 702.122a), say to block with the Vehicle.
+      if (perm.card.crew && this.crewFor(p, perm)) actions.push({ type: 'crew', permId: perm.id });
       // Station (rule 702.184a): tap another untapped creature to add charge counters, as a sorcery, until the last threshold.
       if (sorcery && this.stationRoom(perm) && this.stationCrew(p, perm).length) actions.push({ type: 'station', permId: perm.id });
       // Rooms: a locked door is unlocked for its mana cost as a sorcery (rule 709.5e).
@@ -1401,6 +1407,7 @@ export class Game {
 
   /** Madness (rule 702.35): a discarded madness card goes to exile, castable for its madness cost until its owner next passes. */
   private discarded(p: PlayerState, card: SimCard, quiet = false) {
+    p.discardedTurn = this.turnNumber;
     if (card.casting?.madness) {
       p.exile.push(card);
       (p.windows ??= []).push({ card, how: 'madness' });
@@ -1595,6 +1602,7 @@ export class Game {
     const pick = top.length === 1 ? [0] : yield* this.choose(p, 'hideaway', `${perm.card.name}: exile which card face down?`, top.map((c) => ({ label: c.name, card: c })), 1, 1);
     const at = pick[0] ?? 0;
     perm.hidden = top[at];
+    perm.hiddenOwner = p.seat;
     top.splice(at, 1);
     p.library.push(...this.rng.shuffle(top));
     this.say(`${p.name} hides a card under ${perm.card.name}.`);
@@ -2982,9 +2990,58 @@ export class Game {
   }
 
   private wardCost(by: PlayerState, t: Target | null): number {
-    if (!t || t.kind !== 'perm') return 0;
+    return this.wardOf(by, t)?.mana ?? 0;
+  }
+
+  /** Ward on a permanent `by` targets (rule 702.21): its printed cost, or {2} for ward granted without one. */
+  private wardOf(by: PlayerState, t: Target | null): { mana?: number; life?: number; discard?: number; sacrifice?: number } | null {
+    if (!t || t.kind !== 'perm') return null;
     const perm = this.findPerm(t.id);
-    return perm && perm.seat !== by.seat && this.hasKw(perm, 'ward') ? WARD_COST : 0;
+    if (!perm || perm.seat === by.seat || !this.hasKw(perm, 'ward')) return null;
+    return perm.card.ward ?? { mana: WARD_COST };
+  }
+
+  /** Can `p` pay the parts of these targets' ward costs that aren't mana (life, discards, sacrifices)? `spell`: a card leaving the hand to be cast. */
+  private wardPayable(p: PlayerState, targets: (Target | null)[], spell?: SimCard): boolean {
+    let life = 0, discard = 0, sacrifice = 0;
+    for (const t of targets) {
+      const w = this.wardOf(p, t);
+      life += w?.life ?? 0;
+      discard += w?.discard ?? 0;
+      sacrifice += w?.sacrifice ?? 0;
+    }
+    // Life can be paid only up to your life total (rule 119.4).
+    return (life === 0 || p.life >= life) && p.hand.filter((c) => c !== spell).length >= discard && p.battlefield.length >= sacrifice;
+  }
+
+  /** Pay the life, discards and sacrifices ward asks for (rule 702.21a). */
+  private *payWardOther(p: PlayerState, targets: (Target | null)[], spell?: SimCard): Flow<void> {
+    for (const t of targets) {
+      const w = this.wardOf(p, t);
+      if (!w || (!w.life && !w.discard && !w.sacrifice)) continue;
+      const what = this.describeTarget(t!);
+      if (w.life) {
+        p.life -= w.life;
+        this.say(`${p.name} pays ${w.life} life for ward (${what}).`);
+      }
+      if (w.discard) {
+        const options = p.hand.filter((c) => c !== spell);
+        const picks = yield* this.choose(p, 'discard', `Ward (${what}): discard ${w.discard} card${w.discard > 1 ? 's' : ''}.`, options.map((c) => ({ label: c.name, card: c })), Math.min(w.discard, options.length), Math.min(w.discard, options.length));
+        for (const c of picks.map((i) => options[i])) {
+          p.hand.splice(p.hand.indexOf(c), 1);
+          this.discarded(p, c);
+        }
+      }
+      if (w.sacrifice) {
+        const options = p.battlefield.filter((q) => !q.emblem);
+        const picks = yield* this.choose(p, 'sacrifice', `Ward (${what}): sacrifice ${w.sacrifice} permanent${w.sacrifice > 1 ? 's' : ''}.`, options.map((q) => ({ label: q.card.name, card: q.card, permId: q.id })), Math.min(w.sacrifice, options.length), Math.min(w.sacrifice, options.length));
+        for (const q of picks.map((i) => options[i])) {
+          this.say(`${p.name} sacrifices ${q.card.name} for ward.`);
+          this.removePerm(q, 'graveyard');
+          this.sacrificed(p, q);
+        }
+      }
+    }
   }
 
   /**
@@ -3025,6 +3082,11 @@ export class Game {
           return out;
         }
         for (const perm of this.allPerms()) {
+          // Damage to any target can hit planeswalkers and battles too; "creature or planeswalker", planeswalkers (rule 115.4).
+          if (this.damageWalker(e, perm)) {
+            if (perm !== src && this.canTarget(p, perm) && !e.bountyOnly) out.push({ kind: 'perm', id: perm.id });
+            continue;
+          }
           if (perm === src || perm.card.isLand || !this.removable(e.target, perm) || !this.canTarget(p, perm)) continue;
           if (e.bountyOnly && !perm.bounty) continue;
           if ((e.mode === 'damage' || e.mode === 'fight') && !perm.card.isCreature) continue;
@@ -3163,8 +3225,15 @@ export class Game {
     if (t.kind === 'stack') return this.stack.some((s) => s.id === t.id);
     const perm = this.findPerm(t.id);
     if (!perm || !this.canTarget(p, perm)) return false;
-    if (e?.kind === 'removal' && e.mode !== 'edict' && !this.removable(e.target, perm)) return false;
+    if (e?.kind === 'removal' && e.mode !== 'edict' && !this.removable(e.target, perm) && !this.damageWalker(e, perm)) return false;
     return true;
+  }
+
+  /** A noncreature planeswalker or battle this damage may target: "any target" (rule 115.4), or "creature or planeswalker". */
+  private damageWalker(e: Extract<Effect, { kind: 'removal' }>, perm: Perm): boolean {
+    if (e.mode !== 'damage' || perm.card.isCreature || perm.emblem) return false;
+    if (perm.card.isBattle) return !!e.anyTarget;
+    return perm.card.isPlaneswalker && perm.loyalty !== undefined && !!(e.anyTarget || e.orPlaneswalker);
   }
 
   describeTarget(t: Target): string {
@@ -3295,7 +3364,8 @@ export class Game {
     const held = from === 'foretell' || from === 'plot' || from === 'warp' ? this.heldEntry(p, card, from) : undefined;
     const window = from === 'madness' || from === 'miracle' ? p.windows?.find((w) => w.card === card && w.how === from) : undefined;
     const zone: SimCard[] | null = via ? via.zone : from === 'free' || held ? null : fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : from === 'madness' ? p.exile : p.hand;
-    if ((zone && !zone.includes(card)) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
+    const physical = via?.front ?? card;
+    if ((zone && !zone.includes(physical)) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
     if ((from === 'foretell' || from === 'plot' || from === 'warp') && !held) return false;
     if ((from === 'madness' || from === 'miracle') && !window) return false;
     if (mutate && (!card.mutate || (from === 'graveyard' && !card.mutate.fromGraveyard))) return false;
@@ -3318,7 +3388,8 @@ export class Game {
 
     // Choose targets (601.2c), then pay (601.2h). Ward is charged as part of the cost.
     let ward = 0;
-    const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t));
+    const targets: (Target | null)[] = [];
+    const affordable = (t: Target) => this.canAfford(p, priced, fromCommand, x, ward + this.wardCost(p, t)) && this.wardPayable(p, [attachTo, ...targets, t], card);
     let attachTo: Target | null = null;
     // Curses enchant a player (rule 303.4). Only opponents are offered: a Curse on yourself is never what you want.
     if (permanent && card.curse) {
@@ -3343,7 +3414,6 @@ export class Game {
       if (!t || t.kind !== 'perm' || !candidates.some((c) => sameTarget(c, t))) return false;
       mutateOnto = t.id;
     }
-    const targets: (Target | null)[] = [];
     for (const e of effects) {
       const all = this.aimAs(card, p.seat, false, () => this.targetCandidates(p, e, null));
       if (all === null) {
@@ -3429,10 +3499,11 @@ export class Game {
     }
     this.commitPayment(p, plan);
     p.life -= priced.cost.life + (card.xFromLife ? x : 0);
+    yield* this.payWardOther(p, [attachTo, ...targets], card);
     let manaSpent = 0;
     for (const units of plan.values()) manaSpent += units;
 
-    if (zone && !via?.copy) zone.splice(zone.indexOf(card), 1);
+    if (zone && !via?.copy) zone.splice(zone.indexOf(physical), 1);
     if (via?.entry) this.usePermission(p, via.entry);
     if (held) p.held!.splice(p.held!.indexOf(held), 1);
     if (window) p.windows!.splice(p.windows!.indexOf(window), 1);
@@ -3448,8 +3519,9 @@ export class Game {
     if (card.isInstant || card.isSorcery) p.instantSorceryThisTurn = (p.instantSorceryThisTurn ?? 0) + 1;
     const item: StackItem = {
       id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
-      isCommander: !via?.copy && (via ? via.owner : p).deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
+      isCommander: !via?.copy && (via ? via.owner : p).deck.commanders.includes(physical), sourceId: null, attachTo, label: card.name,
     };
+    if (via?.front) item.front = via.front;
     if (via) {
       if (via.owner !== p && !via.copy) item.owner = via.owner.seat;
       if (via.copy) item.copy = true;
@@ -3621,7 +3693,7 @@ export class Game {
     let target: Target | null = null;
     const all = this.aimAs(perm.card, p.seat, true, () => this.targetCandidates(p, e, perm));
     if (all !== null) {
-      const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), discount, act.tap ? perm : undefined, true) !== null);
+      const candidates = all.filter((t) => this.planPayment(p, act.cost, this.wardCost(p, t), discount, act.tap ? perm : undefined, true) !== null && this.wardPayable(p, [t]));
       if (!candidates.length) return false;
       target = yield* ask<Target | null>({ kind: 'target', seat: p.seat, prompt: targetPrompt(perm.card, e), card: perm.card, effect: e, candidates, cancellable: true });
       if (!target || !candidates.some((c) => sameTarget(c, target!))) return false;
@@ -3647,6 +3719,7 @@ export class Game {
     this.commitPayment(p, plan);
     p.life -= act.cost.life;
     if (act.tap) perm.tapped = true;
+    yield* this.payWardOther(p, [target]);
     // Energy (rule 107.14) and charge counters paid as part of the cost. "Pay X {E}": X is the energy paid,
     // the target's mana value for HELIOS One, everything otherwise.
     let paidX = 0;
@@ -3728,6 +3801,8 @@ export class Game {
       if (e.minCharge && (src?.charge ?? 0) < e.minCharge) continue;
       // "If" conditions the classifier couldn't read hold about half the time.
       if (e.chance !== undefined && !this.rng.chance(e.chance)) continue;
+      // Intervening "if" clauses it can read are checked as it triggers, and again as it resolves (rule 603.4).
+      if (e.ifCond && !this.condHolds(controller, src, e.ifCond, subject, about)) continue;
       if (e.oncePerTurn && src) {
         if (src.usedThisTurn.includes(e)) continue;
         src.usedThisTurn.push(e);
@@ -3791,6 +3866,21 @@ export class Game {
   }
 
   /** Abilities of `p`'s permanents that trigger on a simple event. */
+  /**
+   * "At the beginning of [your/each/each opponent's] upkeep, draw step, precombat main phase, combat, end step" abilities,
+   * on `active`'s turn (rules 503.1, 504.2, 505.4, 507.1, 513.1). "That player" is the active player.
+   */
+  private fireStep(active: PlayerState, step: 'upkeep' | 'draw' | 'main1' | 'combat' | 'end') {
+    for (const q of this.players) {
+      if (!q.alive) continue;
+      for (const perm of q.battlefield) {
+        const hits = perm.card.effects.filter((e) => e.when === 'upkeep' && (e.at ?? 'upkeep') === step
+          && (q === active ? e.whose !== 'opponents' : e.whose === 'each' || e.whose === 'opponents'));
+        if (hits.length) this.trigger(q, perm.card, perm.id, hits, 0, null, undefined, undefined, q === active ? undefined : active.seat);
+      }
+    }
+  }
+
   private fire(p: PlayerState, when: Trigger, x = 0, aboutSeat?: number) {
     for (const perm of p.battlefield) {
       const hits = perm.card.effects.filter((e) => e.when === when);
@@ -3862,7 +3952,7 @@ export class Game {
           targets.push(null);
           continue;
         }
-        let candidates = all.filter((c) => this.wardCost(p, c) === 0 || this.planPayment(p, NO_COST, WARD_COST, 0) !== null);
+        let candidates = all.filter((c) => (this.wardCost(p, c) === 0 || this.planPayment(p, NO_COST, this.wardCost(p, c), 0) !== null) && this.wardPayable(p, [c]));
         // "Counter that spell": only the spell that set it off.
         if (e.kind === 'counter' && e.subject) candidates = candidates.filter((c) => c.kind === 'stack' && c.id === t.subject);
         // No legal target: that part of the ability is removed (rule 603.3d).
@@ -3875,9 +3965,10 @@ export class Game {
         if (optional && !pick) continue;
         const chosen = pick && candidates.some((c) => sameTarget(c, pick)) ? pick : candidates[0];
         if (this.wardCost(p, chosen)) {
-          const plan = this.planPayment(p, NO_COST, WARD_COST, 0);
+          const plan = this.planPayment(p, NO_COST, this.wardCost(p, chosen), 0);
           if (plan) this.commitPayment(p, plan);
         }
+        yield* this.payWardOther(p, [chosen]);
         effects.push(e);
         targets.push(chosen);
       }
@@ -3927,6 +4018,13 @@ export class Game {
       // With its target gone, a mutating creature spell just enters as a creature (rule 702.140b).
       this.say(`${item.card.name} has nothing to mutate onto and enters as a creature.`);
     }
+    if (item.kind === 'spell' && item.front && !item.copy) {
+      // A spell cast transformed enters with its back face up (rule 712.11).
+      yield* this.enterTransformed(p, item.front, false, item.isCommander);
+      const perm = p.battlefield.find((q) => q.front === item.front);
+      if (perm && item.owner !== undefined) perm.owner = item.owner;
+      return;
+    }
     if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
       // A copy of a permanent spell becomes a token (rule 707.10f).
       const perm = yield* this.enter(p, item.door ?? item.card, item.isCommander, item.x, item.attachTo, item.owner !== undefined ? this.players[item.owner] : undefined, item.copy ? 'token' : item.alt, item.kicked);
@@ -3963,6 +4061,8 @@ export class Game {
       const aim = item.targets[i];
       if (aim) this.aimedSeat = aim.kind === 'player' ? aim.seat : aim.kind === 'perm' ? this.findPerm(aim.id)?.seat ?? this.aimedSeat : this.stack.find((s) => s.id === aim.id)?.controller ?? this.aimedSeat;
       if (!legal[i] || !p.alive) continue;
+      if (item.effects[i].ifCond && !this.condHolds(p, src, item.effects[i].ifCond!, item.subject, item.about)) continue;
+      if (item.effects[i].unlessPays !== undefined && (yield* this.paysTax(p, item, i, src))) continue;
       yield* this.resolveEffect(p, item.effects[i], src, item.x, item.targets[i], item.card);
     }
     this.resolving = null;
@@ -3982,13 +4082,86 @@ export class Game {
     }
   }
 
+  /**
+   * "Unless that player pays {N}" (Rhystic Study, Mystic Remora, Esper Sentinel, Smothering Tithe): the player the trigger
+   * is about chooses as it resolves whether to pay (rules 118.12, 608.2d). True if they paid, so the effect doesn't happen.
+   */
+  private *paysTax(p: PlayerState, item: StackItem, i: number, src: Perm | null): Flow<boolean> {
+    const e = item.effects[i];
+    const seat = item.aboutSeat;
+    if (seat === undefined || seat === p.seat || !this.players[seat].alive) return false;
+    const payer = this.players[seat];
+    // Esper Sentinel: X is its power, as the ability resolves (or as it last existed).
+    const n = e.unlessPays === -1 ? (src ? Math.max(0, this.power(src)) : item.card.power) : e.unlessPays!;
+    if (n <= 0) {
+      this.say(`${payer.name} pays {0} for ${item.card.name}.`);
+      return true;
+    }
+    const plan = this.planPayment(payer, NO_COST, n, 0);
+    if (!plan) return false;
+    const pay = yield* ask<boolean>({ kind: 'confirm', seat, reason: 'payTax', prompt: `${item.card.name} (${p.name}): pay {${n}}? If you don't, ${this.taxConsequence(e)}.`, card: item.card });
+    if (!pay) {
+      this.say(`${payer.name} doesn't pay {${n}} for ${item.card.name}.`);
+      return false;
+    }
+    const again = this.planPayment(payer, NO_COST, n, 0);
+    if (!again) return false;
+    this.commitPayment(payer, again);
+    this.say(`${payer.name} pays {${n}} for ${item.card.name}.`);
+    return true;
+  }
+
+  /** What happens if a tax isn't paid, for the prompt. */
+  private taxConsequence(e: Effect): string {
+    switch (e.kind) {
+      case 'draw': return `its controller draws ${e.n === 1 ? 'a card' : `${e.n} cards`}`;
+      case 'treasure': return `its controller creates ${e.n === 1 ? 'a Treasure' : `${e.n} Treasures`}`;
+      case 'counter': return 'your spell is countered';
+      default: return 'its ability happens';
+    }
+  }
+
+  /** Does an intervening "if" condition hold for `p` now (rule 603.4)? `subject`: the spell that set it off; `about`: what it is about. */
+  private condHolds(p: PlayerState, src: Perm | null, c: Cond, subject?: number, about?: About): boolean {
+    const top = p.library[0];
+    const spell = subject !== undefined ? this.stack.find((s) => s.id === subject) : undefined;
+    switch (c.k) {
+      case 'youControl': {
+        const n = p.battlefield.filter((q) => !q.emblem && controlMatches(q, c.what)).length;
+        return n >= c.min && (c.max === undefined || n <= c.max);
+      }
+      case 'oppMoreLands': return this.opponents(p).some((o) => this.landCount(o) > this.landCount(p));
+      case 'oppMonarch': return this.monarch !== null && this.monarch !== p.seat;
+      case 'youMonarch': return this.monarch === p.seat;
+      case 'notOwned': return p.battlefield.filter((q) => q.owner !== undefined && q.owner !== p.seat && !q.token).length >= c.min;
+      case 'landsTotal': return this.alivePlayers().reduce((n, q) => n + this.landCount(q), 0) >= c.min;
+      case 'oppLostLife': return this.opponents(p).some((o) => o.lostLifeTurn === this.turnNumber);
+      case 'youAttacked': return p.attackedTurn === this.turnNumber;
+      case 'selfAttacked': return !!src && src.attackedTurn === this.turnNumber;
+      case 'drewMore': return p.drawsThisTurn >= c.min;
+      case 'fullParty': return this.partySize(p) >= 4;
+      case 'selfUntapped': return !!src && !src.tapped;
+      case 'creatureDied': return this.diedThisTurn > 0;
+      case 'uniqueName': {
+        const name = about?.card.name;
+        if (!name) return true;
+        return !p.battlefield.some((q) => q.card.isCreature && q.id !== about?.permId && q.card.name === name) && !p.graveyard.some((g) => g.isCreature && g.name === name);
+      }
+      case 'counters': return p.battlefield.filter((q) => q.card.isCreature || q.card.isArtifact).reduce((n, q) => n + this.counterCount(q), 0) >= c.min;
+      case 'discarded': return (c.opponent ? this.opponents(p) : this.alivePlayers()).some((q) => q.discardedTurn === this.turnNumber);
+      case 'topChosen': return !!top && top.isCreature && !!src?.chosenType && hasSubtype(top, src.chosenType);
+      case 'chosenSpell': return !!spell && !!src?.chosenType && hasSubtype(spell.card, src.chosenType);
+      case 'topSameMv': return !!top && !!spell && top.cmc === spell.card.cmc;
+    }
+  }
+
   /** Where a spell goes after it resolves or is countered: exile if it was cast with flashback (rule 702.34). */
   private leaveStack(p: PlayerState, item: StackItem) {
     if (item.copy) return;
     // A card cast from someone else's library or exile goes to its owner's graveyard (rule 400.3).
     const owner = item.owner !== undefined ? this.players[item.owner] : p;
-    if (item.flashback || item.exileAfter) owner.exile.push(item.card);
-    else this.toGraveyard(owner, item.faceDown ?? item.card, item.isCommander);
+    if (item.flashback || item.exileAfter) owner.exile.push(item.front ?? item.card);
+    else this.toGraveyard(owner, item.front ?? item.faceDown ?? item.card, item.isCommander);
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
@@ -6565,7 +6738,7 @@ export class Game {
           fighter = mine[pick[0] ?? 0];
         }
         const dealt = this.damagePerm(p, fighter.card, fighter, perm, this.power(fighter));
-        perm.damage += dealt;
+        this.markDamage(perm, dealt);
         if (dealt > 0 && this.hasKw(fighter, 'deathtouch')) perm.deathtouched = true;
         this.say(`${fighter.card.name} deals ${dealt} damage to ${perm.card.name} (${owner.name}).`);
         break;
@@ -6582,7 +6755,18 @@ export class Game {
     else if (shrink === 'temp') {
       perm.tempP -= amount;
       perm.tempT -= amount;
-    } else perm.damage += amount;
+    } else this.markDamage(perm, amount);
+  }
+
+  /**
+   * Damage dealt to a permanent: a planeswalker loses that much loyalty (rule 120.3c), a battle that much defense (120.3h),
+   * and a creature has it marked (120.3e). A creature that is also a planeswalker gets both.
+   */
+  private markDamage(perm: Perm, amount: number) {
+    if (amount <= 0) return;
+    if (perm.card.isPlaneswalker && perm.loyalty !== undefined) perm.loyalty = Math.max(0, perm.loyalty - amount);
+    if (perm.card.isBattle && perm.defense !== undefined) perm.defense = Math.max(0, perm.defense - amount);
+    if (perm.card.isCreature) perm.damage += amount;
   }
 
   /** Doubling Season and friends: how many times tokens or counters are doubled for `p`. */
@@ -6997,7 +7181,7 @@ export class Game {
       controller.revoltTurn = this.turnNumber;
       // Hideaway: the face-down card stays in exile when its permanent leaves (rule 702.75a).
       if (perm.hidden) {
-        owner.exile.push(perm.hidden);
+        this.players[perm.hiddenOwner ?? owner.seat].exile.push(perm.hidden);
         perm.hidden = undefined;
       }
       // Rest in Peace, Dauthi Voidwalker: exiled instead, so nothing "dies". An unearthed creature is exiled if it would leave.
@@ -7851,6 +8035,16 @@ export class Game {
 
   /** Check state-based actions until nothing changes, then put waiting triggers on the stack. */
   private *checkState(): Flow<void> {
+    // Putting triggers on the stack can change the game too (life paid for ward as targets are chosen), so state-based
+    // actions are checked again until nothing more happens (rule 117.5).
+    for (let round = 0; round < 5; round++) {
+      const before = this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join();
+      yield* this.checkStateOnce();
+      if (this.over || this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join() === before) return;
+    }
+  }
+
+  private *checkStateOnce(): Flow<void> {
     for (let i = 0; i < 100; i++) {
       if (this.damagedQueue.length) yield* this.damagedEvents();
       this.pendingLegend = [];
@@ -7875,12 +8069,10 @@ export class Game {
         const caster = this.players[s.seat];
         const owner = this.players[s.owner];
         if (!caster.alive || !owner.exile.includes(s.card)) continue;
-        owner.exile.splice(owner.exile.indexOf(s.card), 1);
-        this.say(`${caster.name} casts ${s.card.back!.name} transformed without paying its mana cost.`);
-        yield* this.enterTransformed(caster, s.card, false, false);
-        const perm = caster.battlefield.find((x) => x.front === s.card);
-        if (perm && s.owner !== s.seat) perm.owner = s.owner;
-        changed = true;
+        // "You may cast it transformed": a spell, so cast triggers see it (rule 712.11). Turning it down leaves it in exile.
+        const back = s.card.back!;
+        const via: CastVia = { zone: owner.exile, owner, mode: 'free', label: ' transformed', front: s.card };
+        if (yield* this.cast(caster, back, false, 0, 'hand', false, 0, via)) changed = true;
       }
       // A commander that went to a graveyard or exile may go to the command zone
       // instead (rule 903.9a); one headed for its owner's hand may too (903.9b).
@@ -8321,6 +8513,7 @@ export class Game {
     this.step = 'beginCombat';
     // "At the beginning of combat on your turn" (The Ozolith).
     if (this.kindsInGame.has('when:beginCombat')) this.fire(p, 'beginCombat');
+    this.fireStep(p, 'combat');
     if (this.untapAttackersEachCombat) {
       const again = p.battlefield.filter((q) => q.tapped && q.attackedTurn === this.turnNumber && q.card.isCreature && !q.stun);
       for (const q of again) q.tapped = false;
@@ -8357,6 +8550,7 @@ export class Game {
     // Crawlspace: no more than so many creatures can attack a player each combat (rule 508.1c).
     const room = (seat: number) => this.attackLimit(seat) - attacking.filter((a) => a.attacking === seat).length;
     const declare = (perm: Perm, seat: number, pw?: number) => {
+      p.attackedTurn = this.turnNumber;
       perm.attacking = seat;
       perm.attackingPw = pw;
       perm.attackedTurn = this.turnNumber;
@@ -9604,6 +9798,20 @@ export function recursionMatches(what: RecursionWhat | undefined, card: SimCard)
     case 'permanent': return !card.isInstant && !card.isSorcery;
     case 'legendary': return card.isLegendary && !card.isInstant && !card.isSorcery;
     default: return card.isCreature;
+  }
+}
+
+/** "You control an artifact", "you control no Snakes": does this permanent count? */
+function controlMatches(perm: Perm, what: string): boolean {
+  const c = perm.card;
+  switch (what.replace(/^(nonland|nontoken) /, '')) {
+    case 'artifact': return c.isArtifact;
+    case 'creature': return c.isCreature;
+    case 'enchantment': return c.isEnchantment;
+    case 'planeswalker': return c.isPlaneswalker;
+    case 'land': return c.isLand || !!perm.landInfo;
+    case 'permanent': return what.startsWith('nonland') ? !(c.isLand || perm.landInfo) : what.startsWith('nontoken') ? !perm.token : true;
+    default: return hasSubtype(c, what);
   }
 }
 

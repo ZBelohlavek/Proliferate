@@ -88,6 +88,21 @@ export type TriggerScope = 'self' | 'any' | 'oneOrMore' | 'attached' | 'all' | '
 
 export type CastFilter = 'any' | 'noncreature' | 'instantSorcery' | 'creature' | 'artifact' | 'enchantment' | 'mutate' | 'creatureOrPlaneswalker' | 'colorless' | /** "An artifact, instant, or sorcery spell" (Jin-Gitaxias). */ 'artifactInstantSorcery' | 'flash';
 
+/** Conditions checked exactly (rule 603.4): see conditions.ts. */
+export type Cond =
+  | { k: 'youControl'; what: string; min: number; max?: number }
+  | { k: 'oppMoreLands' } | { k: 'oppMonarch' } | { k: 'youMonarch' }
+  | { k: 'notOwned'; min: number } | { k: 'landsTotal'; min: number }
+  | { k: 'oppLostLife' } | { k: 'youAttacked' } | { k: 'selfAttacked' }
+  | { k: 'drewMore'; min: number } | { k: 'fullParty' } | { k: 'selfUntapped' } | { k: 'creatureDied' }
+  | { k: 'uniqueName' } | { k: 'counters'; min: number } | { k: 'discarded'; opponent: boolean }
+  /** Herald's Horn: the top card of your library is a creature card of the chosen type. */
+  | { k: 'topChosen' }
+  /** "A spell of the chosen type": the spell that triggered it. */
+  | { k: 'chosenSpell' }
+  /** Counterbalance: the top card of your library has the same mana value as that spell. */
+  | { k: 'topSameMv' };
+
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
 export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
 
@@ -99,6 +114,16 @@ export type Effect = EffectBody & {
   /** Cast triggers: only for spells with at least this mana value. */
   minCmc?: number;
   /** Conditional ("if ...") triggers: probability the condition holds. */
+  /**
+   * "At the beginning of ..." abilities (when: 'upkeep') that trigger at another step: the draw step, the precombat main
+   * phase, beginning of combat, or the end step (rules 503-513). `whose`: on each player's turn, or each opponent's, not only yours.
+   */
+  at?: 'draw' | 'main1' | 'combat' | 'end';
+  whose?: 'each' | 'opponents';
+  /** An intervening "if" clause the engine checks as it triggers and again as it resolves (rule 603.4). See conditions.ts. */
+  ifCond?: Cond;
+  /** "Unless that player pays {N}": the player the trigger is about may pay N mana (-1: the source's power) to stop it (rule 118.12). */
+  unlessPays?: number;
   chance?: number;
   /** Loyalty abilities: the loyalty added (+1) or removed (-3) to activate it. */
   loyalty?: number;
@@ -236,7 +261,7 @@ export type EffectBody =
   /** shrink: a 'damage' effect that is really -N/-N until end of turn ('temp') or -1/-1 counters ('counters'), which indestructible doesn't stop. */
   /** replace: a destroyed land's controller may search for a basic land to put onto the battlefield (Ghost Quarter). */
   /** energyPaid: "then you may pay any amount of {E}; it deals that much damage" (Galvanic Discharge): the damage is energy paid, and `amount` is what the spell itself gives. */
-  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
+  | { kind: 'removal'; target: RemovalTarget; mode: RemovalMode; amount: number; /** Only a creature with a bounty counter on it (Bounty Hunter). */ bountyOnly?: boolean; anyTarget?: boolean; /** "Target creature or planeswalker": damage that may also hit a planeswalker ("any target" already may, and battles too, rule 115.4). */ orPlaneswalker?: boolean; each?: 'opponents' | 'all'; shrink?: 'temp' | 'counters'; replace?: boolean; energyPaid?: boolean }
   | { kind: 'wipe'; target: 'creatures' | 'nonland' | 'artifacts'; mode: RemovalMode; amount: number; oneSided: boolean; shrink?: 'temp' | 'counters'; /** Wrath of the Skies: only mana value up to the energy paid (all of it). */ byEnergy?: boolean; /** Only mana value up to this (-1: X, Ugin's -X). */ maxCmc?: number; /** Only permanents that are one or more colors. */ colored?: boolean }
   /** cmc: only spells with this mana value (Mental Misstep). refund: you get one-shot mana equal to the countered spell's mana value (Mana Drain). */
   | { kind: 'counter'; target: 'any' | 'noncreature' | 'creature'; cmc?: number; refund?: boolean; /** "Counter that spell": the spell that set off this trigger. */ subject?: boolean }
@@ -961,6 +986,8 @@ export interface SimCard {
   entersWithX?: boolean;
   /** Planeswalkers: loyalty counters it enters with. */
   loyalty?: number;
+  /** Ward's cost as printed (rule 702.21): mana, life, cards to discard or permanents to sacrifice. Ward without one here costs {2}. */
+  ward?: { mana?: number; life?: number; discard?: number; sacrifice?: number };
   /** Battles (rule 310): the defense counters it enters with. */
   isBattle?: boolean;
   defense?: number;
