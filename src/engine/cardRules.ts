@@ -206,7 +206,7 @@ export function applyCardRule(card: SimCard, rule: CardRule): void {
   if (rule.effects) {
     card.effects = rule.effects.map((e) => ({ ...e }));
     // Notes the reader wrote about its effects no longer apply; keep the body line and the others.
-    card.notes = card.notes.filter((n) => /^(Creature|Vehicle|Planeswalker|Flash|Can't be countered|Back face|Transforms)/.test(n));
+    card.notes = card.notes.filter((n) => /^(Creature(?!s)|Vehicle|Planeswalker|Flash|Can't be countered|Back face|Transforms)/.test(n));
   }
   if (rule.add) card.effects.push(...rule.add.map((e) => ({ ...e })));
   if (rule.notes) card.notes.push(...rule.notes);
