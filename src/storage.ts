@@ -56,6 +56,11 @@ export interface Settings {
    * Proliferate's built-in engine (in the browser, approximate card text).
    */
   engine: 'forge' | 'builtin';
+  /**
+   * Set once the built-in engine became the default (2026-11). Settings saved
+   * before then picked Forge without anyone choosing it, so they move over once.
+   */
+  engineDefaultV2: boolean;
   /** Parallel workers for the built-in engine. */
   builtinWorkers: number;
   podSize: number;
@@ -79,7 +84,8 @@ export interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  engine: 'forge',
+  engine: 'builtin',
+  engineDefaultV2: true,
   builtinWorkers: Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1)),
   podSize: DEFAULT_PLAYERS,
   // Forge's AI is multithreaded; beyond ~1 process per 4 threads games just slow each other down.
@@ -106,7 +112,11 @@ export const loadSettings = (): Settings => {
   }
   s.podSize = sanitizePodSize(s.podSize);
   if (!PROFILES.includes(s.aiProfile)) s.aiProfile = 'Default';
-  if (s.engine !== 'builtin') s.engine = 'forge';
+  if (s.engine !== 'forge') s.engine = 'builtin';
+  if (saved.engineDefaultV2 !== true) {
+    s.engine = 'builtin';
+    s.engineDefaultV2 = true;
+  }
   s.builtinWorkers = Math.min(16, Math.max(1, Math.floor(Number(s.builtinWorkers)) || 1));
   s.gamesPerLaunch = Math.min(5, Math.max(1, Math.floor(Number(s.gamesPerLaunch)) || 2));
   return s;

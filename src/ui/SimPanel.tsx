@@ -94,13 +94,13 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
     <>
       <section className="panel controls">
         <div className="engine-switch">
-          <button className={own ? '' : 'active'} disabled={running} onClick={() => set({ engine: 'forge' })}>
-            Forge — full rules
-            <span>Every card as written, played by Forge on your own computer. Slow: about a game a minute. Needs the Forge install.</span>
-          </button>
           <button className={own ? 'active' : ''} disabled={running} onClick={() => set({ engine: 'builtin' })}>
-            Proliferate engine — in the browser
+            Proliferate engine — in the browser (recommended)
             <span>Real turns, stack and combat with the same bots you can play against. Thousands of games a minute. Card text is approximated.</span>
+          </button>
+          <button className={own ? '' : 'active'} disabled={running} onClick={() => set({ engine: 'forge' })}>
+            Forge — second opinion
+            <span>Every card as written, played by Forge on your own computer. Slow: about a game a minute. Needs the Forge install.</span>
           </button>
         </div>
         <div className="control-row">
@@ -227,7 +227,7 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
           <>
             <p className="muted small">
               Proliferate&apos;s own engine plays these games right here in your browser, with the same rules and bots as the Play tab. It follows the real turn
-              structure, the stack and combat, but reads each card&apos;s text approximately, so treat the results as a quick estimate and use Forge for the final word.
+              structure, the stack and combat, and reads each card&apos;s text from its wording. It plays thousands of games a minute, so win rates settle quickly; Forge is there as a slower second opinion.
               {activeDecks.length > 0 && <> It understands {pct(activeDecks.reduce((sum, d) => sum + modeledFraction(d), 0) / activeDecks.length, 0)} of the nonland cards in the selected decks; the rest play as plain permanents or do nothing.</>}
               {' '}Games still going after 40 rounds count as draws.
             </p>

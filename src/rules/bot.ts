@@ -1055,8 +1055,9 @@ export class Bot implements Agent {
       const aim = this.textTarget(g, p, card.effects.some((e) => e.kind === 'textChange' && !!e.landTypes));
       return aim ? 30 + threat(g, aim) : null;
     }
-    // Purely reactive spells wait for something to react to.
-    if (!card.isCreature && card.effects.length > 0 && card.effects.every((e) => REACTIVE_KINDS.has(e.kind))) return null;
+    // Purely reactive spells wait for something to react to. Permanents that react later (Strionic Resonator,
+    // Counterbalance, Duelist's Heritage) go down like any other permanent.
+    if (!card.isCreature && card.effects.length > 0 && card.effects.every((e) => REACTIVE_KINDS.has(e.kind) && e.when === 'resolve')) return null;
     if (kinds.has('overrun')) return g.step === 'main1' && this.readyAttackers(g, p).length >= 3 ? 60 : null;
 
     if (kinds.has('wipe')) {
@@ -1085,7 +1086,17 @@ export class Bot implements Agent {
     const removal = found?.amountFrom ? { ...found, amountFrom: undefined, amount: Math.floor(g.amountOf(p, found.amountFrom, null, x) * (found.xTimes ?? 1)) } : found;
     const exact = this.exactWorth(g, p, card, instantWindow);
     if (exact === null) return null;
-    if (removal) {
+    if (removal?.each) {
+      // Myrkul's Edict, Vraska's Fall, Crackling Doom: every opponent gives up a creature (and so do we, for "each player").
+      // Nothing is targeted, so it is worth what each opponent's worst creature is worth.
+      const worst = (q: PlayerState) => {
+        const mine = q.battlefield.filter((c) => c.card.isCreature);
+        return mine.length ? Math.min(...mine.map((c) => threat(g, c))) : 0;
+      };
+      const gain = g.opponents(p).reduce((n, o) => n + worst(o), 0) - (removal.each === 'all' ? worst(p) : 0);
+      if (gain >= 3 + g.round * 0.2) score = Math.max(score, 70 + gain);
+      else if (spell) return null;
+    } else if (removal) {
       const target = this.removalTarget(g, p, removal, x, g.targetCandidates(p, removal, null) ?? []);
       if (target && target.score >= 3 + g.round * 0.2) score = Math.max(score, 70 + target.score);
       else if (spell) return null;
@@ -1134,10 +1145,17 @@ export class Bot implements Agent {
     if (untap && untap.kind === 'untap' && spell) {
       // Dramatic Reversal and friends: worth it when they give back more mana than they cost.
       const back = p.battlefield.filter((q) => q.tapped && (untap.what === 'lands' ? !!q.landInfo : untap.what === 'nonland' || untap.what === 'artifacts' ? !q.landInfo && q.card.effects.some((e) => e.kind === 'mana') : !!q.landInfo)).length;
-      if (Math.min(back, untap.n) <= card.cmc) return null;
-      score = Math.max(score, 30);
+      // Frantic Search, Snap, Jolt: the untap only pays the spell back, so they are cast for the rest of what they do.
+      const alone = card.effects.every((e) => e.kind === 'untap' || e.when !== 'resolve');
+      if (Math.min(back, untap.n) > card.cmc) score = Math.max(score, 30);
+      else if (alone) return null;
     }
     if (kinds.has('extraTurn') || kinds.has('approach') || kinds.has('steal') || kinds.has('cheat')) score = Math.max(score, 55 + card.value);
+    if (spell) {
+      const more = this.spellWorth(g, p, card, x);
+      if (more === null) return null;
+      score = Math.max(score, more);
+    }
     if (spell && kinds.has('counters') && !p.battlefield.some((q) => q.card.isCreature)) return null;
 
     if (exact > 0) score = Math.max(score, exact);
@@ -1223,6 +1241,76 @@ export class Bot implements Agent {
   }
 
   /**
+   * Instants and sorceries whose effects the rest of castScore gives no worth to, so they were never cast:
+   * tutors that search (Whir of Invention, Bring to Light), cards played from exile (Light Up the Stage, Mnemonic Betrayal),
+   * free casts (Villainous Wealth, Mizzix's Mastery), token copies (Second Harvest, March of Progress), Genesis Wave,
+   * taps that last (Hands of Binding), and Teach by Example. 0 when none of them is there, null when it should wait.
+   */
+  private spellWorth(g: Game, p: PlayerState, card: SimCard, x: number): number | null {
+    let score = 0;
+    const spellsIn = (q: PlayerState) => q.graveyard.filter((c) => c.isInstant || c.isSorcery).length;
+    for (const e of card.effects) {
+      if (e.when !== 'resolve') continue;
+      switch (e.kind) {
+        case 'search':
+          // "Mana value X or less": X has to reach something worth finding.
+          if (e.maxCmc === -1 && x < 2) return null;
+          score = Math.max(score, 40 + card.value);
+          break;
+        case 'exilePlay':
+          if (e.zone === 'graveyard') {
+            // Mnemonic Betrayal: the opponents' graveyards are the cards.
+            const n = g.opponents(p).reduce((k, o) => k + o.graveyard.filter((c) => !c.isLand).length, 0);
+            if (n < 5) return null;
+            score = Math.max(score, 40 + n * 0.5);
+          } else score = Math.max(score, 40 + card.value);
+          break;
+        case 'freeCast': {
+          if (e.from === 'graveyard') {
+            const pool = e.who === 'you' ? spellsIn(p) : e.who === 'opponents' || e.who === 'target' ? Math.max(0, ...g.opponents(p).map(spellsIn)) : g.players.filter((q) => q.alive).reduce((k, q) => k + spellsIn(q), 0);
+            if (pool < 2) return null;
+            score = Math.max(score, 40 + Math.min(pool, 8) * 2);
+          } else {
+            if (e.n === -1 && x < 4) return null;
+            score = Math.max(score, 45 + card.value + (e.n === -1 ? x : 0));
+          }
+          break;
+        }
+        case 'tokenCopy': {
+          if (e.of === 'tokens') {
+            const tokens = p.battlefield.filter((q) => q.token && !q.landInfo).length;
+            if (tokens < 3) return null;
+            score = Math.max(score, 40 + tokens);
+          } else if (e.of === 'target') {
+            const best = Math.max(0, ...(g.targetCandidates(p, e, null) ?? []).map((t) => (t.kind === 'perm' ? g.findPerm(t.id) : null)).filter((q): q is Perm => !!q).map((q) => threat(g, q)));
+            if (best < 3) return null;
+            score = Math.max(score, 40 + best);
+          }
+          break;
+        }
+        case 'digPermanent':
+          if (e.among === -1 && x < 4) return null;
+          score = Math.max(score, 50 + (e.among === -1 ? x * 2 : card.value));
+          break;
+        case 'stun': {
+          const best = Math.max(0, ...g.opponents(p).flatMap((o) => o.battlefield.filter((q) => q.card.isCreature && g.canTarget(p, q)).map((q) => threat(g, q))));
+          if (best < 4) return null;
+          score = Math.max(score, 25 + best);
+          break;
+        }
+        case 'copyNext': {
+          // Teach by Example: only with another instant or sorcery we can cast this turn after it.
+          const left = g.availableMana(p) - g.effectiveCost(p, card, false);
+          if (!p.hand.some((c) => c !== card && (c.isInstant || c.isSorcery) && c.value >= 3 && g.effectiveCost(p, c, false) <= left)) return null;
+          score = Math.max(score, 35);
+          break;
+        }
+      }
+    }
+    return score;
+  }
+
+  /**
    * Whether to put a combo piece down now. Isochron Scepter waits until
    * Dramatic Reversal is in hand to go under it (it is exiled as it enters).
    */
@@ -1266,10 +1354,25 @@ export class Bot implements Agent {
     return p.hand.some((c) => c.name === 'Dramatic Reversal' || (c.isInstant && c.cmc <= 2 && pieceZones(p, c.name).includes('S')));
   }
 
-  /** True if `card` belongs to a combo of the deck's plan of which `p` already holds another piece. */
+  /**
+   * True if `card` must stay in hand for a combo of the deck's plan that is close: every other piece is here, or all but one
+   * and one of them isn't the commander. A commander alone doesn't make a combo close (Noctis held Mishra's Bauble all game,
+   * Judith held Fire Covenant waiting for Vito),
+   * and a piece the combo wants in the graveyard is better cast than held.
+   */
   private comboUnderway(p: PlayerState, card: SimCard): boolean {
     const have = new Set([...p.hand.filter((c) => c !== card).map((c) => c.name), ...p.battlefield.map((q) => q.card.name), ...p.commandZone.map((c) => c.name)]);
-    return comboPlan(p).combos.some((c) => c.pieces.some((g1) => g1.includes(card.name)) && c.pieces.some((g1) => !g1.includes(card.name) && g1.some((n) => have.has(n))));
+    return comboPlan(p).combos.some((c) => {
+      const i = c.pieces.findIndex((g1) => g1.includes(card.name));
+      if (i === -1 || c.zones?.[i] === 'G') return false;
+      const others = c.pieces.filter((_, j) => j !== i);
+      const isHeld = (g1: string[]) => g1.some((n) => have.has(n));
+      const missing = others.filter((g1) => !isHeld(g1)).length;
+      // One piece short only counts when a piece besides the commander is already here.
+      const cmd = new Set(p.commandZone.map((c1) => c1.name).concat(p.battlefield.filter((q) => q.isCommander).map((q) => q.card.name)));
+      const heldOutsideCommand = others.some((g1) => g1.some((n) => have.has(n) && !cmd.has(n)));
+      return missing === 0 || (missing === 1 && heldOutsideCommand);
+    });
   }
 
   /**
@@ -1848,12 +1951,20 @@ export class Bot implements Agent {
         if (stack) return asTarget(stack);
         const pick = this.removalTarget(g, p, e, this.castingX, d.candidates);
         if (pick) return pick.target;
-        // Forced to choose (a trigger): the least valuable legal target.
-        return asTarget(bestOf(perms, (q) => (q.seat === p.seat ? -threat(g, q) : 0))) ?? d.candidates[0];
+        // Nothing worth it, and the trigger must have a target (Mayhem Devil, Niv-Mizzet, Aether Revolt): an opponent's face
+        // for damage, else an opponent's best permanent, and only then the least valuable of ours.
+        const faces = d.candidates.flatMap((t) => (t.kind === 'player' && t.seat !== p.seat ? [t.seat] : []));
+        if (e.mode === 'damage' && faces.length) {
+          const seat = this.playerToBurn(g, p, faces, e.amount === -1 ? Math.max(1, this.castingX) : e.amount);
+          if (seat !== null) return { kind: 'player', seat };
+        }
+        return asTarget(bestOf(perms, (q) => (q.seat === p.seat ? -100 - threat(g, q) : threat(g, q)))) ?? (faces.length ? { kind: 'player', seat: faces[0] } : d.candidates[0]);
       }
       case 'counter': {
         const spells = d.candidates.flatMap((t) => (t.kind === 'stack' ? g.stack.filter((s) => s.id === t.id) : []));
         const theirs = spells.filter((s) => s.controller !== p.seat);
+        // Never counter our own spell when we may decline (Saw It Coming cast with nothing of theirs to hit).
+        if (!theirs.length && d.cancellable) return null;
         const pool = theirs.length ? theirs : spells;
         const top = pool.reduce((a, b) => (b.card.value > a.card.value ? b : a), pool[0]);
         return top ? { kind: 'stack', id: top.id } : d.candidates[0];
@@ -1997,6 +2108,9 @@ export class Bot implements Agent {
   /** Blinking `perm` now: its enters abilities, less the attack it loses to summoning sickness before our combat. */
   private blinkWorth(g: Game, p: PlayerState, perm: Perm): number {
     let v = etbWorth(perm);
+    // A blinked token is gone for good, and a creature we took comes back under its owner's control (rule 610.3c).
+    if (perm.token) v -= 20;
+    if (perm.owner !== undefined && perm.owner !== p.seat) v -= 20 + threat(g, perm);
     const beforeCombat = g.activeSeat === p.seat && ['untap', 'upkeep', 'draw', 'main1', 'beginCombat'].includes(g.step);
     if (beforeCombat && perm.card.isCreature && !perm.sick && !g.hasKw(perm, 'haste') && g.power(perm) > 0) v -= 2 + g.power(perm) * 0.5;
     // A tapped mana rock comes back untapped.
@@ -2308,15 +2422,23 @@ export class Bot implements Agent {
     if (!e.oneSided) for (const perm of p.battlefield) if (affects(perm)) mine += threat(g, perm);
     let theirs = 0;
     let incoming = 0;
+    let biggest = 0;
     for (const o of g.opponents(p)) {
+      let lost = 0;
       for (const perm of o.battlefield) {
-        if (affects(perm)) theirs += threat(g, perm);
+        if (affects(perm)) lost += threat(g, perm);
         if (perm.card.isCreature) incoming += g.power(perm);
       }
+      theirs += lost;
+      biggest = Math.max(biggest, lost);
     }
     if (e.oneSided) return theirs >= 6;
     if (incoming >= p.life && theirs > mine) return true;
-    return theirs >= 10 && theirs >= mine * 1.6 + 4;
+    // A symmetric wipe has to cost us less than it costs the table: less than the average opponent loses
+    // (the old test, mine * 1.6 against all opponents together, let bots wipe away more than any one of them lost),
+    // or clearly less than the leader loses when it knocks the leader back.
+    const avg = theirs / Math.max(1, g.opponents(p).length);
+    return theirs >= 10 && (mine * 1.1 + 2 <= avg || (biggest >= 10 && mine * 1.5 + 2 <= biggest));
   }
 
   // -------------------------------------------------------------------------
