@@ -8206,10 +8206,23 @@ export class Game {
     // Putting triggers on the stack can change the game too (life paid for ward as targets are chosen), so state-based
     // actions are checked again until nothing more happens (rule 117.5).
     for (let round = 0; round < 5; round++) {
-      const before = this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join();
+      const before = this.vitals();
       yield* this.checkStateOnce();
-      if (this.over || this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join() === before) return;
+      if (this.over || this.sameVitals(before)) return;
     }
+  }
+
+  /** Every player's life, poison and whether they are still in the game, to see whether anything changed. */
+  private vitals(): (number | boolean)[] {
+    const out: (number | boolean)[] = [];
+    for (const q of this.players) out.push(q.life, q.poison, q.alive);
+    return out;
+  }
+
+  private sameVitals(before: (number | boolean)[]): boolean {
+    let i = 0;
+    for (const q of this.players) if (!Object.is(before[i++], q.life) || !Object.is(before[i++], q.poison) || before[i++] !== q.alive) return false;
+    return true;
   }
 
   private *checkStateOnce(): Flow<void> {
