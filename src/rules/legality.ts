@@ -532,7 +532,7 @@ export class Referee {
       }
       if (perm.hidden) add(owner, perm.hidden);
     }
-    for (const s of g.stack) if (s.kind === 'spell' && !s.copy) add(s.owner ?? s.controller, s.faceDown ?? s.card);
+    for (const s of g.stack) if (s.kind === 'spell' && !s.copy) add(s.owner ?? s.controller, s.front ?? s.faceDown ?? s.card);
     for (const p of g.players) {
       if (!p.alive) continue;
       // Some cards sit in places this check can't see (exiled "with" a permanent, set aside to be cast); so only a surplus is a sure error.

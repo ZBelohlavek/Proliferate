@@ -340,11 +340,12 @@ function recogniseEffects(line: string, card: { isPermanent: boolean; isCreature
       }
     }
     if (!out.some((f) => f.body.kind === 'removal')) {
-      m = line.match(new RegExp(`deals? ${NUM} damage to (any target|target creature|target creature or planeswalker|target creature or player|target attacking|target tapped creature|up to one target creature)`));
+      m = line.match(new RegExp(`deals? ${NUM} damage to (any target|target creature or planeswalker|target creature or player|target creature|target attacking|target tapped creature|up to one target creature)`));
       if (m) {
         const amount = num(m[1], 2);
         const anyTarget = m[2] === 'any target' || m[2] === 'target creature or player';
-        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : 'a creature'}` });
+        const orPlaneswalker = m[2] === 'target creature or planeswalker';
+        out.push({ body: { kind: 'removal', target: 'creature', mode: 'damage', amount, ...(anyTarget ? { anyTarget } : {}), ...(orPlaneswalker ? { orPlaneswalker } : {}) }, note: `Deal ${amount === -1 ? 'X' : amount} damage to ${anyTarget ? 'any target' : orPlaneswalker ? 'a creature or planeswalker' : 'a creature'}` });
       } else if (/deals damage equal to its power to (another |any )?(target|up to one target)|fights (target|another target|up to one target) creature/.test(line)) {
         out.push({ body: { kind: 'removal', target: 'creature', mode: 'fight', amount: 0 }, note: 'Fight / bite removal' });
       } else if ((m = line.match(/(target player|target opponent|each opponent|each player|each other player) sacrifices (a|an|two|three) (?:nontoken )?(creatures?|attacking creature|nonland permanent|permanent)/))) {

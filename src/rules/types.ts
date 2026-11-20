@@ -360,6 +360,8 @@ export interface StackItem {
   subject?: number;
   /** Cast face down for {3} (morph, disguise): the real card. `card` is then the nameless 2/2 everyone sees. */
   faceDown?: SimCard;
+  /** Cast transformed (a defeated Siege, rule 310.11b): the card's front face. `card` is then its back face. */
+  front?: SimCard;
   /** Cast for its mutate cost: the permanent it merges with (rule 702.140). */
   mutateOnto?: number;
   /** Times the spell was kicked (kicker, multikicker, offspring). */

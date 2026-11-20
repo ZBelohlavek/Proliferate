@@ -70,6 +70,8 @@ interface CastVia {
   entry?: MayPlay;
   /** Added to the log line after the card's name. */
   label: string;
+  /** Cast transformed: the card in `zone` is this front face, and its back face (`card`) is the spell (rule 712.11). */
+  front?: SimCard;
 }
 
 /** A triggered ability waiting to be put on the stack (rule 603.3). */
@@ -3025,6 +3027,11 @@ export class Game {
           return out;
         }
         for (const perm of this.allPerms()) {
+          // Damage to any target can hit planeswalkers and battles too; "creature or planeswalker", planeswalkers (rule 115.4).
+          if (this.damageWalker(e, perm)) {
+            if (perm !== src && this.canTarget(p, perm) && !e.bountyOnly) out.push({ kind: 'perm', id: perm.id });
+            continue;
+          }
           if (perm === src || perm.card.isLand || !this.removable(e.target, perm) || !this.canTarget(p, perm)) continue;
           if (e.bountyOnly && !perm.bounty) continue;
           if ((e.mode === 'damage' || e.mode === 'fight') && !perm.card.isCreature) continue;
@@ -3163,8 +3170,15 @@ export class Game {
     if (t.kind === 'stack') return this.stack.some((s) => s.id === t.id);
     const perm = this.findPerm(t.id);
     if (!perm || !this.canTarget(p, perm)) return false;
-    if (e?.kind === 'removal' && e.mode !== 'edict' && !this.removable(e.target, perm)) return false;
+    if (e?.kind === 'removal' && e.mode !== 'edict' && !this.removable(e.target, perm) && !this.damageWalker(e, perm)) return false;
     return true;
+  }
+
+  /** A noncreature planeswalker or battle this damage may target: "any target" (rule 115.4), or "creature or planeswalker". */
+  private damageWalker(e: Extract<Effect, { kind: 'removal' }>, perm: Perm): boolean {
+    if (e.mode !== 'damage' || perm.card.isCreature || perm.emblem) return false;
+    if (perm.card.isBattle) return !!e.anyTarget;
+    return perm.card.isPlaneswalker && perm.loyalty !== undefined && !!(e.anyTarget || e.orPlaneswalker);
   }
 
   describeTarget(t: Target): string {
@@ -3295,7 +3309,8 @@ export class Game {
     const held = from === 'foretell' || from === 'plot' || from === 'warp' ? this.heldEntry(p, card, from) : undefined;
     const window = from === 'madness' || from === 'miracle' ? p.windows?.find((w) => w.card === card && w.how === from) : undefined;
     const zone: SimCard[] | null = via ? via.zone : from === 'free' || held ? null : fromCommand ? p.commandZone : from === 'graveyard' ? p.graveyard : from === 'madness' ? p.exile : p.hand;
-    if ((zone && !zone.includes(card)) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
+    const physical = via?.front ?? card;
+    if ((zone && !zone.includes(physical)) || (flashback && !this.graveyardCastable(p, card)) || (from === 'overload' && !card.overload)) return false;
     if ((from === 'foretell' || from === 'plot' || from === 'warp') && !held) return false;
     if ((from === 'madness' || from === 'miracle') && !window) return false;
     if (mutate && (!card.mutate || (from === 'graveyard' && !card.mutate.fromGraveyard))) return false;
@@ -3432,7 +3447,7 @@ export class Game {
     let manaSpent = 0;
     for (const units of plan.values()) manaSpent += units;
 
-    if (zone && !via?.copy) zone.splice(zone.indexOf(card), 1);
+    if (zone && !via?.copy) zone.splice(zone.indexOf(physical), 1);
     if (via?.entry) this.usePermission(p, via.entry);
     if (held) p.held!.splice(p.held!.indexOf(held), 1);
     if (window) p.windows!.splice(p.windows!.indexOf(window), 1);
@@ -3448,8 +3463,9 @@ export class Game {
     if (card.isInstant || card.isSorcery) p.instantSorceryThisTurn = (p.instantSorceryThisTurn ?? 0) + 1;
     const item: StackItem = {
       id: this.nextId++, kind: 'spell', controller: p.seat, card, effects, targets, x,
-      isCommander: !via?.copy && (via ? via.owner : p).deck.commanders.includes(card), sourceId: null, attachTo, label: card.name,
+      isCommander: !via?.copy && (via ? via.owner : p).deck.commanders.includes(physical), sourceId: null, attachTo, label: card.name,
     };
+    if (via?.front) item.front = via.front;
     if (via) {
       if (via.owner !== p && !via.copy) item.owner = via.owner.seat;
       if (via.copy) item.copy = true;
@@ -3927,6 +3943,13 @@ export class Game {
       // With its target gone, a mutating creature spell just enters as a creature (rule 702.140b).
       this.say(`${item.card.name} has nothing to mutate onto and enters as a creature.`);
     }
+    if (item.kind === 'spell' && item.front && !item.copy) {
+      // A spell cast transformed enters with its back face up (rule 712.11).
+      yield* this.enterTransformed(p, item.front, false, item.isCommander);
+      const perm = p.battlefield.find((q) => q.front === item.front);
+      if (perm && item.owner !== undefined) perm.owner = item.owner;
+      return;
+    }
     if (item.kind === 'spell' && !item.card.isInstant && !item.card.isSorcery) {
       // A copy of a permanent spell becomes a token (rule 707.10f).
       const perm = yield* this.enter(p, item.door ?? item.card, item.isCommander, item.x, item.attachTo, item.owner !== undefined ? this.players[item.owner] : undefined, item.copy ? 'token' : item.alt, item.kicked);
@@ -3987,8 +4010,8 @@ export class Game {
     if (item.copy) return;
     // A card cast from someone else's library or exile goes to its owner's graveyard (rule 400.3).
     const owner = item.owner !== undefined ? this.players[item.owner] : p;
-    if (item.flashback || item.exileAfter) owner.exile.push(item.card);
-    else this.toGraveyard(owner, item.faceDown ?? item.card, item.isCommander);
+    if (item.flashback || item.exileAfter) owner.exile.push(item.front ?? item.card);
+    else this.toGraveyard(owner, item.front ?? item.faceDown ?? item.card, item.isCommander);
   }
 
   private toGraveyard(p: PlayerState, card: SimCard, isCommander: boolean) {
@@ -6565,7 +6588,7 @@ export class Game {
           fighter = mine[pick[0] ?? 0];
         }
         const dealt = this.damagePerm(p, fighter.card, fighter, perm, this.power(fighter));
-        perm.damage += dealt;
+        this.markDamage(perm, dealt);
         if (dealt > 0 && this.hasKw(fighter, 'deathtouch')) perm.deathtouched = true;
         this.say(`${fighter.card.name} deals ${dealt} damage to ${perm.card.name} (${owner.name}).`);
         break;
@@ -6582,7 +6605,18 @@ export class Game {
     else if (shrink === 'temp') {
       perm.tempP -= amount;
       perm.tempT -= amount;
-    } else perm.damage += amount;
+    } else this.markDamage(perm, amount);
+  }
+
+  /**
+   * Damage dealt to a permanent: a planeswalker loses that much loyalty (rule 120.3c), a battle that much defense (120.3h),
+   * and a creature has it marked (120.3e). A creature that is also a planeswalker gets both.
+   */
+  private markDamage(perm: Perm, amount: number) {
+    if (amount <= 0) return;
+    if (perm.card.isPlaneswalker && perm.loyalty !== undefined) perm.loyalty = Math.max(0, perm.loyalty - amount);
+    if (perm.card.isBattle && perm.defense !== undefined) perm.defense = Math.max(0, perm.defense - amount);
+    if (perm.card.isCreature) perm.damage += amount;
   }
 
   /** Doubling Season and friends: how many times tokens or counters are doubled for `p`. */
@@ -7875,12 +7909,10 @@ export class Game {
         const caster = this.players[s.seat];
         const owner = this.players[s.owner];
         if (!caster.alive || !owner.exile.includes(s.card)) continue;
-        owner.exile.splice(owner.exile.indexOf(s.card), 1);
-        this.say(`${caster.name} casts ${s.card.back!.name} transformed without paying its mana cost.`);
-        yield* this.enterTransformed(caster, s.card, false, false);
-        const perm = caster.battlefield.find((x) => x.front === s.card);
-        if (perm && s.owner !== s.seat) perm.owner = s.owner;
-        changed = true;
+        // "You may cast it transformed": a spell, so cast triggers see it (rule 712.11). Turning it down leaves it in exile.
+        const back = s.card.back!;
+        const via: CastVia = { zone: owner.exile, owner, mode: 'free', label: ' transformed', front: s.card };
+        if (yield* this.cast(caster, back, false, 0, 'hand', false, 0, via)) changed = true;
       }
       // A commander that went to a graveyard or exile may go to the command zone
       // instead (rule 903.9a); one headed for its owner's hand may too (903.9b).
