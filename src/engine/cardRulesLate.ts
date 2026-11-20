@@ -138,10 +138,6 @@ export const LATE_RULES: Record<string, CardRule> = {
     text: 'Spells you cast from your graveyard or from exile cost {2} less to cast.',
     why: 'Cheaper plotting is left out.',
   },
-  'River Song\'s Diary': {
-    text: 'At the beginning of your upkeep, if there are four or more cards exiled with this artifact, choose one of them at random. You may cast it without paying its mana cost.',
-    why: 'Exiling instants and sorceries as they resolve is left out; the upkeep free spell is read as a card.',
-  },
   'Norin the Wary': {
     text: '',
     why: 'Blinking itself whenever anyone casts a spell or attacks is left out: it stays a 2/1.',
@@ -179,10 +175,6 @@ export const LATE_RULES: Record<string, CardRule> = {
   'Rose, Cutthroat Raider': {
     text: 'First strike\nWhenever ~ attacks, exile the top card of your library. You may play that card this turn.',
     why: 'The Junk token for each opponent attacked is read as one impulse draw when Rose attacks; the {R} for sacrificing Junk is left out.',
-  },
-  'Accursed Witch': {
-    text: 'Spells your opponents cast that target this creature cost {1} less to cast.',
-    why: 'Coming back as Infectious Curse (drain 1 each upkeep) is left out.',
   },
   'Azula, Ruthless Firebender': {
     text: 'Firebending 1 (Whenever this creature attacks, add {R}. This mana lasts until end of combat.)\nWhenever Azula attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: ~ gets +2/+2 until end of turn.',
@@ -323,10 +315,6 @@ export const LATE_RULES: Record<string, CardRule> = {
   'Repurposing Bay': {
     text: '{4}, {T}: Search your library for an artifact card, put it onto the battlefield, then shuffle. Activate only as a sorcery.',
     why: 'Sacrificing an artifact for one with mana value one higher is read as paying {2} more for any artifact.',
-  },
-  'March of Swirling Mist': {
-    text: 'Up to X target creatures phase out. (While they\'re phased out, they\'re treated as though they don\'t exist. Each one phases in before its controller untaps during their next untap step.)',
-    why: 'Exiling blue cards to cast it cheaper is left out.',
   },
   'The Creation of Avacyn': {
     text: '(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Search your library for a card, exile it face down, then shuffle.\nII — You lose 4 life.\nIII — You may put a creature card from your hand onto the battlefield.',

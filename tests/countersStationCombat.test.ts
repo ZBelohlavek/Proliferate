@@ -137,9 +137,9 @@ describe('energy spells and treasures', () => {
     expect(w && 'byEnergy' in w && w.byEnergy).toBe(true);
   });
 
-  it('Aether Spike reads as a counterspell', () => {
+  it('Aether Spike counters unless its controller pays for the energy paid', () => {
     const c = spell('Aether Spike', '{1}{U}', 2, 'Instant', 'Choose target spell. You get {E}{E} (two energy counters), then you may pay any amount of {E}. Counter that spell unless its controller pays {1} for each {E} paid this way.');
-    expect(kinds(c)).toContain('counter');
+    expect(kinds(c)).toContain('energyCounter');
   });
 
   it("Goldspan Dragon's Treasures tap for two mana", () => {

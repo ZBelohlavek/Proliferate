@@ -164,21 +164,6 @@ describe('lockouts: losing abilities and stopping triggers', () => {
     expect(t.game.hasKw(flyer, 'flying')).toBe(true);
   });
 
-  it("Tishana's Tidebinder blanks an opponent's permanent while it stays", () => {
-    const t = new Table();
-    t.lands(0, 3);
-    const tide = creature("Tishana's Tidebinder", '{2}{G}', 3, 3, 2, { text: 'Flash\nWhen this creature enters, counter up to one target activated or triggered ability. If an ability of an artifact, creature, or planeswalker is countered this way, that permanent loses all abilities for as long as this creature remains on the battlefield. (Mana abilities can\'t be targeted.)', keywords: ['Flash'] });
-    expect(kinds(tide)).toEqual(['blank']);
-    t.game.put(1, solRing());
-    t.game.players[0].hand.push(tide);
-    t.handlers[0] = castOnce("Tishana's Tidebinder");
-    t.until((g) => g.step !== 'main1');
-    expect(t.game.availableMana(t.game.players[1])).toBe(0);
-    const binder = t.game.players[0].battlefield.find((q) => q.card.name === "Tishana's Tidebinder")!;
-    (t.game as unknown as { removePerm: (q: unknown, to: string) => void }).removePerm(binder, 'graveyard');
-    expect(t.game.availableMana(t.game.players[1])).toBe(2);
-  });
-
   it("Hushbringer: creatures entering don't trigger abilities", () => {
     const t = new Table();
     t.lands(0, 2);

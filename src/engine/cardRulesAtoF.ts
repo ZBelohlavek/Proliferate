@@ -40,10 +40,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: '{T}: Add one mana of any color.',
     why: 'Devotion +1 and the 1 life with a God or legendary enchantment are left out.',
   },
-  "Angel's Grace": {
-    text: "You can't lose the game this turn and your opponents can't win the game this turn. Until end of turn, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
-    why: 'Split second (rule 702.61) is left out: bots rarely respond to it anyway.',
-  },
   Anger: {
     text: 'Haste',
     why: 'Giving your creatures haste from the graveyard is left out: the engine has no abilities that work from a graveyard.',
@@ -204,10 +200,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: 'Creatures you control get +1/+1.\nWhenever a land\'s ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.',
     why: 'The chosen color is your deck\'s main color, so the anthem covers most of your creatures.',
   },
-  'Calamity of the Titans': {
-    text: "Exile each creature and planeswalker with mana value less than the revealed card's mana value.",
-    why: 'Revealing a colorless creature card is assumed possible in its deck.',
-  },
   'Call of the Ring': {
     text: 'At the beginning of your upkeep, the Ring tempts you.\nAt the beginning of your upkeep, you may pay 2 life. If you do, draw a card.',
     why: 'The Ring tempts you each upkeep and you choose a Ring-bearer each time, so the draw comes every upkeep.',
@@ -301,12 +293,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
     text: 'Mentor\nWhenever one or more +1/+1 counters are put on a creature you control, draw a card.',
     why: 'Each creature draws for the first counters each turn; any counter on a creature you control draws here. Mentor is read by the engine.',
   },
-  'Darksteel Monolith': {
-    text: 'Indestructible',
-    add: [{ kind: 'costReduction', amount: 6, filter: 'colorless', first: true, from: 'hand', when: 'static' }],
-    notes: ['The first colorless spell cast from hand each turn costs {6} less (≈ free)'],
-    why: 'Casting a colorless spell from hand without paying its mana cost once each turn: played as {6} off the first colorless spell each turn.',
-  },
   'Chatterfang, Squirrel General': {
     text: 'Forestwalk\nIf one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.',
     why: 'Sacrificing X Squirrels to give a creature +X/-X is left out.',
@@ -334,12 +320,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Delney, Streetwise Lookout': {
     text: 'If a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.',
     why: 'The evasion for small creatures is left out.',
-  },
-  "Demon of Fate's Design": {
-    text: 'Flying, trample',
-    add: [{ kind: 'costReduction', amount: 3, filter: 'enchantment', first: true, when: 'static' }],
-    notes: ['The first enchantment spell each turn costs {3} less (≈ paid with life)'],
-    why: 'Once each turn an enchantment may be cast for life equal to its mana value; played as {3} off the first enchantment spell each turn. Sacrificing enchantments to pump it is left out.',
   },
   'Depthshaker Titan': {
     text: 'When ~ enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nArtifact creatures you control get +1/+0 and have trample and haste.',
@@ -390,10 +370,6 @@ export const CARD_RULES_A_TO_F: Record<string, CardRule> = {
   'Druid of Purification': {
     text: 'When ~ enters, destroy target artifact or enchantment an opponent controls.',
     why: 'Each player may choose an artifact or enchantment you don\'t control; played as one of an opponent\'s.',
-  },
-  'Earth-Cult Elemental': {
-    text: 'When ~ enters, each opponent sacrifices a permanent.',
-    why: 'A d20 roll; 10–19, the most likely result, is each opponent sacrificing a permanent.',
   },
   'Edric, Spymaster of Trest': {
     text: 'Whenever a creature you control deals combat damage to a player, draw a card.',
