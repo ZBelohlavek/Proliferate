@@ -19,7 +19,11 @@ export function playGame(decks: SimDeck[], seed: number, opts: PlayOptions = {})
   const bots = decks.map((_, seat) => new Bot(seat, seed, opts.bots?.[seat]));
   const flow = game.run();
   let next = flow.next();
-  while (!next.done) next = flow.next(bots[next.value.seat].decide(game, next.value));
+  // A bot only looks at the table while it decides, so the game can remember what it works out.
+  while (!next.done) {
+    const d = next.value;
+    next = flow.next(game.readOnly(() => bots[d.seat].decide(game, d)));
+  }
   return { result: next.value, log: game.log };
 }
 
@@ -83,7 +87,7 @@ export class Session {
         const d = this.waiting;
         this.waiting = null;
         const agent = this.agents[d.seat];
-        this.take(this.flow.next(agent ? agent.decide(this.game, d) : this.autoAnswer(d)));
+        this.take(this.flow.next(agent ? this.game.readOnly(() => agent.decide(this.game, d)) : this.autoAnswer(d)));
       }
       if (this.game.log!.length > logged) return !this.pending && !this.result;
     }
