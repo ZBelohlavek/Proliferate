@@ -78,9 +78,9 @@ export const RULES_P_TO_Z: Record<string, CardRule> = {
     why: '"One or more Ninja or Rogue creatures": its deck is Ninjas and Rogues, so every creature counts. Several connecting at once make one Treasure each here.',
   },
   'Proteus Staff': {
-    effects: [{ kind: 'removal', target: 'creature', mode: 'bounce', amount: 0, when: 'activated', activation: { cost: { generic: 2, pips: [['U']], x: 0, life: 0 }, tap: true, sacrifice: false, sorcery: true } }],
-    notes: ['Activated ({2}{U}, sorcery): get rid of a creature (its owner gets the next creature from their library)'],
-    why: 'Puts a creature on the bottom of its library; read as bouncing it. Its controller putting the next creature card from their library onto the battlefield is left out.',
+    effects: [{ kind: 'removal', target: 'creature', mode: 'proteus', amount: 0, when: 'activated', activation: { cost: { generic: 2, pips: [['U']], x: 0, life: 0 }, tap: true, sacrifice: false, sorcery: true } }],
+    notes: ['Activated ({2}{U}, sorcery): put a creature on the bottom of its library; its controller reveals until a creature card, puts it onto the battlefield and the rest on the bottom in any order'],
+    why: 'Built in the engine as its own removal mode (proteus). With no other creature in the library, the tucked creature comes straight back and its controller stacks the whole library (Fblthp decks).',
   },
   'Psychic Frog': {
     text: 'Whenever ~ deals combat damage to a player or planeswalker, draw a card.\nDiscard a card: Put a +1/+1 counter on ~.',

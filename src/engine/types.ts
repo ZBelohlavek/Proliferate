@@ -104,7 +104,8 @@ export type Cond =
   | { k: 'topSameMv' };
 
 export type RemovalTarget = 'creature' | 'permanent' | 'noncreature' | 'artifactEnchantment' | 'planeswalker' | 'land' | 'nonbasicLand';
-export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight';
+/** `proteus`: put on the bottom of its owner's library; its controller reveals until a creature card and puts that onto the battlefield (Proteus Staff). */
+export type RemovalMode = 'destroy' | 'exile' | 'bounce' | 'damage' | 'edict' | 'fight' | 'proteus';
 
 /** -1 anywhere a number is expected means "X" (the X paid for the spell). */
 export type Effect = EffectBody & {
