@@ -72,7 +72,8 @@ export interface Settings {
   /** How decks are drawn for each game (see Pairing in sim/pods.ts). */
   pairing: 'balanced' | 'random';
   /** How long a simulation run lasts (not the per-game time limit). */
-  runMode: 'untilStopped' | 'time' | 'games';
+  /** 'settled': until every deck's win rate is known to ±5 points (built-in engine only). */
+  runMode: 'untilStopped' | 'time' | 'games' | 'settled';
   runMinutes: number;
   runGames: number;
 }

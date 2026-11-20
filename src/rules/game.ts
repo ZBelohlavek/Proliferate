@@ -94,6 +94,40 @@ interface PendingTrigger {
 
 const PASS: Action = { type: 'pass' };
 const NONE: Perm[] = [];
+
+/**
+ * Answers worked out once while nothing on the table can change (see `Game.readOnly`):
+ * a creature's power, toughness and keywords, what is attached to what, the static
+ * abilities in play. Looking these up again and again was most of a game's cost.
+ */
+interface Memo {
+  power: Map<Perm, number>;
+  toughness: Map<Perm, number>;
+  kw: Map<Perm, Map<string, boolean>>;
+  attached: Map<number, Perm[]> | null;
+  statics: Map<string, number>;
+  staticsOf: Map<string, { e: Effect; perm: Perm }[]>;
+  manaSources: Map<string, ManaSource[]>;
+  /** Anthem abilities on each seat's permanents. */
+  anthems: Map<number, { perm: Perm; e: Extract<Effect, { kind: 'anthem' }> }[]>;
+  curses: Map<number, Perm[]>;
+}
+
+/** Testing aid: recompute every remembered answer and throw if it went stale. */
+let verifyMemo = false;
+export function setMemoCheck(on: boolean) {
+  verifyMemo = on;
+}
+function checkMemo<T>(what: string, kept: T, now: T): T {
+  if (JSON.stringify(kept, memoReplacer) !== JSON.stringify(now, memoReplacer)) throw new Error(`Stale ${what}: kept ${JSON.stringify(kept, memoReplacer)}, now ${JSON.stringify(now, memoReplacer)}`);
+  return kept;
+}
+function memoReplacer(key: string, value: unknown) {
+  if (key === 'perm' && value && typeof value === 'object') return (value as Perm).id;
+  if (key === 'card' || key === 'pool') return undefined;
+  if (key === 'e' && value && typeof value === 'object') return (value as Effect).kind;
+  return value;
+}
 const NO_COST: ManaCost = { generic: 0, pips: [], x: 0, life: 0 };
 /** Equip cost assumed when a deck was imported before equip costs were recorded. */
 const DEFAULT_EQUIP: ManaCost = { generic: 2, pips: [], x: 0, life: 0 };
@@ -167,6 +201,9 @@ export class Game {
   private struckFirst = new Set<number>();
   /** False while nothing is attached to anything, to skip the search for attachments. */
   private anyAttached = false;
+  /** Remembered answers while the table can't change (see `readOnly`). */
+  private memo: Memo | null = null;
+  private memoDepth = 0;
   /** While a spell or ability resolves: its card (the source of a "when this dies" trigger may be gone). */
   private resolvingCard: SimCard | null = null;
   /** While a spell or ability resolves: the controller of the last thing it targeted. */
@@ -742,6 +779,19 @@ export class Game {
 
   private statics(p: PlayerState | null, kind: Effect['kind']): number {
     if (!this.kindsInGame.has(kind)) return 0;
+    const m = this.memo;
+    if (!m) return this.staticsNow(p, kind);
+    const key = `${p ? p.seat : 'all'}:${kind}`;
+    const kept = m.statics.get(key);
+    if (kept === undefined) {
+      const v = this.staticsNow(p, kind);
+      m.statics.set(key, v);
+      return v;
+    }
+    return verifyMemo ? checkMemo(`statics ${key}`, kept, this.staticsNow(p, kind)) : kept;
+  }
+
+  private staticsNow(p: PlayerState | null, kind: Effect['kind']): number {
     let n = 0;
     for (const q of p ? [p] : this.players) {
       if (!q.alive) continue;
@@ -816,6 +866,21 @@ export class Game {
   // -------------------------------------------------------------------------
 
   /**
+   * Run `fn`, which only looks at the game and changes nothing on the table, remembering
+   * power, toughness, keywords, attachments and static abilities as they are worked out.
+   * Bots deciding, listing legal actions and checking creature deaths ask for the same
+   * answers thousands of times a game.
+   */
+  readOnly<T>(fn: () => T): T {
+    if (this.memoDepth++ === 0) this.memo = { power: new Map(), toughness: new Map(), kw: new Map(), attached: null, statics: new Map(), staticsOf: new Map(), manaSources: new Map(), anthems: new Map(), curses: new Map() };
+    try {
+      return fn();
+    } finally {
+      if (--this.memoDepth === 0) this.memo = null;
+    }
+  }
+
+  /**
    * Players get priority in turn order, starting with the active player. When
    * everyone passes in a row, the top of the stack resolves, or, if the stack
    * is empty, the step ends (rule 117.4).
@@ -873,6 +938,10 @@ export class Game {
 
   /** Everything `p` may do with priority. The first entry is always "pass". */
   legalActions(p: PlayerState): Action[] {
+    return this.readOnly(() => this.legalActionsNow(p));
+  }
+
+  private legalActionsNow(p: PlayerState): Action[] {
     const actions: Action[] = [PASS];
     const sorcery = this.sorcerySpeed(p);
 
@@ -891,7 +960,7 @@ export class Game {
     // Rule of Law: one spell a turn. Drannith Magistrate: no casting from the command zone.
     const mayCast = !(p.spellsThisTurn >= 1 && this.statics(null, 'spellLimit') > 0);
     const locked = this.opponents(p).some((o) => this.statics(o, 'commandLock') > 0);
-    const mutateHosts = this.mutateTargets(p).length > 0;
+    let mutateHosts: boolean | undefined;
     // Looked up once per call: scanning every battlefield for each card is what slowed games after the lockouts landed.
     const castLockers = this.staticsOf('castLock');
     const castLocks = this.silenced.size > 0 || castLockers.length > 0;
@@ -900,7 +969,7 @@ export class Game {
       if (!this.castTimingOk(p, card, from, sorcery)) return false;
       // Silence, Teferi, Void Winnower, Grand Abolisher (rule 101.2).
       if (castLocks && this.castLocked(p, card, from, castLockers)) return false;
-      if (mutate && !mutateHosts) return false;
+      if (mutate && !(mutateHosts ??= this.mutateTargets(p).length > 0)) return false;
       // Spree and tiered spells are cast with their modes chosen (rule 702.172).
       if (card.casting?.spree && !modes) return false;
       if (kick && !this.optionalCostPayable(p, card)) return false;
@@ -2328,6 +2397,19 @@ export class Game {
 
   /** `ability`: paying for an activated ability, which Thran Turbine's mana may do. */
   private manaSources(p: PlayerState, exclude?: Perm, ability = false): ManaSource[] {
+    const m = this.memo;
+    if (!m) return this.manaSourcesNow(p, exclude, ability);
+    const key = `${p.seat}:${exclude ? exclude.id : -1}:${ability ? 1 : 0}`;
+    const kept = m.manaSources.get(key);
+    if (kept === undefined) {
+      const v = this.manaSourcesNow(p, exclude, ability);
+      m.manaSources.set(key, v);
+      return [...v];
+    }
+    return [...(verifyMemo ? checkMemo(`mana sources ${key}`, kept, this.manaSourcesNow(p, exclude, ability)) : kept)];
+  }
+
+  private manaSourcesNow(p: PlayerState, exclude?: Perm, ability = false): ManaSource[] {
     const out: ManaSource[] = [];
     if (p.pool?.length) for (const m of this.livePool(p)) if (!m.abilityOnly || ability) out.push({ perm: null, colors: m.colors, amount: m.n, pool: m });
     let energy = p.energy;
@@ -7007,13 +7089,11 @@ export class Game {
   private anthemBonus(target: Perm): { p: number; t: number } {
     let p = 0;
     let t = 0;
-    for (const perm of this.players[target.seat].battlefield) {
-      for (const e of perm.card.effects) {
-        if (e.kind === 'anthem' && this.anthemApplies(e, target, perm) && !(e.other && perm === target) && this.chargeOn(perm, e)) {
-          const times = e.perCharge ? perm.charge ?? 0 : 1;
-          p += e.p * times;
-          t += e.t * times;
-        }
+    for (const { perm, e } of this.anthemsOf(target.seat)) {
+      if (this.anthemApplies(e, target, perm) && !(e.other && perm === target) && this.chargeOn(perm, e)) {
+        const times = e.perCharge ? perm.charge ?? 0 : 1;
+        p += e.p * times;
+        t += e.t * times;
       }
     }
     // Elesh Norn, Grand Cenobite: "creatures your opponents control get -2/-2".
@@ -7029,6 +7109,18 @@ export class Game {
       t -= c.n;
     }
     return { p, t };
+  }
+
+  /** Anthem abilities on the permanents a seat controls, in battlefield order. */
+  private anthemsOf(seat: number): { perm: Perm; e: Extract<Effect, { kind: 'anthem' }> }[] {
+    const m = this.memo;
+    const kept = m?.anthems.get(seat);
+    if (kept && !verifyMemo) return kept;
+    const out: { perm: Perm; e: Extract<Effect, { kind: 'anthem' }> }[] = [];
+    if (this.kindsInGame.has('anthem')) for (const perm of this.players[seat].battlefield) for (const e of perm.card.effects) if (e.kind === 'anthem') out.push({ perm, e });
+    if (kept) return checkMemo(`anthems of seat ${seat}`, kept, out);
+    m?.anthems.set(seat, out);
+    return out;
   }
 
   /** A static ability that needs "N or more charge counters" on its source (Beastmaster Ascension) is on. */
@@ -7067,6 +7159,24 @@ export class Game {
   /** Equipment and Auras attached to `perm`. */
   attachments(perm: Perm): Perm[] {
     if (!this.anyAttached) return NONE;
+    const m = this.memo;
+    if (m) {
+      if (!m.attached) {
+        m.attached = new Map();
+        for (const q of this.players) for (const other of q.battlefield) {
+          if (other.attachedTo === null) continue;
+          const list = m.attached.get(other.attachedTo);
+          if (list) list.push(other);
+          else m.attached.set(other.attachedTo, [other]);
+        }
+      }
+      const kept = m.attached.get(perm.id) ?? NONE;
+      return verifyMemo ? checkMemo(`attachments of ${perm.card.name}`, kept, this.attachmentsNow(perm)) : kept;
+    }
+    return this.attachmentsNow(perm);
+  }
+
+  private attachmentsNow(perm: Perm): Perm[] {
     const out: Perm[] = [];
     for (const q of this.players) for (const other of q.battlefield) if (other.attachedTo === perm.id) out.push(other);
     return out;
@@ -7087,6 +7197,18 @@ export class Game {
   }
 
   power(perm: Perm): number {
+    const m = this.memo;
+    if (!m) return this.powerNow(perm);
+    const kept = m.power.get(perm);
+    if (kept === undefined) {
+      const v = this.powerNow(perm);
+      m.power.set(perm, v);
+      return v;
+    }
+    return verifyMemo ? checkMemo(`power of ${perm.card.name}`, kept, this.powerNow(perm)) : kept;
+  }
+
+  private powerNow(perm: Perm): number {
     if (perm.card.isCreature && this.usesToughness(perm)) return Math.max(0, this.toughness(perm));
     let p = this.baseSize(perm).p + perm.counters + perm.tempP + this.anthemBonus(perm).p + this.scaled(perm);
     for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') p += e.p;
@@ -7121,6 +7243,18 @@ export class Game {
   }
 
   toughness(perm: Perm): number {
+    const m = this.memo;
+    if (!m) return this.toughnessNow(perm);
+    const kept = m.toughness.get(perm);
+    if (kept === undefined) {
+      const v = this.toughnessNow(perm);
+      m.toughness.set(perm, v);
+      return v;
+    }
+    return verifyMemo ? checkMemo(`toughness of ${perm.card.name}`, kept, this.toughnessNow(perm)) : kept;
+  }
+
+  private toughnessNow(perm: Perm): number {
     let t = this.baseSize(perm).t + perm.counters + perm.tempT + this.anthemBonus(perm).t + (perm.card.scales?.toughness ? this.scaled(perm) : 0);
     for (const eq of this.attachments(perm)) for (const e of eq.card.effects) if (e.kind === 'equip') t += e.t;
     return t;
@@ -7138,8 +7272,24 @@ export class Game {
       }
     }
     if (!perm.card.isCreature) return false;
+    if (!this.kindsInGame.has('anthem') && !this.anyAttached) return false;
+    const m = this.memo;
+    if (!m) return this.grantedKw(perm, kw);
+    let byKw = m.kw.get(perm);
+    if (!byKw) m.kw.set(perm, (byKw = new Map()));
+    const kept = byKw.get(kw);
+    if (kept === undefined) {
+      const v = this.grantedKw(perm, kw);
+      byKw.set(kw, v);
+      return v;
+    }
+    return verifyMemo ? checkMemo(`${kw} on ${perm.card.name}`, kept, this.grantedKw(perm, kw)) : kept;
+  }
+
+  /** Keywords a creature gets from anthems ("creatures you control have flying") and from Equipment and Auras. */
+  private grantedKw(perm: Perm, kw: string): boolean {
     if (this.kindsInGame.has('anthem')) {
-      for (const q of this.players[perm.seat].battlefield) for (const e of q.card.effects) if (e.kind === 'anthem' && e.keywords?.includes(kw) && this.anthemApplies(e, perm, q) && !(e.other && q === perm) && this.chargeOn(q, e) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
+      for (const { perm: q, e } of this.anthemsOf(perm.seat)) if (e.keywords?.includes(kw) && this.anthemApplies(e, perm, q) && !(e.other && q === perm) && this.chargeOn(q, e) && (!e.small || perm.card.power + perm.counters <= 1 || perm.card.toughness + perm.counters <= 1)) return true;
     }
     for (const eq of this.attachments(perm)) {
       for (const e of eq.card.effects) if (e.kind === 'equip' && e.keywords.includes(kw)) return true;
@@ -7389,7 +7539,13 @@ export class Game {
   /** The Curses attached to `v`. */
   cursesOn(v: PlayerState): Perm[] {
     if (!this.anyCurse) return [];
-    return this.allPerms().filter((q) => q.cursing === v.seat && q.card.curse);
+    const m = this.memo;
+    const kept = m?.curses.get(v.seat);
+    if (kept && !verifyMemo) return kept;
+    const out = this.allPerms().filter((q) => q.cursing === v.seat && q.card.curse);
+    if (kept) return checkMemo(`curses on ${v.name}`, kept, out);
+    m?.curses.set(v.seat, out);
+    return out;
   }
 
   /** The abilities of this kind on Curses attached to `v`. */
@@ -7633,6 +7789,18 @@ export class Game {
   /** Static effects of one kind on the battlefield, with the permanent each is on. */
   private staticsOf<K extends Effect['kind']>(kind: K): { e: Extract<Effect, { kind: K }>; perm: Perm }[] {
     if (!this.kindsInGame.has(kind)) return [];
+    const m = this.memo;
+    if (!m) return this.staticsOfNow(kind);
+    const kept = m.staticsOf.get(kind) as { e: Extract<Effect, { kind: K }>; perm: Perm }[] | undefined;
+    if (kept === undefined) {
+      const v = this.staticsOfNow(kind);
+      m.staticsOf.set(kind, v);
+      return [...v];
+    }
+    return [...(verifyMemo ? checkMemo(`statics of ${kind}`, kept, this.staticsOfNow(kind)) : kept)];
+  }
+
+  private staticsOfNow<K extends Effect['kind']>(kind: K): { e: Extract<Effect, { kind: K }>; perm: Perm }[] {
     const out: { e: Extract<Effect, { kind: K }>; perm: Perm }[] = [];
     for (const q of this.players) {
       if (!q.alive) continue;
@@ -8038,10 +8206,23 @@ export class Game {
     // Putting triggers on the stack can change the game too (life paid for ward as targets are chosen), so state-based
     // actions are checked again until nothing more happens (rule 117.5).
     for (let round = 0; round < 5; round++) {
-      const before = this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join();
+      const before = this.vitals();
       yield* this.checkStateOnce();
-      if (this.over || this.players.map((q) => `${q.life}:${q.poison}:${q.alive}`).join() === before) return;
+      if (this.over || this.sameVitals(before)) return;
     }
+  }
+
+  /** Every player's life, poison and whether they are still in the game, to see whether anything changed. */
+  private vitals(): (number | boolean)[] {
+    const out: (number | boolean)[] = [];
+    for (const q of this.players) out.push(q.life, q.poison, q.alive);
+    return out;
+  }
+
+  private sameVitals(before: (number | boolean)[]): boolean {
+    let i = 0;
+    for (const q of this.players) if (!Object.is(before[i++], q.life) || !Object.is(before[i++], q.poison) || before[i++] !== q.alive) return false;
+    return true;
   }
 
   private *checkStateOnce(): Flow<void> {
@@ -8135,19 +8316,30 @@ export class Game {
     }
 
     const dying: Perm[] = [];
-    for (const q of this.players) {
-      if (!q.alive) continue;
-      for (const perm of q.battlefield) {
-        if (perm.card.isCreature) {
+    // Toughness and indestructible are worked out for every creature first, with nothing changing
+    // meanwhile; regeneration shields are used up afterwards, in the same order.
+    const checked = this.readOnly(() => {
+      const out: { perm: Perm; q: PlayerState; dies: boolean; lethal: boolean }[] = [];
+      for (const q of this.players) {
+        if (!q.alive) continue;
+        for (const perm of q.battlefield) {
+          if (!perm.card.isCreature) continue;
           // 704.5f: toughness 0 or less. 704.5g/h: lethal or deathtouch damage destroys.
           const toughness = this.toughness(perm);
-          if (toughness <= 0 || ((perm.damage >= toughness || perm.deathtouched) && !this.hasKw(perm, 'indestructible') && !this.regenerated(perm))) {
-            this.say(`${perm.card.name} (${q.name}) dies.`);
-            dying.push(perm);
-          } else {
-            perm.deathtouched = false;
-          }
+          const dies = toughness <= 0;
+          const lethal = (perm.damage >= toughness || perm.deathtouched) && !this.hasKw(perm, 'indestructible');
+          // A survivor only needs remembering to clear its deathtouch mark.
+          if (dies || lethal || perm.deathtouched) out.push({ perm, q, dies, lethal });
         }
+      }
+      return out;
+    });
+    for (const { perm, q, dies, lethal } of checked) {
+      if (dies || (lethal && !this.regenerated(perm))) {
+        this.say(`${perm.card.name} (${q.name}) dies.`);
+        dying.push(perm);
+      } else {
+        perm.deathtouched = false;
       }
     }
     // All state-based actions happen at the same time (rule 704.3), so these creatures die together.
@@ -8157,7 +8349,9 @@ export class Game {
     }
     for (const q of this.players) {
       if (!q.alive) continue;
-      for (const perm of [...q.battlefield]) {
+      // Most boards have none of these, so skip copying the battlefield then.
+      const watched = q.battlefield.some((perm) => perm.card.saga || perm.loyalty !== undefined || perm.cursing !== undefined || perm.attachedTo !== null);
+      for (const perm of watched ? [...q.battlefield] : NONE) {
         // 714.4: a Saga whose last chapter has resolved is sacrificed.
         if (perm.card.saga && (perm.lore ?? 0) >= perm.card.saga && q.battlefield.includes(perm) && !this.stack.some((s) => s.sourceId === perm.id) && !this.pending.some((t) => t.sourceId === perm.id)) {
           this.say(`${perm.card.name} (${q.name}) has finished its last chapter and is sacrificed.`);
@@ -8189,11 +8383,20 @@ export class Game {
       }
 
       // 704.5j: the legend rule. Its controller chooses which one to keep (asked in checkState).
-      const named = new Map<string, Perm[]>();
-      for (const perm of q.battlefield) if (perm.card.isLegendary && !perm.emblem) named.set(perm.card.name, [...(named.get(perm.card.name) ?? []), perm]);
-      for (const [name, perms] of named) if (perms.length > 1) this.pendingLegend.push({ seat: q.seat, name, ids: perms.map((x) => x.id) });
+      let named: Map<string, Perm[]> | null = null;
+      let twice = false;
+      for (const perm of q.battlefield) {
+        if (!perm.card.isLegendary || perm.emblem) continue;
+        named ??= new Map();
+        const same = named.get(perm.card.name);
+        if (same) {
+          same.push(perm);
+          twice = true;
+        } else named.set(perm.card.name, [perm]);
+      }
+      if (named && twice) for (const [name, perms] of named) if (perms.length > 1) this.pendingLegend.push({ seat: q.seat, name, ids: perms.map((x) => x.id) });
 
-      for (const perm of [...q.battlefield]) {
+      for (const perm of q.battlefield.some((x) => x.card.isBattle) ? [...q.battlefield] : NONE) {
         if (!perm.card.isBattle || !q.battlefield.includes(perm)) continue;
         // A Siege whose last defense counter is gone is defeated: exile it, then its controller may cast it transformed (rule 310.11b).
         if ((perm.defense ?? 0) <= 0) {

@@ -3,7 +3,7 @@ import type { SimDeck } from '../engine/types';
 import type { ForgeController } from '../sim/forgeController';
 import type { BuiltinController } from '../sim/builtinController';
 import { modeledFraction } from '../import/deck';
-import { formatCountdown } from '../sim/limit';
+import { formatCountdown, SETTLE_MARGIN } from '../sim/limit';
 import { computeRatings, emptyStats, wilson, type DeckStats, type Stats } from '../sim/stats';
 import type { AiProfileChoice, Settings } from '../storage';
 import type { DeckForgeCheck } from './useForgeCheck';
@@ -75,10 +75,17 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
     return () => clearInterval(id);
   }, [running, finishing, run?.stopAt]);
   let runStatus: string | null = null;
-  if (running && run?.stopAt) runStatus = `Stops starting new games in ${formatCountdown(run.stopAt - now)} · ${run.games.toLocaleString()} games this run`;
+  const settle = own ? builtin.settle : null;
+  const margin = (m: number) => `±${Math.round(m * 100)}`;
+  if (running && settle) {
+    runStatus = settle.widest && settle.widest.margin < 1
+      ? `Stops when every deck's win rate is known to ${margin(SETTLE_MARGIN)} points · least certain now: ${deckName(settle.widest.id)} at ${margin(settle.widest.margin)} · ${run?.games.toLocaleString() ?? 0} games this run`
+      : `Stops when every deck's win rate is known to ${margin(SETTLE_MARGIN)} points · ${run?.games.toLocaleString() ?? 0} games this run`;
+  } else if (running && run?.stopAt) runStatus = `Stops starting new games in ${formatCountdown(run.stopAt - now)} · ${run.games.toLocaleString()} games this run`;
   else if (running && run?.maxGames) runStatus = `${run.games.toLocaleString()} / ${run.maxGames.toLocaleString()} games this run`;
   else if (running) runStatus = `Running until you stop it · ${run?.games.toLocaleString() ?? 0} games this run`;
   else if (finishing) runStatus = `Limit reached — finishing the ${status?.activeGames ?? 0} game${status?.activeGames === 1 ? '' : 's'} already in progress…`;
+  else if (run?.finishedByLimit && settle?.settled) runStatus = `Run finished: every deck's win rate is known to ${margin(SETTLE_MARGIN)} points, after ${run.games.toLocaleString()} games this run.`;
   else if (run?.finishedByLimit) runStatus = `Run finished: reached its ${run.maxGames ? `${run.maxGames.toLocaleString()}-game` : 'time'} limit after ${run.games.toLocaleString()} games.`;
 
   const problems = own ? [] : forgeCheck ? activeDecks.filter((d) => (forgeCheck[d.id]?.missing.length ?? 0) > 0) : [];
@@ -150,9 +157,9 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
             </>
           )}
           <label>
-            <span>Run for <Help>How long to keep simulating: until you press Stop, for a set time, or for a set number of games. Separate from the per-game limit. Runs keep to this even with the browser closed; when time is up, games already in progress finish and still count.</Help></span>
+            <span>Run for <Help>How long to keep simulating: until you press Stop, for a set time, or for a set number of games. With the built-in engine, <strong>until the win rates settle</strong> stops by itself once every selected deck&apos;s win rate is known to within 5 points either way (95% confidence, at least 40 games each): usually enough to tell brackets apart, without waiting longer than needed. Separate from the per-game limit. Runs keep to this even with the browser closed; when time is up, games already in progress finish and still count.</Help></span>
             <select
-              value={settings.runMode === 'time' ? `t${settings.runMinutes}` : settings.runMode}
+              value={settings.runMode === 'time' ? `t${settings.runMinutes}` : settings.runMode === 'settled' && !own ? 'untilStopped' : settings.runMode}
               onChange={(e) => {
                 const v = e.target.value;
                 if (v.startsWith('t')) set({ runMode: 'time', runMinutes: +v.slice(1) });
@@ -161,6 +168,7 @@ export function SimPanel({ decks, activeDecks, forge, builtin, forgeCheck, profi
               disabled={running || finishing}
             >
               <option value="untilStopped">Until I stop</option>
+              {own && <option value="settled">Until the win rates settle (±5 points)</option>}
               {[15, 30, 60, 120, 240, 480, 720, 1440].map((m) => (
                 <option key={m} value={`t${m}`}>{m < 60 ? `${m} minutes` : `${m / 60} hour${m === 60 ? '' : 's'}`}</option>
               ))}
