@@ -42,6 +42,15 @@ export function archidektToRaw(oc: any, uid?: string): RawCard {
   };
 }
 
+const OUT_OF_DECK = /^(sideboard|maybeboard|considering)$/i;
+
+/** Whether an Archidekt card entry with these categories counts toward the deck. */
+export function entryInDeck(cats: string[], excluded: Set<string>): boolean {
+  if (cats.some((c) => OUT_OF_DECK.test(c.trim()))) return false;
+  if (cats.length && excluded.has(cats[0])) return false;
+  return true;
+}
+
 export async function importArchidekt(input: string): Promise<SimDeck> {
   const id = parseArchidektId(input);
   if (!id) throw new Error('That doesn\'t look like an Archidekt deck URL or id.');
@@ -50,7 +59,9 @@ export async function importArchidekt(input: string): Promise<SimDeck> {
   if (!res.ok) throw new Error(`Archidekt request failed (${res.status}).`);
   const data: any = await res.json();
 
-  // Categories flagged "not included in deck" (Maybeboard, Sideboard...) are skipped.
+  // Categories flagged "not included in deck" are skipped. Archidekt decides by a card's first
+  // (primary) category. Sideboard/Maybeboard/Considering are skipped by name too, because
+  // Archidekt leaves "Sideboard" flagged as included on many decks (its own count then shows 103).
   const excluded = new Set<string>(
     (data.categories ?? []).filter((c: any) => c.includedInDeck === false).map((c: any) => c.name),
   );
@@ -61,7 +72,8 @@ export async function importArchidekt(input: string): Promise<SimDeck> {
   const cards: ImportedCard[] = [];
   for (const entry of data.cards ?? []) {
     const cats: string[] = entry.categories ?? [];
-    if (cats.length && cats.every((c) => excluded.has(c))) continue;
+    if (entry.deletedAt) continue;
+    if (!entryInDeck(cats, excluded)) continue;
     const raw = archidektToRaw(entry.card.oracleCard, entry.card.uid);
     cards.push({
       card: classifyCard(raw),
